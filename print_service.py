@@ -1217,32 +1217,21 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             derived_hdr = build_test_report_derived(td, recipe_hdr, report_data.get("id"))
     last_val = _normalize_display_date_slash(fs.get("lastValidationDate", "N/A"))
     next_val = _normalize_display_date_slash(fs.get("nextValidationDate", "N/A"))
+    header_pairs = [
+        ("Company", fs.get("companyName", "N/A")),
+        ("Model No", fs.get("modelNo", "N/A")),
+        ("Serial No", fs.get("serialNo", "N/A")),
+        ("Location", fs.get("companyLocation", fs.get("location", "N/A"))),
+        ("Instrument ID", fs.get("instrumentId", "N/A")),
+        ("Last Val", last_val),
+        ("Next Val Due", next_val),
+    ]
     if thermal:
-        lines.extend(
-            [
-                "[LOGO]",
-                f"Model No: {fs.get('modelNo', 'N/A')}",
-                f"Serial No: {fs.get('serialNo', 'N/A')}",
-                f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
-                f"Instrument ID: {fs.get('instrumentId', 'N/A')}",
-                f"Last Val: {last_val}",
-                f"Next Val Due: {next_val}",
-            ]
-        )
+        lines.append("[LOGO]")
+        for label, value in header_pairs:
+            lines.append(f"{label}: {value}")
     else:
-        _append_two_column_pairs(
-            lines,
-            [
-                ("Company", fs.get("companyName", "N/A")),
-                ("Model No", fs.get("modelNo", "N/A")),
-                ("Serial No", fs.get("serialNo", "N/A")),
-                ("Location", fs.get("companyLocation", fs.get("location", "N/A"))),
-                ("Instrument ID", fs.get("instrumentId", "N/A")),
-                ("Last Val", last_val),
-                ("Next Val Due", next_val),
-            ],
-            width,
-        )
+        _append_two_column_pairs(lines, header_pairs, width)
     if not thermal:
         lines.append("")
     if rtype == "validation":
