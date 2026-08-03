@@ -112,6 +112,91 @@ def render_html_to_pdf(html: str, out_path: pathlib.Path, timeout_sec: float = 9
             pass
 
 
+def merge_pdfs(paths, out_path: pathlib.Path) -> None:
+    """Merge multiple PDFs into a single file at ``out_path``."""
+    inputs = [pathlib.Path(p) for p in paths if p]
+    if not inputs:
+        raise ValueError("merge_pdfs: no input PDFs")
+    out_path = pathlib.Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(inputs) == 1:
+        _copy_to_destination(inputs[0], out_path)
+        return
+
+    # Prefer pure-Python libraries when available.
+    for mod_name in ("pypdf", "PyPDF2"):
+        try:
+            mod = __import__(mod_name)
+            writer_cls = getattr(mod, "PdfWriter", None) or getattr(mod, "PdfFileWriter")
+            reader_cls = getattr(mod, "PdfReader", None) or getattr(mod, "PdfFileReader")
+            writer = writer_cls()
+            for pdf_path in inputs:
+                reader = reader_cls(str(pdf_path))
+                pages = getattr(reader, "pages", None)
+                if pages is not None:
+                    for page in pages:
+                        writer.add_page(page)
+                else:
+                    for index in range(reader.getNumPages()):
+                        writer.addPage(reader.getPage(index))
+            with open(out_path, "wb") as handle:
+                writer.write(handle)
+            if _looks_like_pdf(out_path):
+                return
+        except Exception as exc:
+            logger.warning("[PDF] %s merge failed: %s", mod_name, exc)
+
+    # System tools commonly available on Raspberry Pi images.
+    for cmd in (
+        ["pdfunite", *[str(p) for p in inputs], str(out_path)],
+        [
+            "gs",
+            "-dBATCH",
+            "-dNOPAUSE",
+            "-q",
+            "-sDEVICE=pdfwrite",
+            "-sOutputFile=" + str(out_path),
+            *[str(p) for p in inputs],
+        ],
+    ):
+        tool = shutil.which(cmd[0])
+        if not tool:
+            continue
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+            if proc.returncode == 0 and out_path.exists() and _looks_like_pdf(out_path):
+                return
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("[PDF] %s merge failed: %s", cmd[0], exc)
+
+    raise RuntimeError(
+        "Unable to merge PDF parts. Install pypdf (pip install pypdf) or pdfunite/poppler-utils on the machine."
+    )
+
+
+def render_html_chunks_to_pdf(html_chunks, out_path: pathlib.Path, timeout_sec: float = 180.0) -> None:
+    """Render one or more HTML documents and merge into a single PDF."""
+    chunks = [h for h in (html_chunks or []) if h]
+    if not chunks:
+        raise ValueError("render_html_chunks_to_pdf: no HTML chunks")
+    out_path = pathlib.Path(out_path)
+    if len(chunks) == 1:
+        render_html_to_pdf(chunks[0], out_path, timeout_sec=timeout_sec)
+        return
+
+    tmp_dir = tempfile.mkdtemp(prefix="kiosk_pdf_parts_")
+    part_paths = []
+    try:
+        for index, html in enumerate(chunks):
+            part = pathlib.Path(tmp_dir) / ("part-{:04d}.pdf".format(index))
+            render_html_to_pdf(html, part, timeout_sec=timeout_sec)
+            part_paths.append(part)
+        merge_pdfs(part_paths, out_path)
+        logger.info("[PDF] Merged %d parts into %s (%d bytes)", len(part_paths), out_path, out_path.stat().st_size)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def _looks_like_pdf(path: pathlib.Path) -> bool:
     """Verify the temp file actually starts with the %PDF- magic header."""
     try:
