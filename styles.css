@@ -1436,34 +1436,37 @@ body {
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    justify-content: flex-start;
+    justify-content: center;
     height: 100%;
+    min-height: 0;
+    width: 100%;
 }
 
 .settings-grid-container {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-    padding: 20px;
+    gap: 10px;
+    padding: 8px 12px;
     max-width: 100%;
     margin: 0 auto;
     align-items: stretch;
     width: 100%;
+    box-sizing: border-box;
 }
 
 .settings-card {
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: var(--radius-lg);
-    padding: var(--spacing-xl) var(--spacing-lg);
+    padding: 14px 12px;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: var(--spacing-md);
+    gap: 8px;
     cursor: pointer;
     transition: transform var(--transition-smooth), box-shadow var(--transition-smooth);
     box-shadow: var(--shadow-md);
-    min-height: 120px;
+    min-height: 96px;
     position: relative;
     overflow: hidden;
     color: white;
@@ -1488,25 +1491,25 @@ body {
 }
 
 .settings-icon {
-    width: 60px;
-    height: 60px;
+    width: 48px;
+    height: 48px;
     display: flex;
     align-items: center;
     justify-content: center;
     background: rgba(255, 255, 255, 0.15);
     border-radius: var(--radius-md);
-    margin-bottom: 4px;
+    margin-bottom: 0;
 }
 
 .settings-icon svg {
     color: white;
-    width: 36px;
-    height: 36px;
+    width: 28px;
+    height: 28px;
 }
 
 .settings-card h3 {
     color: white;
-    font-size: 18px;
+    font-size: 15px;
     font-weight: 600;
     text-align: center;
     margin: 0;
@@ -1591,11 +1594,12 @@ body {
     flex-direction: column;
     justify-content: center;
     align-items: center;
-    padding: 18px 16px;
+    padding: 8px 12px;
     min-height: 0;
     width: 100%;
     box-sizing: border-box;
     overflow: hidden;
+    gap: 6px;
 }
 
 .section-title {
@@ -1624,50 +1628,55 @@ body {
 
 #page-validate .validation-settings-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 18px;
+    gap: 14px;
     justify-items: center;
     width: 100%;
-    max-width: 760px;
+    max-width: 680px;
     margin-left: auto;
     margin-right: auto;
 }
 
 .validation-settings-grid .settings-card {
-    min-width: 260px;
-    max-width: 320px;
+    min-width: 220px;
+    max-width: 300px;
 }
 
 #page-validate .validation-settings-grid .settings-card {
-    min-width: 220px;
+    min-width: 200px;
     width: 100%;
-    max-width: 320px;
-    min-height: 180px;
-    padding: 20px 18px;
-    gap: 10px;
+    max-width: 300px;
+    min-height: 140px;
+    padding: 16px 14px;
+    gap: 8px;
 }
 
 #page-validate .validation-settings-grid .settings-icon {
-    width: 60px;
-    height: 60px;
-    margin-bottom: 2px;
+    width: 52px;
+    height: 52px;
+    margin-bottom: 0;
 }
 
 #page-validate .validation-settings-grid .settings-icon svg {
-    width: 34px;
-    height: 34px;
+    width: 30px;
+    height: 30px;
 }
 
 #page-validate .validation-settings-grid .settings-card h3 {
-    font-size: 21px;
+    font-size: 18px;
 }
 
 #page-validate .validation-settings-grid .settings-card p {
-    font-size: 14px;
-    line-height: 1.35;
+    font-size: 13px;
+    line-height: 1.3;
+}
+
+#page-validate .section-title {
+    margin-bottom: 4px;
 }
 
 #page-validate .section-subtitle {
-    margin-bottom: 14px;
+    margin-bottom: 10px;
+    font-size: 14px;
 }
 
 .settings-validate {
@@ -1943,14 +1952,16 @@ body {
 }
 
 /* ===== Validation Test Run — fits 528px content area (no top gap, button visible) ===== */
-.page-content:has(#page-validation-run.active) {
-    padding: 0 20px 10px;
+.page-content:has(#page-validation-run.active),
+.page-content:has(#page-test-run.active) {
+    padding: 0 16px 8px;
     overflow: hidden;
     display: flex;
     flex-direction: column;
 }
 
-#page-validation-run.active {
+#page-validation-run.active,
+#page-test-run.active {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -5934,6 +5945,7 @@ input[type="number"] {
 
 #page-settings.active {
     display: flex;
+    justify-content: center;
 }
 
 @media (max-width: 768px) {
@@ -6420,15 +6432,20 @@ input[type="number"] {
 /* ----- Aesthetic upgrade for Test Run page ----- */
 #page-test-run .leak-test-run-page {
     width: 100%;
-    max-width: 760px;
+    max-width: 900px;
     margin: 0 auto;
-    padding: 20px 20px 24px;
+    padding: 6px 8px 4px;
     border-radius: var(--radius-xl);
     background: linear-gradient(160deg, rgba(20, 28, 40, 0.88) 0%, rgba(12, 17, 26, 0.95) 100%);
     border: 1px solid rgba(56, 189, 248, 0.18);
     box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.05);
     box-sizing: border-box;
-    gap: 14px;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: 100%;
+    overflow: hidden;
+    justify-content: space-between;
 }
 
 #page-test-run .leak-test-run-page .val-run-params,
@@ -6438,7 +6455,12 @@ input[type="number"] {
 }
 
 #page-test-run .leak-test-run-page .val-run-params {
-    padding: 10px 14px;
+    padding: 6px 10px;
+    gap: 4px 8px;
+}
+
+#page-test-run .leak-test-run-page .val-run-param-value {
+    font-size: 16px;
 }
 
 #page-test-run .leak-test-run-page .val-run-panel {
@@ -6446,31 +6468,42 @@ input[type="number"] {
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
 }
 
+#page-test-run .leak-test-run-page .val-run-panel-inner {
+    padding: 8px 12px;
+    gap: 12px;
+}
+
 #page-test-run .leak-test-run-page .val-run-vacuum-metrics {
-    gap: 14px;
-    padding: 10px;
+    gap: 10px;
+    padding: 6px;
 }
 
 #page-test-run .leak-test-run-page .val-run-metric-card {
     background: rgba(15, 23, 42, 0.6);
     border: 1px solid rgba(56, 189, 248, 0.22);
+    padding: 8px 10px;
+}
+
+#page-test-run .leak-test-run-page .val-run-metric-value {
+    font-size: 28px;
 }
 
 #page-test-run .leak-test-run-page .val-run-shared-status {
     margin: 0;
-    padding: 14px 16px;
+    padding: 8px 12px;
     border-radius: var(--radius-lg);
     background: rgba(15, 23, 42, 0.48);
     border: 1px solid rgba(56, 189, 248, 0.16);
 }
 
 #page-test-run .leak-test-run-page .val-run-cta {
-    padding-bottom: 0;
+    padding-bottom: 2px;
+    flex-shrink: 0;
 }
 
 #page-test-run .leak-test-run-page .val-run-start-btn {
     width: min(280px, 100%);
-    min-height: 48px;
+    min-height: 44px;
     font-size: 15px;
     border-radius: calc(var(--radius-lg) - 2px);
     box-shadow: 0 6px 20px rgba(0, 122, 255, 0.32);
@@ -6478,9 +6511,9 @@ input[type="number"] {
 
 @media (max-width: 768px) {
     #page-test-run .leak-test-run-page {
-        padding: 14px 12px 16px;
+        padding: 6px 8px 4px;
         border-radius: var(--radius-lg);
-        gap: 10px;
+        gap: 6px;
     }
 
     #page-test-run .leak-test-run-page .val-run-vacuum-metrics {
@@ -6490,6 +6523,21 @@ input[type="number"] {
     #page-test-run .leak-test-run-page .val-run-start-btn {
         width: 100%;
     }
+}
+
+/* Settings + Validation: remove default page-content top padding so cards sit centered */
+.page-content:has(#page-settings.active),
+.page-content:has(#page-validate.active) {
+    padding: 8px 16px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.page-content:has(#page-settings.active) > #page-settings.active,
+.page-content:has(#page-validate.active) > #page-validate.active {
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
 /* IP Configure (same card/page layout as DT-Bath-CFR21) */
