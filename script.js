@@ -2862,6 +2862,9 @@ function loginBiometric() {
         });
     }).then(function (result) {
         var data = result.body || {};
+        if (data && (data.cancelled || String(data.error || '').toLowerCase() === 'cancelled')) {
+            return;
+        }
         if (result.ok && data.success && data.user) {
             window.currentUser = data.user;
             try { localStorage.setItem('currentUser', JSON.stringify(data.user)); } catch (e) {}
@@ -3061,8 +3064,30 @@ function _cancelBiometricEnrollSession() {
     }).catch(function () {});
 }
 
+function _stopBiometricSensorScan() {
+    // Fire-and-forget: tell the Pi to stop GenImg polling so the sensor LED stops.
+    try {
+        var url = (API_BASE || '') + '/api/biometric/cancel';
+        if (typeof fetch === 'function') {
+            fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            }).catch(function () {});
+            return;
+        }
+    } catch (e) { /* ignore */ }
+    try {
+        apiRequest(API_BASE + '/api/biometric/cancel', {
+            method: 'POST',
+            body: {}
+        }).catch(function () {});
+    } catch (e2) { /* ignore */ }
+}
+
 function cancelBiometricProgress() {
     _biometricEnrollCancelled = true;
+    _stopBiometricSensorScan();
     if (typeof window._loginBiometricAbort === 'function') {
         window._loginBiometricAbort();
         hideBiometricProgressOverlay();

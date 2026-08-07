@@ -2924,6 +2924,8 @@ def login_biometric():
         timeout_sec = float(payload.get("timeoutSec") or BIOMETRIC_LOGIN_TIMEOUT_SEC)
         identified = biometric_service.identify(timeout_sec=timeout_sec)
         if not identified.get("ok"):
+            if identified.get("cancelled") or str(identified.get("error") or "").lower() == "cancelled":
+                return jsonify({"error": "cancelled", "cancelled": True}), 400
             return jsonify({"error": identified.get("error") or "Fingerprint not recognized"}), 401
 
         template_id = identified.get("templateId")
@@ -3129,6 +3131,8 @@ def approval_verify():
             timeout_sec = float(payload.get("timeoutSec") or BIOMETRIC_LOGIN_TIMEOUT_SEC)
             identified = biometric_service.identify(timeout_sec=timeout_sec)
             if not identified.get("ok"):
+                if identified.get("cancelled") or str(identified.get("error") or "").lower() == "cancelled":
+                    return jsonify({"ok": False, "error": "cancelled", "cancelled": True}), 400
                 _audit_event(
                     action="Approval verification",
                     outcome="failed",
@@ -5142,13 +5146,26 @@ def biometric_enroll_capture():
 @app.route("/api/biometric/enroll/cancel", methods=["POST"])
 def biometric_enroll_cancel():
     try:
+        # Stop sensor GenImg polling immediately (same as UI Cancel during login/verify).
+        biometric_service.request_cancel()
         payload = request.get_json(force=True, silent=True) or {}
         username = str(payload.get("username") or "").strip()
         if username:
             _clear_enroll_session(username)
-        return jsonify({"ok": True}), 200
+        return jsonify({"ok": True, "cancelled": True}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/biometric/cancel", methods=["POST"])
+def biometric_cancel_scan():
+    """Stop any in-flight fingerprint wait so the sensor LED stops blinking."""
+    try:
+        result = biometric_service.request_cancel()
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @app.route("/api/biometric/delete", methods=["POST"])
 def biometric_delete():
