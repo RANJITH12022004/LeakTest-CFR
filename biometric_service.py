@@ -19,6 +19,8 @@ _config = {}
 _port = None
 _ser = None
 _lock = threading.Lock()
+# Set by UI Cancel so an in-flight GenImg poll loop exits and stops LED blinking.
+_cancel_requested = threading.Event()
 
 # In-memory R307 stand-in when BIOMETRIC_MOCK=1 (no UART sensor required).
 _mock_templates = set()
@@ -309,17 +311,47 @@ def get_template_count():
     return {"ok": True, "count": cnt}
 
 
+def clear_cancel():
+    """Clear cancel before starting a new capture/identify."""
+    _cancel_requested.clear()
+
+
+def request_cancel():
+    """Ask any in-flight finger wait to stop (UI Cancel).
+
+    The current GenImg command may finish (~1s), then polling stops so the
+    sensor LED stops blinking.
+    """
+    _cancel_requested.set()
+    return {"ok": True, "cancelled": True}
+
+
+def is_cancel_requested():
+    return _cancel_requested.is_set()
+
+
 def _wait_for_finger(timeout_sec=10.0):
     if mock_mode():
-        time.sleep(0.15)
+        # Short slices so mock cancel is responsive.
+        end = time.time() + min(float(timeout_sec), 0.15)
+        while time.time() < end:
+            if _cancel_requested.is_set():
+                return {"ok": False, "error": "cancelled", "cancelled": True, "code": None}
+            time.sleep(0.05)
+        if _cancel_requested.is_set():
+            return {"ok": False, "error": "cancelled", "cancelled": True, "code": None}
         return _mock_ok()
     end = time.time() + timeout_sec
     while time.time() < end:
+        if _cancel_requested.is_set():
+            return {"ok": False, "error": "cancelled", "cancelled": True, "code": None}
         got = _exec(bytes([_CMD_GEN_IMAGE]), timeout_sec=1.5)
+        if _cancel_requested.is_set():
+            return {"ok": False, "error": "cancelled", "cancelled": True, "code": None}
         if got.get("ok"):
             return {"ok": True}
         if got.get("code") in (_CONFIRM_NO_FINGER, _CONFIRM_IMAGE_MESSY):
-            time.sleep(0.2)
+            time.sleep(0.15)
             continue
         return got
     return {"ok": False, "error": "Timed out waiting for finger"}
@@ -340,6 +372,7 @@ def _capture_to_buffer(buffer_id, timeout_sec=10.0):
 
 def capture_enroll_finger(buffer_id, timeout_sec=10.0):
     """Capture one fingerprint image into enroll buffer 1 or 2."""
+    clear_cancel()
     buffer_id = int(buffer_id)
     if buffer_id not in (0x01, 0x02):
         return {"ok": False, "error": "buffer_id must be 1 or 2"}
@@ -393,6 +426,7 @@ def enroll(template_id, capture_timeout_sec=10.0):
 
 
 def identify(timeout_sec=10.0):
+    clear_cancel()
     if mock_mode():
         if _truthy(_config.get("BIOMETRIC_MOCK_NO_MATCH") or os.environ.get("BIOMETRIC_MOCK_NO_MATCH")):
             return {"ok": False, "mock": True, "error": "Fingerprint not recognized", "code": _CONFIRM_NOT_FOUND}
