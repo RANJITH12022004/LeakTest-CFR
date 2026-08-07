@@ -2578,11 +2578,18 @@ def _password_strength_error(password: str) -> str:
 
 
 def _release_esp_pressure_on_login():
-    """Best-effort ESP stop after successful login so trapped vacuum/pressure is released."""
-    try:
-        hardware_service.cmd_stop()
-    except Exception:
-        app.logger.exception("ESP stop after login failed (login still succeeds)")
+    """Best-effort ESP stop after successful login so trapped vacuum/pressure is released.
+
+    Runs in a background thread: ESP #STOP* can take many seconds (or time out ~45s)
+    when the MCU does not ACK, and must not block the login HTTP response.
+    """
+    def _worker():
+        try:
+            hardware_service.cmd_stop()
+        except Exception:
+            app.logger.exception("ESP stop after login failed (login still succeeds)")
+
+    threading.Thread(target=_worker, name="esp-stop-on-login", daemon=True).start()
 
 
 @app.route("/api/data/auth/login", methods=["POST"])
