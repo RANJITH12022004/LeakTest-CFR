@@ -7,7 +7,7 @@
     <meta name="viewport"
         content="width=1024, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Leak Test Apparatus</title>
-    <link rel="stylesheet" href="styles.css?v=41">
+    <link rel="stylesheet" href="styles.css?v=42">
 </head>
 
 <body>
@@ -79,7 +79,7 @@
         <div class="role-modal" style="max-width: 480px;">
             <h3 id="calibration-gauge-modal-title">External Gauge Reading</h3>
             <p id="calibration-gauge-modal-text" class="section-subtitle" style="margin-bottom: 16px;">
-                Enter the actual pressure measured on the external gauge (mmHg). The device will send the difference from the set vacuum to the ESP.
+                Enter the actual pressure measured on the external gauge (mmHg). This value is sent to the ESP as CALIBVALUE.
             </p>
             <div class="form-group">
                 <label for="cal-gauge-pressure-input">Actual Pressure (mmHg) <span class="required">*</span></label>
@@ -89,7 +89,7 @@
             </div>
             <div class="role-modal-buttons">
                 <button type="button" class="btn-role-select btn-role-user" id="cal-gauge-cancel-btn">Cancel</button>
-                <button type="button" class="btn-role-select btn-validation-pass" id="cal-gauge-submit-btn">Submit</button>
+                <button type="button" class="btn-role-select btn-validation-pass" id="cal-gauge-submit-btn">Calibrate</button>
             </div>
         </div>
     </div>
@@ -1477,9 +1477,19 @@
                             <div class="validation-card-label">Status</div>
                             <span class="validation-card-value" id="cal-run-status">Ready to start</span>
                         </div>
+                        <div id="cal-gauge-entry-panel" class="validation-card calibration-gauge-entry-card" hidden>
+                            <div class="validation-card-label">Actual pressure (external gauge)</div>
+                            <div class="calibration-gauge-entry-row">
+                                <input type="number" id="cal-page-gauge-input" class="input-field cal-actual-vacuum-input"
+                                    min="1" max="650" step="0.1" placeholder="mmHg" inputmode="decimal" disabled
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                <button type="button" class="btn btn-primary" id="btn-calibration-apply" disabled
+                                    onclick="submitVacuumCalibrationGauge()">Calibrate</button>
+                            </div>
+                        </div>
                         <div class="quick-test-actions calibration-actions">
                             <button type="button" class="btn btn-primary" id="btn-calibration-start" onclick="confirmVacuumCalibration()">Start Calibration</button>
-                            <button type="button" class="btn btn-secondary" onclick="abortVacuumCalibration()">Back</button>
+                            <button type="button" class="btn btn-secondary" id="btn-calibration-back" onclick="abortVacuumCalibration()">Back</button>
                         </div>
                     </div>
                 </div>
@@ -2127,9 +2137,9 @@
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=3"></script>
     <script src="rbac.js?v=6"></script>
-    <script src="script.js?v=76"></script>
+    <script src="script.js?v=77"></script>
     <script src="leaktest_patch.js?v=2"></script>
-    <script src="validation_vd.js?v=16"></script>
+    <script src="validation_vd.js?v=17"></script>
 </body>
 
 </html>

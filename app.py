@@ -3945,20 +3945,15 @@ def hardware_calibration_apply():
     data = request.get_json(force=True, silent=True) or {}
     factory = data_service.get_factory_settings() or {}
     try:
-        if data.get("calibDiff") is not None:
-            calib_diff = float(data.get("calibDiff"))
-        elif data.get("gaugeValue") is not None and data.get("setVacuumMmHg") is not None:
-            calib_diff = float(data.get("gaugeValue")) - float(data.get("setVacuumMmHg"))
-        elif data.get("calibValue") is not None and data.get("setVacuumMmHg") is not None:
-            # Legacy body: treat calibValue as gauge reading, send gauge−set.
-            calib_diff = float(data.get("calibValue")) - float(data.get("setVacuumMmHg"))
+        # Absolute external-gauge reading the operator entered (not a difference).
+        if data.get("gaugeValue") is not None:
+            calib_value = float(data.get("gaugeValue"))
         elif data.get("calibValue") is not None:
-            # Last resort: body already carries the signed difference.
-            calib_diff = float(data.get("calibValue"))
+            calib_value = float(data.get("calibValue"))
         else:
-            return jsonify({"ok": False, "error": "calibDiff or gaugeValue+setVacuumMmHg is required"}), 400
+            return jsonify({"ok": False, "error": "gaugeValue (actual pressure) is required"}), 400
     except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "Invalid calibration difference"}), 400
+        return jsonify({"ok": False, "error": "Invalid calibration value"}), 400
     try:
         release_time = int(
             data.get("releaseTimeSec")
@@ -3967,23 +3962,21 @@ def hardware_calibration_apply():
         )
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "Invalid release time"}), 400
-    gauge_value = data.get("gaugeValue")
+    gauge_value = calib_value
     set_vacuum = data.get("setVacuumMmHg")
     try:
-        if gauge_value is not None:
-            gauge_value = float(gauge_value)
         if set_vacuum is not None:
             set_vacuum = float(set_vacuum)
     except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "Invalid gauge or set vacuum"}), 400
+        return jsonify({"ok": False, "error": "Invalid set vacuum"}), 400
     result = hardware_service.cmd_apply_calibration(
-        calib_diff,
+        calib_value,
         release_time_sec=release_time,
         gauge_value=gauge_value,
         set_vacuum_mmhg=set_vacuum,
     )
     if result.get("ok"):
-        token = result.get("calibValueToken") or str(int(round(calib_diff)))
+        token = result.get("calibValueToken") or str(int(round(calib_value)))
         _audit_event(
             action="Calibration applied",
             outcome="success",
@@ -3991,7 +3984,7 @@ def hardware_calibration_apply():
             entity_name="vacuum",
             details=f"CALIBVALUE={token} gauge={gauge_value} set={set_vacuum}",
             extra={
-                "calibDiff": calib_diff,
+                "calibValue": calib_value,
                 "calibValueToken": token,
                 "gaugeValue": gauge_value,
                 "setVacuumMmHg": set_vacuum,
