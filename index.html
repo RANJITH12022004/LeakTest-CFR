@@ -110,9 +110,9 @@
                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
             </div>
             <div class="form-group">
-                <label for="load-recipe-samples-input">No. of Samples <span class="required">*</span></label>
-                <input type="number" id="load-recipe-samples-input" class="input-field" min="0" max="999"
-                    inputmode="numeric" value="0"
+                <label for="load-recipe-samples-input">No. of Samples (optional)</label>
+                <input type="number" id="load-recipe-samples-input" class="input-field" min="1"
+                    inputmode="numeric" value=""
                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
             </div>
             <div class="form-group">
@@ -259,7 +259,7 @@
         <main class="main-content">
             <header class="app-header">
                 <div class="header-left">
-                    <img id="header-logo" src="./assets/rle_logo.png" alt="Raise Lab Equipment" class="company-logo"
+                    <img id="header-logo" src="./assets/rle_logo.png" alt="Leak Test Apparatus" class="company-logo"
                         onclick="goToPage('home')" style="cursor: pointer;">
                     <div id="header-back-btn" class="header-back-btn" onclick="goBack()"
                         style="display: none; cursor: pointer;" title="Back">
@@ -651,9 +651,9 @@
                                 <div class="qt-zone-label">Test parameters</div>
                                 <div class="qt-param-grid qt-meta-grid">
                                     <div class="qt-param-block qt-meta-block">
-                                        <label class="qt-field-label" for="recipe-no-of-samples">No. of Samples</label>
-                                        <input type="number" id="recipe-no-of-samples" class="input-field qt-input-samples" min="1" max="999"
-                                            inputmode="numeric" value="1"
+                                        <label class="qt-field-label" for="recipe-no-of-samples">No. of Samples (optional)</label>
+                                        <input type="number" id="recipe-no-of-samples" class="input-field qt-input-samples" min="1"
+                                            inputmode="numeric" value=""
                                             oninput="if(typeof updateCreateRecipeContinueButton==='function') updateCreateRecipeContinueButton();"
                                             onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                                     </div>
@@ -900,7 +900,7 @@
                         <div class="report-preview-container report-print-template" id="report-content">
                             <pre id="report-a4-text-preview" class="report-a4-text-preview" style="display: none;" aria-label="Thermal report preview"></pre>
                             <div id="report-legacy-preview">
-                            <h1 id="report-main-title">RAISE LAB EQUIPMENT LEAK TEST REPORT</h1>
+                            <h1 id="report-main-title">LEAK TEST APPARATUS TEST REPORT</h1>
                             <table class="report-ident-table">
                                 <tr>
                                     <th>Company</th>
@@ -1123,7 +1123,7 @@
                 <div class="page" id="page-recipe-print-preview">
                     <div class="reports-container" style="overflow-y: auto;">
                         <div class="report-preview-container recipe-print-container" id="recipe-print-content">
-                            <h1>RAISE LAB EQUIPMENT</h1>
+                            <h1>LEAK TEST APPARATUS</h1>
                             <h2>Leak Test Apparatus - Recipe</h2>
                             <h2 id="recipe-print-company-name">COMPANY NAME</h2>
                             <table class="report-ident-table">
@@ -2152,9 +2152,9 @@
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=3"></script>
     <script src="rbac.js?v=8"></script>
-    <script src="script.js?v=85"></script>
+    <script src="script.js?v=89"></script>
     <script src="leaktest_patch.js?v=2"></script>
-    <script src="validation_vd.js?v=19"></script>
+    <script src="validation_vd.js?v=22"></script>
 </body>
 
 </html>

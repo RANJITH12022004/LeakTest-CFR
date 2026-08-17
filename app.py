@@ -364,30 +364,42 @@ def _audit_event(
 
 
 
-POWER_INTERRUPTION_REMARKS = "power interruption"
+POWER_INTERRUPTION_REMARKS = "Power interruption"
+POWER_INTERRUPTION_SYSTEM_APPROVER = "System"
 
 
 def _apply_power_loss_abort_to_report(report: dict) -> dict:
-    """Mark a report aborted after power loss with mandatory power-interruption remarks."""
+    """Mark a report Fail + system-approved after power loss (only this path may system-approve)."""
     report = dict(report or {})
     td = report.get("testData")
     if not isinstance(td, dict):
         td = {}
     else:
         td = dict(td)
-    td["status"] = "aborted"
+    now = _utc_now_iso()
+    td["status"] = "failed"
     td["remarks"] = POWER_INTERRUPTION_REMARKS
+    td["result"] = "Fail"
+    td["passFail"] = "Fail"
     report["testData"] = td
     report["remarks"] = POWER_INTERRUPTION_REMARKS
-    report["status"] = "aborted"
-    report["reportApprovalStatus"] = "aborted"
+    report["status"] = "failed"
+    report["result"] = "Fail"
+    report["passFail"] = "Fail"
+    report["approvalPassFail"] = "Fail"
+    report["reportApprovalStatus"] = "approved"
+    report["approvedBy"] = POWER_INTERRUPTION_SYSTEM_APPROVER
+    report["approvedByName"] = POWER_INTERRUPTION_SYSTEM_APPROVER
+    report["approvedByUsername"] = POWER_INTERRUPTION_SYSTEM_APPROVER
+    report["approvalRemarks"] = "Auto-approved — Power interruption"
+    report["approvedAt"] = now
     if not report.get("completedAt"):
-        report["completedAt"] = _utc_now_iso()
+        report["completedAt"] = now
     return report
 
 
 def _audit_power_loss_aborted_report(report: dict) -> None:
-    """Generate PDF and audit rows for a report already saved as power-loss aborted."""
+    """Generate PDF and audit rows for a power-loss system auto-approved Fail report."""
     rid = report.get("id")
     if rid is None:
         return
@@ -396,24 +408,26 @@ def _audit_power_loss_aborted_report(report: dict) -> None:
         pdf_ok = _generate_report_pdf_file(int(rid), write_audit=False)
     except Exception:
         pdf_ok = False
-        app.logger.exception("Aborted-report PDF after power loss failed for id %s", rid)
-    pl_detail = "{} | unclean shutdown | remarks: {}".format(ctx, POWER_INTERRUPTION_REMARKS)
+        app.logger.exception("Power-loss report PDF failed for id %s", rid)
+    pl_detail = "{} | unclean shutdown | remarks: {} | approved by System".format(
+        ctx, POWER_INTERRUPTION_REMARKS
+    )
     if pdf_ok:
-        pl_detail = "{} | aborted PDF saved".format(pl_detail)
-    _audit(None, None, "Report aborted (power loss)", pl_detail)
+        pl_detail = "{} | PDF saved".format(pl_detail)
+    _audit("System", "System", "Report auto-approved (power interruption)", pl_detail)
     if pdf_ok:
         _audit_report_pdf_generated(int(rid), report)
 
 
 def _abort_pending_reports_after_power_loss(session_username):
-    """Mark in-progress pending reports as aborted after unclean shutdown (power loss)."""
+    """Finalize pending reports as Fail + system-approved after unclean shutdown (power loss)."""
     un = _norm_username(session_username)
     if not un:
         return 0
     aborted = 0
     for report in data_service.list_reports("all") or []:
         rtype = (report.get("type") or "").strip().lower()
-        if rtype not in ("test", "validation"):
+        if rtype not in ("test", "validation", "calibration"):
             continue
         if (report.get("reportApprovalStatus") or "").strip().lower() != "pending":
             continue
@@ -427,7 +441,7 @@ def _abort_pending_reports_after_power_loss(session_username):
 
 
 def _create_aborted_report_from_power_loss_checkpoint(session_username):
-    """If a test was in progress (checkpoint) but no pending report existed, save an aborted report."""
+    """If a run was in progress (checkpoint) but no pending report existed, save Fail + system-approved report."""
     un = _norm_username(session_username)
     if not un:
         data_service.clear_test_run_data()
@@ -436,7 +450,7 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username):
     if not isinstance(cp, dict) or not cp:
         return 0
     rtype = (cp.get("type") or "").strip().lower()
-    if rtype != "test":
+    if rtype not in ("test", "validation", "calibration"):
         data_service.clear_test_run_data()
         return 0
     td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
@@ -450,6 +464,8 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username):
     if op and op != un:
         return 0
     report_data = dict(cp)
+    if not report_data.get("type"):
+        report_data["type"] = rtype
     recipe = report_data.get("recipe") or (td.get("recipe") if isinstance(td, dict) else None)
     enriched = report_service.generate_report(
         report_data,
@@ -1299,7 +1315,7 @@ def put_test_run_checkpoint():
         if gate:
             return gate
         gate = _require_any_session_internal(
-            ["quick-test", "recipe-test"],
+            ["quick-test", "recipe-test", "validation-test", "calibration-menu"],
             "Forbidden. You do not have permission to run tests.",
         )
         if gate:
@@ -1734,6 +1750,12 @@ def update_member(member_id):
         before_member = data_service.get_member(member_id)
         if not before_member:
             return jsonify({"error": "Member not found"}), 404
+        new_status = str(member_data.get("status") or "").strip().lower()
+        old_status = str(before_member.get("status") or "active").strip().lower()
+        if new_status == "disabled" and old_status != "disabled":
+            return jsonify({
+                "error": "Use DELETE /api/data/members/{id} with admin verification to disable a member."
+            }), 400
         is_self = _is_self_member(member_id)
         if is_self:
             try:
@@ -1816,6 +1838,9 @@ def delete_member(member_id):
         member = data_service.get_member(member_id)
         if not member:
             return jsonify({"error": "Member not found"}), 404
+        target = (member.get("username") or member.get("name") or "").strip() or "--"
+        actor_info = _audit_actor()
+        actor = (actor_info.get("user") or "").strip() or "--"
         verified, verify_err = _require_user_admin_verification()
         if not verified:
             _audit_event(
@@ -1823,12 +1848,16 @@ def delete_member(member_id):
                 outcome="denied",
                 entity_type="member",
                 entity_id=member_id,
-                entity_name=member.get("username") or member.get("name") or "",
-                details=verify_err or "Approval verification required",
-                target_user=member.get("username") or "",
+                entity_name=target,
+                details="{} attempted to disable {}: {}".format(
+                    actor, target, verify_err or "Approval verification required"
+                ),
+                target_user=target,
                 before=member,
+                actor_user=actor,
             )
             return jsonify({"error": verify_err}), 403
+        verifier_name = (verified.get("username") or verified.get("name") or actor or "--").strip() or "--"
         before_member = dict(member)
         template_id = member.get("fingerprintTemplateId")
         if template_id is not None:
@@ -1839,12 +1868,18 @@ def delete_member(member_id):
                     outcome="failed",
                     entity_type="member",
                     entity_id=member_id,
-                    entity_name=member.get("username") or member.get("name") or "",
-                    details=deleted.get("error") or "Failed to delete fingerprint template from sensor",
-                    target_user=member.get("username") or "",
+                    entity_name=target,
+                    details="{} attempted to disable {}: {}".format(
+                        verifier_name,
+                        target,
+                        deleted.get("error") or "Failed to delete fingerprint template from sensor",
+                    ),
+                    target_user=target,
                     before=before_member,
                     signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
                     extra={"templateId": template_id},
+                    actor_user=verifier_name,
+                    actor_role=verified.get("role"),
                 )
                 return jsonify({
                     "error": deleted.get("error") or "Failed to delete fingerprint template from sensor",
@@ -1857,13 +1892,15 @@ def delete_member(member_id):
             outcome="success",
             entity_type="member",
             entity_id=member_id,
-            entity_name=member.get("username") or member.get("name") or "",
-            details="Member disabled: {}".format(member.get("username") or member.get("name") or ""),
-            target_user=member.get("username") or "",
+            entity_name=target,
+            details="{} disabled {}".format(verifier_name, target),
+            target_user=target,
             before=before_member,
             after=member,
             signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
             extra={"templateIdFreed": template_id},
+            actor_user=verifier_name,
+            actor_role=verified.get("role"),
         )
         return jsonify({"success": True, "member": member}), 200
     except ValueError as e:
@@ -1920,17 +1957,20 @@ def enable_member_route(member_id):
             "role": (cur.get("role") or "").strip() or "--",
         }
         member = data_service.enable_member(member_id)
+        target = (member.get("username") or member.get("name") or "").strip() or "--"
+        actor = (sig.get("username") or "--").strip() or "--"
         _audit_event(
             action="User enabled",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
-            entity_name=member.get("username") or member.get("name") or "",
-            details="Member enabled: {}".format(member.get("username") or member.get("name") or ""),
-            target_user=member.get("username") or "",
+            entity_name=target,
+            details="{} enabled {}".format(actor, target),
+            target_user=target,
             before=data_service.sanitize_member_for_client(before_member) if before_member else None,
             after=data_service.sanitize_member_for_client(member) or member,
             signature=sig,
+            actor_user=actor,
         )
         safe = data_service.sanitize_member_for_client(member) or dict(member)
         return jsonify({"success": True, "member": safe}), 200
@@ -3870,6 +3910,9 @@ def print_a4():
             gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to print reports.")
             if gate:
                 return gate
+        print_actor = _audit_actor()
+        actor_user = print_actor.get("user") or "--"
+        actor_role = print_actor.get("role") or "--"
         if data.get("type") == "recipe" and data.get("recipe_data"):
             recipe_data = dict(data["recipe_data"])
             if not recipe_data.get("factorySettings"):
@@ -3881,7 +3924,7 @@ def print_a4():
                     pass
             result = print_service.print_recipe_a4(recipe_data)
             rname = recipe_data.get("productName") or recipe_data.get("name") or ""
-            _audit(None, None, "Print A4", "recipe | {}".format(rname or "—"))
+            _audit(actor_user, actor_role, "Print A4", "recipe | {}".format(rname or "—"))
             return jsonify(result), 200
         report_data = data.get("report_data", {}) or {}
         report_id = report_data.get("id")
@@ -3898,7 +3941,7 @@ def print_a4():
                     pass
                 result = print_service.print_a4_report(report_data)
                 if result.get("success"):
-                    _audit(None, None, "Print A4", "Report id {}".format(report_id))
+                    _audit(actor_user, actor_role, "Print A4", "Report id {}".format(report_id))
                 return jsonify(result), 200 if result.get("success") else 500
         blocked = _check_report_approved_for_print_export(report_data=report_data)
         if blocked is not None:
@@ -3915,8 +3958,8 @@ def print_a4():
         result = print_service.print_a4_report(report_data)
         rid = report_data.get("id")
         _audit(
-            None,
-            None,
+            actor_user,
+            actor_role,
             "Print A4",
             "Report id {}".format(rid if rid is not None else "—"),
         )
@@ -3941,6 +3984,9 @@ def print_thermal():
             gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to print reports.")
             if gate:
                 return gate
+        print_actor = _audit_actor()
+        actor_user = print_actor.get("user") or "--"
+        actor_role = print_actor.get("role") or "--"
         if data.get("type") == "recipe" and data.get("recipe_data"):
             recipe_data = dict(data["recipe_data"])
             if not recipe_data.get("factorySettings"):
@@ -3952,7 +3998,7 @@ def print_thermal():
                     pass
             result = print_service.print_recipe_thermal(recipe_data)
             rname = recipe_data.get("productName") or recipe_data.get("name") or ""
-            _audit(None, None, "Print thermal", "recipe | {}".format(rname or "—"))
+            _audit(actor_user, actor_role, "Print thermal", "recipe | {}".format(rname or "—"))
             return jsonify(result), 200
         report_data = data.get("report_data", {}) or {}
         report_id = report_data.get("id")
@@ -3969,7 +4015,7 @@ def print_thermal():
                     pass
                 result = print_service.print_thermal_report(report_data)
                 if result.get("success"):
-                    _audit(None, None, "Print thermal", "Report id {}".format(report_id))
+                    _audit(actor_user, actor_role, "Print thermal", "Report id {}".format(report_id))
                 return jsonify(result), 200 if result.get("success") else 500
         blocked = _check_report_approved_for_print_export(report_data=report_data)
         if blocked is not None:
@@ -3986,8 +4032,8 @@ def print_thermal():
         result = print_service.print_thermal_report(report_data)
         rid = report_data.get("id")
         _audit(
-            None,
-            None,
+            actor_user,
+            actor_role,
             "Print thermal",
             "Report id {}".format(rid if rid is not None else "—"),
         )
@@ -4324,8 +4370,8 @@ def hardware_leak_start():
 @app.route("/api/hardware/leak/stop", methods=["POST"])
 def hardware_leak_stop():
     gate = _require_any_session_internal(
-        ["quick-test", "recipe-test"],
-        "Forbidden. You do not have permission to run tests.",
+        ["quick-test", "recipe-test", "validation-test", "calibration-menu"],
+        "Forbidden. You do not have permission to stop hardware.",
     )
     if gate:
         return gate
@@ -4704,4 +4750,4 @@ def serve_static(path):
 
 
 if __name__ == "__main__":
-    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=False)
+    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=False, threaded=True)

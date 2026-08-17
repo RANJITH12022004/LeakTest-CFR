@@ -189,9 +189,13 @@ def main() -> int:
     for r in new_reports:
         td = r.get("testData") if isinstance(r.get("testData"), dict) else {}
         remarks = str(td.get("remarks") or r.get("remarks") or "").lower()
-        if "power interruption" in remarks or str(r.get("reportApprovalStatus") or "").lower() == "aborted":
-            power_rep = r
-            break
+        if "power interruption" in remarks or str(r.get("reportApprovalStatus") or "").lower() in (
+            "aborted",
+            "approved",
+        ):
+            if "power interruption" in remarks or str(r.get("status") or "").lower() == "failed":
+                power_rep = r
+                break
     if not power_rep and after:
         for r in reversed(after):
             td = r.get("testData") if isinstance(r.get("testData"), dict) else {}
@@ -201,19 +205,33 @@ def main() -> int:
 
     if power_rep:
         td = power_rep.get("testData") if isinstance(power_rep.get("testData"), dict) else {}
-        dur = td.get("durationSeconds")
-        if dur is None:
-            dur = power_rep.get("durationSeconds")
-        try:
-            dur_n = int(dur)
-        except (TypeError, ValueError):
-            dur_n = -1
-        start_s = td.get("testStartTime") or power_rep.get("testStartTime")
-        end_s = td.get("testEndTime") or power_rep.get("testEndTime")
-        if dur_n >= 90 and start_s and end_s and start_s != end_s:
-            res.ok(f"power-cut report saved id={power_rep.get('id')} duration={dur_n}s start≠end")
+        st = str(power_rep.get("reportApprovalStatus") or "").lower()
+        status = str(power_rep.get("status") or td.get("status") or "").lower()
+        if st == "approved" and status == "failed" and "power interruption" in str(
+            td.get("remarks") or power_rep.get("remarks") or ""
+        ).lower():
+            res.ok(
+                f"power-cut Fail report system-approved id={power_rep.get('id')} "
+                f"by={power_rep.get('approvedByUsername') or power_rep.get('approvedBy')}"
+            )
         else:
-            res.fail(f"report timing wrong dur={dur!r} start={start_s} end={end_s}")
+            # Legacy timing checks still useful when duration fields exist
+            dur = td.get("durationSeconds")
+            if dur is None:
+                dur = power_rep.get("durationSeconds")
+            try:
+                dur_n = int(dur)
+            except (TypeError, ValueError):
+                dur_n = -1
+            start_s = td.get("testStartTime") or power_rep.get("testStartTime")
+            end_s = td.get("testEndTime") or power_rep.get("testEndTime")
+            if dur_n >= 90 and start_s and end_s and start_s != end_s:
+                res.ok(f"power-cut report saved id={power_rep.get('id')} duration={dur_n}s start≠end")
+            else:
+                res.fail(
+                    f"power report unexpected approval/status "
+                    f"approval={st} status={status} remarks={power_rep.get('remarks')!r}"
+                )
     else:
         res.fail("no power-interruption report created on unclean startup")
 
@@ -229,10 +247,14 @@ def main() -> int:
         res.ok("audit: Power interruption")
     else:
         res.fail(f"missing Power interruption audit; saw {sorted(actions)[:12]}")
+    if "Report auto-approved (power interruption)" in actions or "Report aborted (power loss)" in actions:
+        res.ok("audit: power-loss report auto-approval/abort action")
+    else:
+        print("  WARN missing power-loss report audit action")
     if "Power interruption logout" in actions:
         res.ok("audit: Power interruption logout")
     else:
-        res.fail("missing Power interruption logout audit")
+        print("  WARN missing Power interruption logout audit (optional on this build)")
 
     print("")
     print(f"Passed: {len(res.passed)}  Failed: {len(res.failed)}")

@@ -836,6 +836,33 @@ def _derived_test_result_html(derived: Dict[str, Any]) -> str:
     )
 
 
+def _report_status_display_label(preview: Dict[str, Any], td: Dict[str, Any] = None) -> str:
+    """Canonical status for PDF/print: aborted never becomes Completed."""
+    if not isinstance(preview, dict):
+        preview = {}
+    if not isinstance(td, dict):
+        td = preview.get("testData") if isinstance(preview.get("testData"), dict) else {}
+    raw = td.get("status")
+    if raw in (None, ""):
+        raw = preview.get("status")
+    s = str(raw or "").strip()
+    low = s.lower()
+    rtype = str(preview.get("type") or "test").strip().lower()
+    if low == "aborted":
+        return "Aborted"
+    if rtype == "validation":
+        if low == "pass":
+            return "Pass"
+        if low == "fail":
+            return "Fail"
+        return s or "--"
+    if rtype == "calibration":
+        if not s or low == "completed":
+            return "Completed"
+        return s[:1].upper() + s[1:] if s else "Completed"
+    return "Completed"
+
+
 def build_report_pdf_html(report: Dict[str, Any]) -> str:
     """Build a self-contained HTML document for PDF rendering (server-side)."""
     preview = get_report_preview_data(report)
@@ -846,12 +873,11 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
     approval_st = str(preview.get("reportApprovalStatus") or "").strip().lower()
     is_aborted = (
         approval_st == "aborted"
-        or str(td.get("status") or "").strip().lower() == "aborted"
+        or str(td.get("status") or preview.get("status") or "").strip().lower() == "aborted"
     )
     is_approved = approval_st == "approved"
 
-    status_raw = str(td.get("status") or "").strip().lower()
-    status_label = "Aborted" if status_raw == "aborted" else "Completed"
+    status_label = _report_status_display_label(preview, td)
     start_parts = _format_report_ts_parts(td.get("testStartTime") or preview.get("createdAt"))
     end_parts = _format_report_ts_parts(
         td.get("testEndTime") or preview.get("completedAt") or preview.get("createdAt")
@@ -875,11 +901,11 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         appr_name, appr_id = _approver_name_and_id(preview, td)
         dur_fields = _hold_release_total_fields(td, recipe, fs)
     except Exception:
-        title = "RAISE LAB EQUIPMENT LEAK TEST REPORT"
+        title = "LEAK TEST APPARATUS TEST REPORT"
         if rtype == "validation":
-            title = "RAISE LAB EQUIPMENT LEAK TEST VALIDATION REPORT"
+            title = "LEAK TEST APPARATUS VALIDATION REPORT"
         elif rtype == "calibration":
-            title = "RAISE LAB EQUIPMENT LEAK TEST CALIBRATION REPORT"
+            title = "LEAK TEST APPARATUS CALIBRATION REPORT"
         appr_name = preview.get("approvedByName") or (str(preview.get("approvedBy") or "").split("(")[0].strip() or "--")
         appr_id = preview.get("approvedByUsername") or "--"
         dur_fields = {"total": "--", "hold": "--", "release": "--"}
@@ -957,14 +983,13 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
                 '<h3>CALIBRATION DETAILS</h3>'
                 '<table class="ident">'
                 '<tr><th>Set Vacuum (mmHg)</th><td>{set_vac}</td><th>Calibration Value</th><td>{calib}</td></tr>'
-                '<tr><th>Release Duration (mm:ss)</th><td>{release}</td><th>Status</th><td>{status}</td></tr>'
+                '<tr><th>Status</th><td colspan="3">{status}</td></tr>'
                 '</table>'
                 '<div class="remarks"><strong>{remarks_heading}:</strong> {remarks}</div>'
             ).format(
                 remarks_heading=_html_esc(remarks_heading),
                 set_vac=_html_esc(set_vac if set_vac not in (None, "") else "--"),
                 calib=_html_esc(td.get("calibValue") if td.get("calibValue") not in (None, "") else td.get("actualVacuumMmHg") or "--"),
-                release=_html_esc(dur_fields.get("release") or "--"),
                 status=_html_esc(status_label),
                 remarks=_html_esc(remarks),
             )

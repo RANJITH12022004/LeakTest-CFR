@@ -1845,7 +1845,8 @@ function goToPage(pageName) {
     if (!_suppressValidationNavGuardOnce && isValidationOperationActive() && pageName !== 'validation-run') {
         showConfirmModal('Validation is running. Do you want to abort and exit?', 'Operation in progress').then(function (ok) {
             if (!ok) return;
-            abortValidationRun().then(function () {
+            abortValidationRun({ skipConfirm: true }).then(function (result) {
+                if (result && (result.openedPreview || result.inFlight)) return;
                 _suppressValidationNavGuardOnce = true;
                 goToPage(pageName);
             });
@@ -2081,7 +2082,8 @@ function goBack() {
         if (isValidationOperationActive()) {
             showConfirmModal('Validation is running. Do you want to abort and exit?', 'Operation in progress').then(function (ok) {
                 if (!ok) return;
-                abortValidationRun().then(function () {
+                abortValidationRun({ skipConfirm: true }).then(function (result) {
+                    if (result && (result.openedPreview || result.inFlight)) return;
                     _suppressValidationNavGuardOnce = true;
                     goToPage('validate-type-select');
                 });
@@ -3306,7 +3308,7 @@ function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
         'Calibration started', 'Calibration completed', 'Calibration aborted', 'Calibration performed',
         'holder error', 'Holder check error',
         'Validation performed', 'Report saved', 'Report generated', 'Report approved',
-        'Report aborted', 'Report aborted (power loss)', 'Report PDF generated',
+        'Report aborted', 'Report aborted (power loss)', 'Report auto-approved (power interruption)', 'Report PDF generated',
         'Report preview viewed', 'Print A4', 'Print thermal', 'Reports exported',
         'Audit log viewed', 'Audit trail exported',
         'Recipe created', 'Recipe edited', 'Recipe approved', 'Power interruption',
@@ -4163,7 +4165,8 @@ function startUspValidation(type) {
 
 function goBackFromValidationRun() {
     if (isValidationOperationActive()) {
-        return abortValidationRun().then(function () {
+        return abortValidationRun().then(function (result) {
+            if (result && (result.openedPreview || result.cancelled || result.inFlight)) return;
             _suppressValidationNavGuardOnce = true;
             goToPage('vd-validation-input');
         });
@@ -4890,6 +4893,21 @@ function resolveReportDataForPrint(callback) {
     }).catch(function () { callback(null); });
 }
 
+function _printRequestHeaders() {
+    var headers = { 'Content-Type': 'application/json' };
+    if (typeof window !== 'undefined' && window.currentUser) {
+        var hdrRole = window.currentUser.role;
+        if (!hdrRole && typeof getCurrentRole === 'function') {
+            var gr = getCurrentRole();
+            if (gr) hdrRole = gr;
+        }
+        if (hdrRole) headers['X-User-Role'] = hdrRole;
+        if (window.currentUser.name) headers['X-User-Name'] = window.currentUser.name;
+        if (window.currentUser.username) headers['X-User-Username'] = window.currentUser.username;
+    }
+    return headers;
+}
+
 function handlePrintReport() {
     if (!userCanPrintReports()) {
         showAppModal('You do not have permission to print reports.', 'Print');
@@ -4910,7 +4928,7 @@ function handlePrintReport() {
         }
         fetch((API_BASE || '') + '/api/print/a4', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: _printRequestHeaders(),
             body: JSON.stringify({ report_data: reportData })
         }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (result) {
             if (result.success !== false && !result.error) {
@@ -4944,7 +4962,7 @@ function handlePrintThermal() {
         }
         fetch((API_BASE || '') + '/api/print/thermal', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: _printRequestHeaders(),
             body: JSON.stringify({ report_data: reportData })
         }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (result) {
             if (result.success !== false && !result.error) {
@@ -5051,7 +5069,7 @@ function handlePrintRecipeA4() {
     function doPrintA4() {
         fetch((API_BASE || '') + '/api/print/a4', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: _printRequestHeaders(),
             body: JSON.stringify(payload)
         }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (result) {
             if (result.success !== false && !result.error) {
@@ -5083,7 +5101,7 @@ function handlePrintRecipeThermal() {
     function doPrintThermal() {
         fetch((API_BASE || '') + '/api/print/thermal', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: _printRequestHeaders(),
             body: JSON.stringify(payload)
         }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (result) {
             if (result.success !== false && !result.error) {
@@ -5423,14 +5441,34 @@ function _approverFieldsFromPreview(preview, td) {
     return { name: name || '--', id: id || '--' };
 }
 
+/** Canonical report status label for UI / thermal text (never maps aborted → Completed). */
+function reportStatusDisplayLabel(preview, td) {
+    preview = preview || {};
+    td = td || preview.testData || {};
+    var raw = String(td.status != null && td.status !== '' ? td.status : (preview.status || '')).trim();
+    var low = raw.toLowerCase();
+    var rtype = String(preview.type || 'test').trim().toLowerCase();
+    if (low === 'aborted') return 'Aborted';
+    if (rtype === 'validation') {
+        if (low === 'pass') return 'Pass';
+        if (low === 'fail') return 'Fail';
+        return raw || '--';
+    }
+    if (rtype === 'calibration') {
+        if (!raw || low === 'completed') return 'Completed';
+        return raw.charAt(0).toUpperCase() + raw.slice(1);
+    }
+    return 'Completed';
+}
+window.reportStatusDisplayLabel = reportStatusDisplayLabel;
+
 function buildClientThermalPreviewText(preview) {
     if (!preview) return '';
     var recipe = preview.recipe || (preview.testData && preview.testData.recipe) || {};
     var td = preview.testData || preview;
     var fs = preview.factorySettings || {};
     var derived = preview.reportDerived || {};
-    var statusRaw = String(td.status || preview.status || '').toLowerCase();
-    var statusLabel = statusRaw === 'aborted' ? 'Aborted' : 'Completed';
+    var statusLabel = reportStatusDisplayLabel(preview, td);
     var arNo = '';
     if (typeof resolveAnalysisReportNo === 'function') {
         arNo = resolveAnalysisReportNo(recipe, td) || '';
@@ -5447,9 +5485,9 @@ function buildClientThermalPreviewText(preview) {
         while (left.length < 40) left += ' ';
         return (left + right).slice(0, 80);
     }
-    var title = 'RAISE LAB EQUIPMENT LEAK TEST REPORT';
-    if (preview.type === 'validation') title = 'RAISE LAB EQUIPMENT LEAK TEST VALIDATION REPORT';
-    else if (preview.type === 'calibration') title = 'RAISE LAB EQUIPMENT LEAK TEST CALIBRATION REPORT';
+    var title = 'LEAK TEST APPARATUS TEST REPORT';
+    if (preview.type === 'validation') title = 'LEAK TEST APPARATUS VALIDATION REPORT';
+    else if (preview.type === 'calibration') title = 'LEAK TEST APPARATUS CALIBRATION REPORT';
     var sep = '================================================================================';
     var dash = '--------------------------------------------------------------------------------';
     var lines = [
@@ -5554,10 +5592,10 @@ function _populateLegacyReportPreview(preview) {
     var mainTitleEl = document.getElementById('report-main-title');
     if (mainTitleEl) {
         mainTitleEl.textContent = (reportType === 'validation')
-            ? 'RAISE LAB EQUIPMENT LEAK TEST VALIDATION REPORT'
+            ? 'LEAK TEST APPARATUS VALIDATION REPORT'
             : (reportType === 'calibration'
-                ? 'RAISE LAB EQUIPMENT LEAK TEST CALIBRATION REPORT'
-                : 'RAISE LAB EQUIPMENT LEAK TEST REPORT');
+                ? 'LEAK TEST APPARATUS CALIBRATION REPORT'
+                : 'LEAK TEST APPARATUS TEST REPORT');
     }
 
     var recipe = preview.recipe || (preview.testData && preview.testData.recipe) || preview.testData || {};
@@ -5614,7 +5652,7 @@ function _populateLegacyReportPreview(preview) {
     setReportEl('report-completed-time', completedParts.time);
 
     setReportEl('report-test-duration', formatDurationSeconds(testDurationSecondsFromData(td, preview)));
-    var statusLabel = (td.status === 'aborted' ? 'Aborted' : 'Completed');
+    var statusLabel = reportStatusDisplayLabel(preview, td);
     setReportEl('report-test-status', statusLabel);
 
     if (reportType === 'test') {
@@ -7689,11 +7727,40 @@ function syncTestRunCheckpoint() {
     if (testRunButtonState !== 'abort') return Promise.resolve();
     var body = buildTestRunCheckpointPayload();
     if (!body) return Promise.resolve();
+    body.type = 'test';
     return apiRequest(API_BASE + '/api/data/test-run/checkpoint', { method: 'PUT', body: body }).catch(function () {});
 }
 
 function clearTestRunCheckpoint() {
     return apiRequest(API_BASE + '/api/data/test-run/checkpoint', { method: 'DELETE' }).catch(function () {});
+}
+
+function syncOperationCheckpoint(payload) {
+    if (!payload || typeof payload !== 'object') return Promise.resolve();
+    return apiRequest(API_BASE + '/api/data/test-run/checkpoint', { method: 'PUT', body: payload }).catch(function () {});
+}
+
+function buildValidationCheckpointPayload() {
+    var u = window.currentUser || {};
+    var un = (u.username || u.name || '').trim();
+    var now = new Date().toISOString();
+    return {
+        type: 'validation',
+        name: 'Validation - ' + (typeof validationAdapterLabel === 'function' ? validationAdapterLabel() : (lastValidationType || 'run')),
+        operatedByUsername: un,
+        operatorName: (u.name || u.username || '').trim(),
+        employeeId: un,
+        startedAt: now,
+        createdAt: now,
+        testData: {
+            status: 'running',
+            validationType: lastValidationType || '',
+            operatedByUsername: un,
+            operatorName: (u.name || u.username || '').trim(),
+            employeeId: un,
+            createdAt: now
+        }
+    };
 }
 
 function buildTestRunReportPayload() {
@@ -8051,6 +8118,8 @@ function toggleTestRunState() {
                 clearInterval(testRunIntervalId);
                 testRunIntervalId = null;
             }
+            // Persist in-progress run immediately so power loss can synthesize a Fail report.
+            syncTestRunCheckpoint();
         }).catch(function (err) {
             if (btn) btn.disabled = false;
             _resetTestRunButtonToStart();
@@ -8308,8 +8377,8 @@ function openBatchNumberModal() {
     var arEl = document.getElementById('load-recipe-analysis-no');
     var errEl = document.getElementById('load-recipe-batch-error');
     if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
-    // Always start at 0 — operator must enter sample count (recipe default must not prefill).
-    if (samplesEl) samplesEl.value = '0';
+    // Samples optional — leave blank; do not prefill recipe default.
+    if (samplesEl) samplesEl.value = '';
     if (arEl) arEl.value = '';
     if (batchSizeEl) {
         var pref = pendingRecipeToLoad && pendingRecipeToLoad.batchSize != null
@@ -8373,9 +8442,10 @@ function confirmBatchNumberAndLoad() {
         if (batchSizeEl) batchSizeEl.focus();
         return;
     }
-    var samples = parseInt(samplesEl && samplesEl.value ? samplesEl.value : '', 10);
-    if (isNaN(samples) || samples < 1 || samples > 999) {
-        setBatchErr('Enter number of samples (1–999). Default is 0 — you must enter a value.');
+    var samplesRaw = samplesEl ? String(samplesEl.value || '').trim() : '';
+    var samples = samplesRaw === '' ? null : parseInt(samplesRaw, 10);
+    if (samplesRaw !== '' && (isNaN(samples) || samples < 1)) {
+        setBatchErr('No. of samples must be a whole number of 1 or more, or leave blank.');
         if (samplesEl) samplesEl.focus();
         return;
     }
@@ -8422,7 +8492,8 @@ function updateCreateRecipeContinueButton() {
     var durationSec = (typeof parseMmSs === 'function') ? parseMmSs(timeEl && timeEl.value ? timeEl.value : '') : null;
 
     var vacuumOk = !isNaN(vacuum) && vacuum >= 1 && vacuum <= maxVac;
-    var samplesOk = !isNaN(samples) && samples >= 1 && samples <= 999;
+    var samplesRaw = samplesEl ? String(samplesEl.value || '').trim() : '';
+    var samplesOk = samplesRaw === '' || (!isNaN(samples) && samples >= 1);
     var batchSizeOk = !isNaN(batchSize) && batchSize >= 1 && batchSize <= 999;
     var canContinue = !!(recipeName && productType && samplesOk && batchSizeOk && vacuumOk && durationSec);
     if (btn) {
@@ -8702,7 +8773,8 @@ function completeRecipeFromStep2() {
     var productType = (typeof getResolvedRecipeProductType === 'function')
         ? getResolvedRecipeProductType()
         : '';
-    var noOfSamples = parseInt(samplesEl && samplesEl.value ? samplesEl.value : '', 10);
+    var samplesRaw = samplesEl ? String(samplesEl.value || '').trim() : '';
+    var noOfSamples = samplesRaw === '' ? null : parseInt(samplesRaw, 10);
     var batchSize = parseInt(batchSizeEl && batchSizeEl.value ? batchSizeEl.value : '', 10);
     var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
     var vacuumMmHg = parseFloat(vacEl && vacEl.value ? vacEl.value : '');
@@ -8733,8 +8805,8 @@ function completeRecipeFromStep2() {
         setRecipeInputError('Select a product type.');
         return;
     }
-    if (isNaN(noOfSamples) || noOfSamples < 1 || noOfSamples > 999) {
-        setRecipeInputError('Enter a valid number of samples (1–999).');
+    if (samplesRaw !== '' && (isNaN(noOfSamples) || noOfSamples < 1)) {
+        setRecipeInputError('No. of samples must be a whole number of 1 or more, or leave blank.');
         return;
     }
     if (isNaN(batchSize) || batchSize < 1 || batchSize > 999) {
@@ -8960,9 +9032,14 @@ function buildCombinedValidationReportPayload() {
     var runs = getOrderedValidationSessionRuns();
     if (!runs.length) return null;
     var overallPass = true;
+    var hasAborted = false;
     for (var i = 0; i < runs.length; i++) {
-        if (String(runs[i].status || '').toLowerCase() !== 'pass') overallPass = false;
+        var st = String(runs[i].status || '').toLowerCase();
+        if (st === 'aborted') hasAborted = true;
+        else if (st !== 'pass') overallPass = false;
     }
+    var overallStatus = hasAborted ? 'aborted' : (overallPass ? 'Pass' : 'Fail');
+    var overallName = hasAborted ? 'Aborted' : overallStatus;
     var user = window.currentUser || {};
     var now = new Date().toISOString();
     var first = runs[0] || {};
@@ -8973,11 +9050,11 @@ function buildCombinedValidationReportPayload() {
         || (setDur != null && typeof formatMmSs === 'function' ? formatMmSs(setDur) : null);
     var actDur = first.actualDurationSec;
     return {
-        name: 'Validation - Vacuum - ' + (overallPass ? 'Pass' : 'Fail'),
+        name: 'Validation - Vacuum - ' + overallName,
         type: 'validation',
         validationSubtype: 'distance',
         validationRuns: runs,
-        status: overallPass ? 'Pass' : 'Fail',
+        status: overallStatus,
         usp: first.usp || 'Vacuum',
         setVacuumMmHg: setVac,
         actualVacuumMmHg: actVac,
@@ -8994,7 +9071,7 @@ function buildCombinedValidationReportPayload() {
             validationRuns: runs,
             validationSubtype: 'distance',
             usp: first.usp || 'Vacuum',
-            status: overallPass ? 'Pass' : 'Fail',
+            status: overallStatus,
             setVacuumMmHg: setVac,
             actualVacuumMmHg: actVac,
             setDurationSec: setDur,
@@ -9013,17 +9090,21 @@ function buildCombinedValidationReportPayload() {
 function saveCombinedValidationReport() {
     var reportPayload = buildCombinedValidationReportPayload();
     if (!reportPayload) return Promise.resolve();
+    var isAborted = String(reportPayload.status || '').toLowerCase() === 'aborted'
+        || String((reportPayload.testData && reportPayload.testData.status) || '').toLowerCase() === 'aborted';
     _postRunSessionHold = true;
     markAutoLogoutActivity();
     return apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: reportPayload })
         .then(function (result) {
+            if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
             validationSessionResults = { distance: null, load: null };
             validationCompletion = { distance: false, load: false };
             var reportId = result && result.id;
             currentReportFilter = 'validation';
             if (reportId) {
-                if (typeof openReportPreview === 'function') openReportPreview(reportId, { setGate: true });
-                else {
+                if (typeof openReportPreview === 'function') {
+                    openReportPreview(reportId, isAborted ? {} : { setGate: true });
+                } else {
                     _postRunSessionHold = false;
                     goToPage('reports');
                 }
@@ -9081,6 +9162,7 @@ function renderValidationDetailsInPreview(preview) {
             var dateStr = formatReportDate(run.completedAt || preview.completedAt || preview.createdAt);
             var method = run.usp || (run.validationSubtype === 'load' ? 'Pressure Decay' : 'Vacuum Decay');
             var status = run.status || '--';
+            if (String(status).toLowerCase() === 'aborted') status = 'Aborted';
             var setVac = run.setVacuumMmHg != null ? run.setVacuumMmHg : '--';
             var actualVac = run.actualVacuumMmHg != null ? run.actualVacuumMmHg : '--';
             var setTime = run.setDurationDisplay
@@ -9109,14 +9191,17 @@ function renderCalibrationDetailsInPreview(preview) {
     var setVac = td.setVacuumMmHg != null ? td.setVacuumMmHg : (preview.setVacuumMmHg != null ? preview.setVacuumMmHg : '--');
     var actualVac = td.actualVacuumMmHg != null ? td.actualVacuumMmHg : (preview.actualVacuumMmHg != null ? preview.actualVacuumMmHg : '--');
     var gaugeVac = td.calibValue != null ? td.calibValue : actualVac;
-    var rlTm = td.releaseTimeSec != null ? td.releaseTimeSec : (preview.releaseTimeSec != null ? preview.releaseTimeSec : '--');
-    var status = td.status || preview.status || 'Completed';
+    var statusRaw = td.status || preview.status || 'Completed';
+    var status = (String(statusRaw).toLowerCase() === 'aborted')
+        ? 'Aborted'
+        : (typeof reportStatusDisplayLabel === 'function'
+            ? reportStatusDisplayLabel(preview, td)
+            : statusRaw);
     var rows = [
         '<tr><th colspan="4" class="report-validation-usp-header">Vacuum pressure calibration</th></tr>',
         '<tr><th>Date / Time</th><td colspan="3">' + dateStr + '</td></tr>',
         '<tr><th>Target Vacuum (mmHg)</th><td>' + setVac + '</td><th>Status</th><td>' + status + '</td></tr>',
-        '<tr><th>External Gauge (mmHg)</th><td>' + gaugeVac + '</td><th>CALIBVALUE</th><td>' + gaugeVac + '</td></tr>',
-        '<tr><th>Release Wait (s)</th><td colspan="3">' + rlTm + '</td></tr>'
+        '<tr><th>External Gauge (mmHg)</th><td>' + gaugeVac + '</td><th>CALIBVALUE</th><td>' + gaugeVac + '</td></tr>'
     ];
     bodyEl.innerHTML = rows.join('');
 }
@@ -9192,6 +9277,7 @@ function toggleValidationRunState() {
             validationRunState = 'idle';
             applyValidationRunLockUi(false);
             _closeValidationRunHardwareEs();
+            stopValidationOnBackend().catch(function () {});
             setValRunEl('val-run-status', 'Ready');
             setValRunEl('val-run-status-sub', 'Press Start to begin');
             _setValRunStatusStyle('ready');
@@ -9204,13 +9290,6 @@ function toggleValidationRunState() {
 
         function _runValidationHardwareStart() {
             _closeValidationRunHardwareEs();
-            try {
-                validationRunHardwareEs = new EventSource(_getHardwareSseUrl());
-            } catch (esErr) {
-                return Promise.reject(new Error('Could not connect to the hardware stream'));
-            }
-            validationRunSseListener = validationRunHardwareMessage;
-            validationRunHardwareEs.addEventListener('message', validationRunSseListener);
             return startValidationOnBackend().then(function (res) {
                 if (!res || res.ok !== true) {
                     var errText = (res && (res.error || res.response || res.message)) || 'Hardware did not acknowledge start';
@@ -9219,6 +9298,13 @@ function toggleValidationRunState() {
                     }
                     return Promise.reject(new Error(errText));
                 }
+                try {
+                    validationRunHardwareEs = new EventSource(_getHardwareSseUrl());
+                } catch (esErr) {
+                    return Promise.reject(new Error('Could not connect to the hardware stream'));
+                }
+                validationRunSseListener = validationRunHardwareMessage;
+                validationRunHardwareEs.addEventListener('message', validationRunSseListener);
                 validationRunState = 'running';
                 applyValidationRunLockUi(true);
                 logAuditEvent('Validation started', validationAdapterLabel() + ' validation run started', {
@@ -9226,6 +9312,7 @@ function toggleValidationRunState() {
                     entityType: 'validation',
                     extra: { validationType: lastValidationType }
                 });
+                syncOperationCheckpoint(buildValidationCheckpointPayload());
                 validationRunCurrentCount = 0;
                 setValRunEl('val-run-tap-count', '0');
                 validationRunSecondsRemaining = VALIDATION_RUN_DURATION_SEC;
@@ -9654,6 +9741,17 @@ function confirmRoleChange(newRole) {
     });
 }
 
+function _approvalVerifyModalOptionsForUserAdmin() {
+    return {
+        purpose: 'user_admin',
+        titleText: 'Admin verification required',
+        subtitleText: 'Enter credentials for a user with profile management permission.',
+        usernameLabelText: 'Username',
+        usernamePlaceholder: 'Admin username',
+        emptyCredentialsMessage: 'Enter username and password.'
+    };
+}
+
 function disableMember(id) {
     if (!id) return;
     if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
@@ -9665,23 +9763,22 @@ function disableMember(id) {
     }
     showConfirmModal('Are you sure you want to disable this member?', 'Disable Member').then(function (ok) {
         if (!ok) return;
-        apiRequest(API_BASE + '/api/data/members/' + id, { method: 'GET' })
-            .then(function (data) {
-                var member = (data && data.member) ? data.member : data;
-                if (!member || member.id == null) throw new Error('Member not found');
-                member.status = 'disabled';
-                return apiRequest(API_BASE + '/api/data/members/' + id, {
-                    method: 'PUT',
-                    body: member
-                });
-            })
-            .then(function () {
+        return openApprovalVerifyModal(_approvalVerifyModalOptionsForUserAdmin()).then(function (token) {
+            if (!token) {
+                showAppModal('Member not disabled. Admin verification is required.', 'Disable Member');
+                return;
+            }
+            return apiRequest(API_BASE + '/api/data/members/' + id, {
+                method: 'DELETE',
+                headers: { 'X-Approval-Verify-Token': token }
+            }).then(function () {
                 loadMembersAndRender();
-            })
-            .catch(function (err) {
-                console.error('Failed to disable member', err);
-                showAppModal('Failed to disable member: ' + (err && err.message ? err.message : 'Unknown error'), 'Members');
+                showAppModal('Member disabled.', 'Members');
             });
+        });
+    }).catch(function (err) {
+        console.error('Failed to disable member', err);
+        showAppModal('Failed to disable member: ' + (err && err.message ? err.message : 'Unknown error'), 'Members');
     });
 }
 
