@@ -74,6 +74,26 @@
         </div>
     </div>
 
+    <!-- Calibration: external gauge pressure entry -->
+    <div id="calibration-gauge-modal" class="modal-overlay" style="display: none;">
+        <div class="role-modal" style="max-width: 480px;">
+            <h3 id="calibration-gauge-modal-title">External Gauge Reading</h3>
+            <p id="calibration-gauge-modal-text" class="section-subtitle" style="margin-bottom: 16px;">
+                Enter the actual pressure measured on the external gauge (mmHg).
+            </p>
+            <div class="form-group">
+                <label for="cal-gauge-pressure-input">Actual Pressure (mmHg) <span class="required">*</span></label>
+                <input type="number" id="cal-gauge-pressure-input" class="input-field cal-actual-vacuum-input"
+                    min="1" max="650" step="0.1" placeholder="Enter actual" inputmode="decimal"
+                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+            </div>
+            <div class="role-modal-buttons">
+                <button type="button" class="btn-role-select btn-role-user" id="cal-gauge-cancel-btn">Cancel</button>
+                <button type="button" class="btn-role-select btn-validation-pass" id="cal-gauge-submit-btn">Submit</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Batch Number Modal (Quick Test + Load Recipe) — must be outside page containers -->
     <div id="batch-number-modal" class="modal-overlay param-config-modal" style="display: none;">
         <div class="role-modal" style="max-width: 480px; max-height: 90vh; overflow-y: auto;">
@@ -1388,45 +1408,47 @@
                     </div>
                 </div>
 
-                <!-- Vacuum calibration (after validation Fail) — no report generation -->
+                <!-- Vacuum pressure calibration (auto-run to factory target, gauge entry, report) -->
                 <div class="page" id="page-vacuum-calibration">
                     <div class="validation-type-page vacuum-calibration-page">
-                        <h2 class="section-title">Calibration</h2>
-                        <p class="section-subtitle">Set vacuum is from validation — enter the measured actual vacuum</p>
+                        <h2 class="section-title">Vacuum Pressure Calibration</h2>
+                        <p class="section-subtitle">Evacuates to the factory calibration target, holds 5 s at target, then enter the external gauge reading.</p>
                         <div class="val-run-panel-inner val-run-vacuum-metrics">
                             <div class="val-run-metric-card">
                                 <div class="val-run-metric-title">Vacuum (mmHg)</div>
                                 <div class="val-run-metric-row">
                                     <div class="val-run-metric-block">
-                                        <span class="val-run-metric-label">Set</span>
+                                        <span class="val-run-metric-label">Target</span>
                                         <span class="val-run-metric-value" id="cal-set-vacuum">--</span>
                                     </div>
                                     <div class="val-run-metric-sep">/</div>
                                     <div class="val-run-metric-block">
-                                        <span class="val-run-metric-label">Actual</span>
-                                        <input type="number" id="cal-actual-vacuum" class="input-field cal-actual-vacuum-input"
-                                            min="1" max="650" step="0.1" placeholder="Enter actual" inputmode="decimal">
+                                        <span class="val-run-metric-label">Live</span>
+                                        <span class="val-run-metric-value" id="cal-live-vacuum">--</span>
                                     </div>
                                 </div>
                             </div>
                             <div class="val-run-metric-card">
-                                <div class="val-run-metric-title">Time</div>
+                                <div class="val-run-metric-title">Release Time (s)</div>
                                 <div class="val-run-metric-row">
                                     <div class="val-run-metric-block">
-                                        <span class="val-run-metric-label">Set</span>
-                                        <span class="val-run-metric-value" id="cal-set-time">--</span>
+                                        <span class="val-run-metric-label">RL_TM</span>
+                                        <span class="val-run-metric-value" id="cal-release-time">--</span>
                                     </div>
-                                    <div class="val-run-metric-sep">/</div>
+                                    <div class="val-run-metric-sep">&nbsp;</div>
                                     <div class="val-run-metric-block">
-                                        <span class="val-run-metric-label">Actual</span>
-                                        <span class="val-run-metric-value" id="cal-actual-time">--</span>
+                                        <span class="val-run-metric-label">Hold at target</span>
+                                        <span class="val-run-metric-value" id="cal-hold-elapsed">00:00</span>
                                     </div>
                                 </div>
                             </div>
                         </div>
+                        <div class="validation-card" style="margin-top:16px;">
+                            <div class="validation-card-label">Status</div>
+                            <span class="validation-card-value" id="cal-run-status">Starting…</span>
+                        </div>
                         <div class="quick-test-actions" style="margin-top:24px;">
-                            <button type="button" class="btn btn-secondary" onclick="goToPage('validate')">Back</button>
-                            <button type="button" class="btn btn-primary" onclick="confirmVacuumCalibration()">Confirm</button>
+                            <button type="button" class="btn btn-secondary" onclick="abortVacuumCalibration()">Back</button>
                         </div>
                     </div>
                 </div>
@@ -1437,28 +1459,17 @@
                         <h2 class="section-title">Select Calibration Type</h2>
                         <p class="section-subtitle">Choose the calibration procedure to run</p>
                         <div class="validation-type-grid calibration-grid">
-                            <label class="validation-type-settings-card cal-load">
-                                <input type="radio" name="cal-type" value="load" checked>
+                            <label class="validation-type-settings-card cal-vacuum">
+                                <input type="radio" name="cal-type" value="vacuum" checked>
                                 <div class="settings-icon">
                                     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                         stroke-width="2">
-                                        <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+                                        <circle cx="12" cy="12" r="10"></circle>
+                                        <path d="M12 6v6l4 2"></path>
                                     </svg>
                                 </div>
-                                <h3>Load Calibration</h3>
-                                <p>Calibrate load cell with known weight</p>
-                            </label>
-                            <label class="validation-type-settings-card cal-span">
-                                <input type="radio" name="cal-type" value="distance-zero">
-                                <div class="settings-icon">
-                                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                        stroke-width="2">
-                                        <line x1="5" y1="12" x2="19" y2="12"></line>
-                                        <polyline points="12 5 19 12 12 19"></polyline>
-                                    </svg>
-                                </div>
-                                <h3>Distance Calibration</h3>
-                                <p>Calibrate distance zero (10 mm gauge block)</p>
+                                <h3>Vacuum Pressure Calibration</h3>
+                                <p>Calibrate vacuum sensor against external gauge at factory target</p>
                             </label>
                         </div>
                         <button class="btn btn-primary validation-start-btn" onclick="startCalibrationFromType()">Start
@@ -1939,6 +1950,20 @@
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
                             <div class="form-group">
+                                <label>Calibration Target Vacuum (mmHg)</label>
+                                <input type="number" id="factory-cal-target-vacuum" class="input-field" min="1" max="650"
+                                    placeholder="400" value="400"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                <p class="section-subtitle" style="margin-top:6px;font-size:13px;">Automatic evacuation target for vacuum pressure calibration (default 400 mmHg).</p>
+                            </div>
+                            <div class="form-group">
+                                <label>Calibration Release Time RL_TM (seconds)</label>
+                                <input type="number" id="factory-cal-release-time" class="input-field" min="1" max="5999"
+                                    placeholder="80" value="80"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                <p class="section-subtitle" style="margin-top:6px;font-size:13px;">Sent to ESP as #RL_TM after operator enters external gauge pressure (#CALIBVALUE).</p>
+                            </div>
+                            <div class="form-group">
                                 <label>Maximum Vacuum (mmHg)</label>
                                 <input type="number" id="factory-max-vacuum-mmhg" class="input-field" min="1" max="650"
                                     placeholder="650" value="650"
@@ -2067,9 +2092,9 @@
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=3"></script>
     <script src="rbac.js?v=6"></script>
-    <script src="script.js?v=65"></script>
+    <script src="script.js?v=67"></script>
     <script src="leaktest_patch.js?v=2"></script>
-    <script src="validation_vd.js?v=7"></script>
+    <script src="validation_vd.js?v=9"></script>
 </body>
 
 </html>

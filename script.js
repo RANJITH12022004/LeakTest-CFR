@@ -857,7 +857,7 @@ function isReportPreviewLockedForCurrentUser(preview) {
     if (typeof isFactorySessionUser === 'function' && isFactorySessionUser()) return false;
     var p = preview || window._lastReportPreview || {};
     var reportTypeNorm = String(p.type || 'test').trim().toLowerCase();
-    if (reportTypeNorm !== 'test' && reportTypeNorm !== 'validation') return false;
+    if (reportTypeNorm !== 'test' && reportTypeNorm !== 'validation' && reportTypeNorm !== 'calibration') return false;
     if (!isReportPendingApproval(p)) return false;
     return isCurrentUserReportOperator(p);
 }
@@ -1107,7 +1107,7 @@ function reportActionsBlockedForPreview(preview) {
     var p = preview || window._lastReportPreview || {};
     var reportTypeNorm = String(p.type || 'test').trim().toLowerCase();
     var approvalSt = String(p.reportApprovalStatus || '').trim().toLowerCase();
-    return approvalSt === 'pending' && (reportTypeNorm === 'test' || reportTypeNorm === 'validation');
+    return approvalSt === 'pending' && (reportTypeNorm === 'test' || reportTypeNorm === 'validation' || reportTypeNorm === 'calibration');
 }
 
 function finishTestRunReportSaved(reportId) {
@@ -3759,7 +3759,7 @@ function selectOperation(type) {
             showAppModal('You do not have permission to run calibration.', 'Permission');
             return;
         }
-        goToPage('calibration-type-select');
+        goToPage('vacuum-calibration');
     }
 }
 
@@ -3951,9 +3951,8 @@ function initValidationRunPage() {
 
 function startCalibrationFromType() {
     var radio = document.querySelector('input[name="cal-type"]:checked');
-    if (radio && radio.value === 'load') goToPage('load-calibration');
-    else if (radio && radio.value === 'distance-zero') goToPage('distance-zero-calibration');
-    else goToPage('load-calibration');
+    if (radio && radio.value === 'vacuum') goToPage('vacuum-calibration');
+    else goToPage('vacuum-calibration');
 }
 
 function viewRecipe() {
@@ -4182,7 +4181,7 @@ function loadReports(filterType) {
 
     if (bar) bar.style.display = 'none';
     if (theadRow) theadRow.innerHTML = '<th>SL No</th><th>Report Name</th><th>Creation Time</th><th>Action</th>';
-    var filter = (filterType === 'test' || filterType === 'validation') ? filterType : 'all';
+    var filter = (filterType === 'test' || filterType === 'validation' || filterType === 'calibration') ? filterType : 'all';
     apiRequest(API_BASE + '/api/data/reports?filter=' + encodeURIComponent(filter)).then(function (data) {
         var list = (data && data.reports) ? data.reports : [];
         if (!list.length) {
@@ -4195,6 +4194,10 @@ function loadReports(filterType) {
                 var name = r.name;
                 if (!name && r.type === 'validation') {
                     if (!name) name = 'Validation - ' + (r.validationSubtype === 'load' ? 'Pressure Decay' : 'Vacuum Decay');
+                }
+                if (!name && r.type === 'calibration') {
+                    name = 'Calibration - ' + (r.calibrationSubtype === 'vacuum' ? 'Vacuum' : (r.calibrationSubtype || 'Vacuum'));
+                    if (r.setVacuumMmHg != null) name += ' - ' + r.setVacuumMmHg + ' mmHg';
                 }
                 if (!name) name = (r.recipe && r.recipe.productName) || 'Report ' + (r.id || (i + 1));
                 var created = r.createdAt || r.created || '';
@@ -4405,7 +4408,7 @@ function exportFilteredReports() {
         exportAuditTrails();
         return;
     }
-    var filter = (currentReportFilter === 'test' || currentReportFilter === 'validation') ? currentReportFilter : 'all';
+    var filter = (currentReportFilter === 'test' || currentReportFilter === 'validation' || currentReportFilter === 'calibration') ? currentReportFilter : 'all';
     showLoadingOverlay('Export Reports', 'Loading report list...', { cancellable: false });
     apiRequest(API_BASE + '/api/data/reports?filter=' + encodeURIComponent(filter)).then(function (data) {
         var list = (data && data.reports) ? data.reports : [];
@@ -5102,6 +5105,8 @@ function _populateLegacyReportPreview(preview) {
 
     if (reportType === 'validation') {
         renderValidationDetailsInPreview(preview);
+    } else if (reportType === 'calibration') {
+        renderCalibrationDetailsInPreview(preview);
     }
 
     var derived = preview.reportDerived;
@@ -5286,7 +5291,7 @@ function updateReportPreviewPrintExportButtons(preview) {
     var reportTypeNorm = String(p.type || 'test').trim().toLowerCase();
     var approvalSt = String(p.reportApprovalStatus || '').trim().toLowerCase();
     var blockActions = approvalSt === 'pending' &&
-        (reportTypeNorm === 'test' || reportTypeNorm === 'validation');
+        (reportTypeNorm === 'test' || reportTypeNorm === 'validation' || reportTypeNorm === 'calibration');
     var canPrint = typeof userCanPrintReports === 'function' && userCanPrintReports() && !blockActions;
     var canExport = typeof userCanExportToUsb === 'function' && userCanExportToUsb() && !blockActions;
     peGroup.style.display = (canPrint || canExport) ? 'flex' : 'none';
@@ -8525,6 +8530,28 @@ function renderValidationDetailsInPreview(preview) {
     bodyEl.innerHTML = rows.join('');
 }
 
+function renderCalibrationDetailsInPreview(preview) {
+    var titleEl = document.getElementById('report-validation-calibration-title');
+    var bodyEl = document.getElementById('report-validation-calibration-body');
+    if (!bodyEl) return;
+    if (titleEl) titleEl.textContent = 'CALIBRATION DETAILS';
+    var td = preview.testData || preview;
+    var dateStr = formatReportDate(td.completedAt || preview.completedAt || preview.createdAt);
+    var setVac = td.setVacuumMmHg != null ? td.setVacuumMmHg : (preview.setVacuumMmHg != null ? preview.setVacuumMmHg : '--');
+    var actualVac = td.actualVacuumMmHg != null ? td.actualVacuumMmHg : (preview.actualVacuumMmHg != null ? preview.actualVacuumMmHg : '--');
+    var calibK = td.calibValue != null ? td.calibValue : actualVac;
+    var rlTm = td.releaseTimeSec != null ? td.releaseTimeSec : (preview.releaseTimeSec != null ? preview.releaseTimeSec : '--');
+    var status = td.status || preview.status || 'Completed';
+    var rows = [
+        '<tr><th colspan="4" class="report-validation-usp-header">Vacuum pressure calibration</th></tr>',
+        '<tr><th>Date / Time</th><td colspan="3">' + dateStr + '</td></tr>',
+        '<tr><th>Target Vacuum (mmHg)</th><td>' + setVac + '</td><th>Status</th><td>' + status + '</td></tr>',
+        '<tr><th>External Gauge (K)</th><td>' + calibK + '</td><th>Release Time RL_TM (s)</th><td>' + rlTm + '</td></tr>',
+        '<tr><th>Instrument Reading</th><td colspan="3">' + actualVac + ' mmHg</td></tr>'
+    ];
+    bodyEl.innerHTML = rows.join('');
+}
+
 function completeValidationRunAfterDuration() {
     validationRunState = 'idle';
     validationRunBackendPending = false;
@@ -9522,7 +9549,9 @@ function setFactorySettingsForm(settings) {
         ['factory-max-supervisors', 'maxSupervisors'],
         ['factory-password-reset-days', 'passwordResetPeriodDays'],
         ['factory-auto-logout-minutes', 'autoLogoutMinutes'],
-        ['factory-max-vacuum-mmhg', 'maxVacuumMmHg']
+        ['factory-max-vacuum-mmhg', 'maxVacuumMmHg'],
+        ['factory-cal-target-vacuum', 'calibrationTargetVacuumMmHg'],
+        ['factory-cal-release-time', 'calibrationReleaseTimeSec']
     ];
     idMap.forEach(function (pair) {
         var el = document.getElementById(pair[0]);
@@ -9539,6 +9568,8 @@ function setFactorySettingsForm(settings) {
         else if (pair[1] === 'passwordResetPeriodDays') el.value = String(val != null ? val : 30);
         else if (pair[1] === 'autoLogoutMinutes') el.value = String(val != null ? val : 0);
         else if (pair[1] === 'maxVacuumMmHg') el.value = String(val != null ? val : 650);
+        else if (pair[1] === 'calibrationTargetVacuumMmHg') el.value = String(val != null ? val : 400);
+        else if (pair[1] === 'calibrationReleaseTimeSec') el.value = String(val != null ? val : 80);
         else el.value = val || '';
     });
     var biometricEl = document.getElementById('factory-biometric-enabled');
@@ -9588,6 +9619,8 @@ function saveFactorySettings() {
     var autoLogoutEl = document.getElementById('factory-auto-logout-minutes');
     var biometricEnabledEl = document.getElementById('factory-biometric-enabled');
     var maxVacuumEl = document.getElementById('factory-max-vacuum-mmhg');
+    var calTargetEl = document.getElementById('factory-cal-target-vacuum');
+    var calReleaseEl = document.getElementById('factory-cal-release-time');
 
     var companyName = companyNameEl && companyNameEl.value ? companyNameEl.value.trim() : '';
     var companyLocation = companyLocationEl && companyLocationEl.value ? companyLocationEl.value.trim() : '';
@@ -9608,6 +9641,19 @@ function saveFactorySettings() {
         return;
     }
     var maxVacuumMmHg = Math.max(1, Math.min(650, isNaN(maxVacuumRaw) ? 650 : maxVacuumRaw));
+    var calTargetRaw = parseInt(calTargetEl && calTargetEl.value ? calTargetEl.value : 400, 10);
+    if (!Number.isInteger(calTargetRaw) || calTargetRaw < 1 || calTargetRaw > maxVacuumMmHg) {
+        showAppModal(
+            'Calibration target vacuum must be a whole number from 1 to ' + maxVacuumMmHg + ' mmHg.',
+            'Factory Settings'
+        );
+        return;
+    }
+    var calReleaseRaw = parseInt(calReleaseEl && calReleaseEl.value ? calReleaseEl.value : 80, 10);
+    if (!Number.isInteger(calReleaseRaw) || calReleaseRaw < 1 || calReleaseRaw > 5999) {
+        showAppModal('Calibration release time (RL_TM) must be a whole number from 1 to 5999 seconds.', 'Factory Settings');
+        return;
+    }
     var recipeVacuumPresets = [];
     var recipeTimePresetsSec = [];
     for (var presetIndex = 1; presetIndex <= 3; presetIndex++) {
@@ -9651,6 +9697,8 @@ function saveFactorySettings() {
         passwordResetPeriodDays: passwordResetPeriodDays,
         autoLogoutMinutes: autoLogoutMinutes,
         maxVacuumMmHg: maxVacuumMmHg,
+        calibrationTargetVacuumMmHg: calTargetRaw,
+        calibrationReleaseTimeSec: calReleaseRaw,
         recipeVacuumPresets: recipeVacuumPresets,
         recipeTimePresetsSec: recipeTimePresetsSec,
         biometricEnabled: normalizeBiometricEnabled(biometricEnabledEl ? biometricEnabledEl.value : true)

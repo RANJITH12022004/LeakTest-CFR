@@ -1165,6 +1165,18 @@ def get_factory_settings() -> Dict[str, Any]:
         settings["recipeVacuumPresets"] = [200, 400, 600]
     if not isinstance(settings.get("recipeTimePresetsSec"), list) or len(settings["recipeTimePresetsSec"]) != 3:
         settings["recipeTimePresetsSec"] = [30, 60, 90]
+    try:
+        settings["calibrationTargetVacuumMmHg"] = max(
+            1, min(650, int(settings.get("calibrationTargetVacuumMmHg", 400)))
+        )
+    except (TypeError, ValueError):
+        settings["calibrationTargetVacuumMmHg"] = 400
+    try:
+        settings["calibrationReleaseTimeSec"] = max(
+            1, min(5999, int(settings.get("calibrationReleaseTimeSec", 80)))
+        )
+    except (TypeError, ValueError):
+        settings["calibrationReleaseTimeSec"] = 80
     return settings
 
 
@@ -1233,6 +1245,16 @@ def save_factory_settings(settings: Dict[str, Any]):
         except (ValueError, TypeError):
             normalized_time_presets.append(time_defaults[index])
     merged["recipeTimePresetsSec"] = normalized_time_presets
+    try:
+        cal_target = max(1, min(max_vacuum, int(merged.get("calibrationTargetVacuumMmHg", 400))))
+    except (TypeError, ValueError):
+        cal_target = min(400, max_vacuum)
+    merged["calibrationTargetVacuumMmHg"] = cal_target
+    try:
+        cal_release = max(1, min(5999, int(merged.get("calibrationReleaseTimeSec", 80))))
+    except (TypeError, ValueError):
+        cal_release = 80
+    merged["calibrationReleaseTimeSec"] = cal_release
     settings_path = _get_storage_path("factorySettings.json")
     _save_json_file(settings_path, merged)
 

@@ -565,7 +565,7 @@ def _stamp_report_operator(enriched):
 
 def _report_requires_approval(report):
     rtype = (report.get("type") or "").strip().lower()
-    return rtype in ("test", "validation")
+    return rtype in ("test", "validation", "calibration")
 
 
 def _check_report_approved_for_print_export(report=None, report_id=None, report_data=None):
@@ -1284,6 +1284,8 @@ def _audit_report_created(report_id, enriched):
         _audit(None, None, action, details)
     elif rtype == "validation":
         _audit(None, None, "Validation performed", details)
+    elif rtype == "calibration":
+        _audit(None, None, "Calibration performed", details)
     else:
         _audit(None, None, "Report saved", details)
 
@@ -1296,6 +1298,11 @@ def create_report():
             gate = _require_session_internal(
                 "validation-test",
                 "Forbidden. You do not have permission to run validation.",
+            )
+        elif rtype == "calibration":
+            gate = _require_session_internal(
+                "calibration-menu",
+                "Forbidden. You do not have permission to run calibration.",
             )
         elif rtype == "test":
             gate = _require_any_session_internal(
@@ -1312,7 +1319,7 @@ def create_report():
             recipe=recipe,
             factory_settings=report_data.get("factorySettings"),
         )
-        if (enriched.get("type") or "").strip().lower() in ("test", "validation"):
+        if (enriched.get("type") or "").strip().lower() in ("test", "validation", "calibration"):
             enriched = _stamp_report_operator(enriched)
             td = enriched.get("testData") if isinstance(enriched.get("testData"), dict) else {}
             run_status = str(td.get("status") or enriched.get("status") or "").strip().lower()
@@ -3883,6 +3890,77 @@ def validation_vacuum_start():
         }), 400
     result = hardware_service.cmd_start_vacuum_validation(vacuum_mmhg, duration_sec)
     return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/hardware/calibration/start", methods=["POST"])
+def hardware_calibration_start():
+    gate = _require_session_internal(
+        "calibration-menu",
+        "Forbidden. You do not have permission to run calibration.",
+    )
+    if gate:
+        return gate
+    data = request.get_json(force=True, silent=True) or {}
+    factory = data_service.get_factory_settings() or {}
+    try:
+        target = float(data.get("targetVacuumMmHg") or factory.get("calibrationTargetVacuumMmHg") or 400)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid calibration target vacuum"}), 400
+    max_vac = float(factory.get("maxVacuumMmHg") or 650)
+    max_vac = min(650.0, max(1.0, max_vac))
+    if target < 1 or target > max_vac:
+        return jsonify({
+            "ok": False,
+            "error": f"Calibration target must be 1–{int(max_vac)} mmHg",
+        }), 400
+    result = hardware_service.cmd_start_calibration(target)
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/hardware/calibration/apply", methods=["POST"])
+def hardware_calibration_apply():
+    gate = _require_session_internal(
+        "calibration-menu",
+        "Forbidden. You do not have permission to run calibration.",
+    )
+    if gate:
+        return gate
+    data = request.get_json(force=True, silent=True) or {}
+    factory = data_service.get_factory_settings() or {}
+    try:
+        calib_value = float(data.get("calibValue"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "calibValue is required"}), 400
+    try:
+        release_time = int(
+            data.get("releaseTimeSec")
+            if data.get("releaseTimeSec") is not None
+            else factory.get("calibrationReleaseTimeSec") or 80
+        )
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid release time"}), 400
+    result = hardware_service.cmd_apply_calibration(calib_value, release_time)
+    if result.get("ok"):
+        _audit_event(
+            action="Calibration applied",
+            outcome="success",
+            entity_type="calibration",
+            entity_name="vacuum",
+            details=f"K={int(round(calib_value))} RL_TM={release_time}",
+            extra={"calibValue": calib_value, "releaseTimeSec": release_time},
+        )
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/hardware/calibration/stop", methods=["POST"])
+def hardware_calibration_stop():
+    gate = _require_session_internal(
+        "calibration-menu",
+        "Forbidden. You do not have permission to run calibration.",
+    )
+    if gate:
+        return gate
+    return jsonify(hardware_service.cmd_stop())
 
 
 @app.route("/api/hardware/validation/load/stop", methods=["POST"])

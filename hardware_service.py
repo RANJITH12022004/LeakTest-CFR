@@ -74,6 +74,14 @@ def classify_line(line: str) -> str:
         return "progress"
     if s.startswith("vacuum:") or s.startswith("elapsed:"):
         return "progress"
+    if "start_calib_ack" in s or s.startswith("start_calib_ack"):
+        return "ok"
+    if "calibvalue_ack" in s or s.startswith("calibvalue_ack"):
+        return "ok"
+    if "rl_tm_ack" in s or s.startswith("rl_tm_ack"):
+        return "ok"
+    if s.startswith("target") or "target,reached" in s:
+        return "progress"
     if s.isdigit():
         return "progress"
     return "info"
@@ -471,6 +479,80 @@ def cmd_start_validation(mode: str):
     if _simulate_enabled():
         return {"ok": True, "simulated": True, "mode": m}
     return send_command(f"{m},start*")
+
+
+def _calibration_sim_loop(target_mmhg: float):
+    """Simulate evacuation to calibration target and hold."""
+    global _sim_active
+    target = max(1.0, float(target_mmhg))
+    current = 0.0
+    tick = 0.5
+    evac_rate = max(5.0, target / 4.0)
+    while _sim_active and current < target:
+        current = min(target, current + evac_rate * tick)
+        _broadcast_line(f"vacuum:{current:.1f}*")
+        time.sleep(tick)
+    while _sim_active:
+        current += random.uniform(-0.4, 0.4)
+        current = max(target * 0.98, min(target * 1.02, current))
+        _broadcast_line(f"vacuum:{current:.1f}*")
+        time.sleep(tick)
+
+
+def cmd_start_calibration(target_mmhg: float = 400.0):
+    """Start vacuum pressure calibration (evacuate to target mmHg)."""
+    global _sim_active, _sim_thread
+    try:
+        target = float(target_mmhg)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Invalid calibration target vacuum"}
+    if target < 1 or target > 650:
+        return {"ok": False, "error": "Calibration target must be 1–650 mmHg"}
+    if _simulate_enabled():
+        with _sim_lock:
+            _sim_active = False
+            if _sim_thread and _sim_thread.is_alive():
+                time.sleep(0.2)
+            _sim_active = True
+            _sim_thread = threading.Thread(
+                target=_calibration_sim_loop,
+                args=(target,),
+                daemon=True,
+            )
+            _sim_thread.start()
+        return {"ok": True, "simulated": True, "targetVacuumMmHg": target}
+    result = send_command("#START_CALIB*", timeout=TEST_COMMAND_TIMEOUT)
+    if result.get("ok"):
+        norm = str(result.get("normalized") or "").lower()
+        if "start_calib_ack" not in norm and "error" not in norm:
+            result["ack"] = norm or "START_CALIB_ACK"
+    return result
+
+
+def cmd_apply_calibration(calib_value: float, release_time_sec: int):
+    """Send measured gauge pressure (K) and release time (RL_TM) to ESP."""
+    try:
+        k = int(round(float(calib_value)))
+        rl = int(release_time_sec)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Invalid calibration value or release time"}
+    if k < 1 or k > 650:
+        return {"ok": False, "error": "Calibration value must be 1–650 mmHg"}
+    if rl < 1 or rl > 5999:
+        return {"ok": False, "error": "Release time must be 1–5999 seconds"}
+    if _simulate_enabled():
+        _broadcast_line(f"#CALIBVALUE_ACK:{k}*")
+        _broadcast_line(f"#RL_TM_ACK:{rl}*")
+        return {"ok": True, "simulated": True, "calibValue": k, "releaseTimeSec": rl}
+    r1 = send_command(f"#CALIBVALUE:{k}*", timeout=COMMAND_TIMEOUT)
+    if not r1.get("ok"):
+        return r1
+    r2 = send_command(f"#RL_TM:{rl}*", timeout=COMMAND_TIMEOUT)
+    if r2.get("ok"):
+        r2["calibValue"] = k
+        r2["releaseTimeSec"] = rl
+        r2["calibAck"] = r1.get("normalized")
+    return r2
 
 
 def _append_uart_log(direction: str, payload: str):

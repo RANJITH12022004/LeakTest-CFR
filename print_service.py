@@ -621,6 +621,93 @@ def _format_thermal_validation_runs_block(runs: list, width: int = THERMAL_WIDTH
     return lines
 
 
+def _append_calibration_report_details(
+    lines: list, td: Dict[str, Any], report_data: Dict[str, Any], width: int, thermal: bool
+) -> None:
+    if not isinstance(td, dict):
+        td = {}
+    ts_end = (
+        report_data.get("completedAt")
+        or td.get("completedAt")
+        or report_data.get("createdAt")
+        or td.get("createdAt")
+    )
+    set_vac = td.get("setVacuumMmHg", report_data.get("setVacuumMmHg"))
+    act_vac = td.get("actualVacuumMmHg", report_data.get("actualVacuumMmHg"))
+    calib_k = td.get("calibValue", report_data.get("calibValue", act_vac))
+    rl_tm = td.get("releaseTimeSec", report_data.get("releaseTimeSec"))
+    live_vac = td.get("liveVacuumAtPrompt")
+    status = td.get("status") or report_data.get("status") or "Completed"
+    remarks = report_data.get("remarks")
+    if remarks is None:
+        remarks = td.get("remarks")
+    dash = "" if thermal else ("-" * width)
+
+    def _vac_disp(val):
+        if val in (None, ""):
+            return "--"
+        try:
+            return "%.1f" % float(val)
+        except (TypeError, ValueError):
+            return str(val)
+
+    if thermal:
+        end_date, end_time = _split_ts_date_and_time(ts_end)
+        lines.extend(
+            [
+                "",
+                "CALIBRATION INFORMATION",
+                f"Status: {status}",
+                f"Completed Date: {end_date}",
+                f"Completed Time: {end_time}",
+                "",
+                "CALIBRATION RESULTS",
+                f"Target Vacuum (mmHg): {_vac_disp(set_vac)}",
+                f"External Gauge K (mmHg): {_vac_disp(calib_k)}",
+                f"Instrument Reading (mmHg): {_vac_disp(act_vac)}",
+                f"Release Time RL_TM (s): {_cell_str(rl_tm)}",
+            ]
+        )
+        if live_vac not in (None, ""):
+            lines.append(f"Live Vacuum at Prompt (mmHg): {_vac_disp(live_vac)}")
+        if remarks not in (None, ""):
+            lines.append(f"Remarks: {remarks}")
+        lines.append("")
+    else:
+        lines.extend(["", "CALIBRATION INFORMATION", dash if dash else ""])
+        _append_two_column_pairs(
+            lines,
+            [
+                ("Status", status),
+                ("Completed", _format_ts_readable(ts_end)),
+            ],
+            width,
+        )
+        lines.extend(["", "CALIBRATION RESULTS", dash if dash else ""])
+        _append_two_column_pairs(
+            lines,
+            [
+                ("Target Vacuum (mmHg)", _vac_disp(set_vac)),
+                ("External Gauge K (mmHg)", _vac_disp(calib_k)),
+                ("Instrument Reading (mmHg)", _vac_disp(act_vac)),
+                ("Release Time RL_TM (s)", _cell_str(rl_tm)),
+            ],
+            width,
+        )
+        if live_vac not in (None, ""):
+            _append_two_column_pairs(
+                lines,
+                [("Live Vacuum at Prompt (mmHg)", _vac_disp(live_vac))],
+                width,
+            )
+        if remarks not in (None, ""):
+            _append_two_column_pairs(
+                lines,
+                [("Remarks", _truncate_with_ellipsis(remarks, max(16, width - 20)))],
+                width,
+            )
+
+
 def _append_validation_report_details(
     lines: list, td: Dict[str, Any], report_data: Dict[str, Any], width: int, thermal: bool
 ) -> None:
@@ -782,7 +869,12 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
     td = report_data.get("testData") or report_data
     fs = report_data.get("factorySettings") or {}
     rtype = str(report_data.get("type") or "test").strip().lower()
-    title = "LEAK TEST VALIDATION REPORT" if rtype == "validation" else "LEAK TEST REPORT"
+    if rtype == "validation":
+        title = "LEAK TEST VALIDATION REPORT"
+    elif rtype == "calibration":
+        title = "LEAK TEST CALIBRATION REPORT"
+    else:
+        title = "LEAK TEST REPORT"
     lines: list = []
     if thermal:
         lines.extend([sep, "RAISE LAB EQUIPMENT", ""])
@@ -794,7 +886,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
     else:
         lines.append(sep)
     derived_hdr: Dict[str, Any] = {}
-    if rtype != "validation":
+    if rtype not in ("validation", "calibration"):
         derived_hdr = report_data.get("reportDerived") or {}
         if not isinstance(derived_hdr, dict) or not derived_hdr:
             td_hdr = td if isinstance(td, dict) else {}
@@ -838,6 +930,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         lines.append("")
     if rtype == "validation":
         _append_validation_report_details(lines, td if isinstance(td, dict) else {}, report_data, width, thermal)
+    elif rtype == "calibration":
+        _append_calibration_report_details(lines, td if isinstance(td, dict) else {}, report_data, width, thermal)
     else:
         recipe = report_data.get("recipe") or td.get("recipe") or td
         if not isinstance(recipe, dict):

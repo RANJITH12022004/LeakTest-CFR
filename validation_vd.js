@@ -525,78 +525,329 @@
         });
     }
 
-    function initVacuumCalibrationPage() {
-        var data = window._lastFailedValidation;
-        var params = window._vdValidationParams || {};
-        if (!data && params.vacuumMmHg == null) {
-            goToPage('validate');
-            return;
+    var CALIB_HOLD_AFTER_TARGET_SEC = 5;
+    window._vacuumCalRun = null;
+
+    function getFactoryCalibrationSettings() {
+        var target = 400;
+        var release = 80;
+        try {
+            var stored = localStorage.getItem('factorySettings');
+            if (stored) {
+                var s = JSON.parse(stored);
+                var t = parseInt(s.calibrationTargetVacuumMmHg, 10);
+                var r = parseInt(s.calibrationReleaseTimeSec, 10);
+                if (!isNaN(t) && t >= 1 && t <= 650) target = t;
+                if (!isNaN(r) && r >= 1 && r <= 5999) release = r;
+            }
+        } catch (e) { /* ignore */ }
+        return {
+            targetVacuumMmHg: target,
+            releaseTimeSec: release,
+            holdAfterTargetSec: CALIB_HOLD_AFTER_TARGET_SEC
+        };
+    }
+
+    function _setCalRunEl(id, text) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = text != null ? String(text) : '--';
+    }
+
+    function _closeVacuumCalEs() {
+        if (window._vacuumCalEsListener && window._vacuumCalEs) {
+            try {
+                window._vacuumCalEs.removeEventListener('message', window._vacuumCalEsListener);
+            } catch (e2) { /* ignore */ }
         }
-        var setVacuum = (params.vacuumMmHg != null)
-            ? params.vacuumMmHg
-            : (data && data.setVacuumMmHg != null ? data.setVacuumMmHg : null);
-        var setDurationDisplay = (params.durationDisplay)
-            || (data && data.setDurationDisplay)
-            || '--';
-        var setVacEl = document.getElementById('cal-set-vacuum');
-        var actualVacEl = document.getElementById('cal-actual-vacuum');
-        var setTimeEl = document.getElementById('cal-set-time');
-        var actualTimeEl = document.getElementById('cal-actual-time');
-        if (setVacEl) setVacEl.textContent = setVacuum != null ? String(setVacuum) : '--';
-        if (actualVacEl) {
-            actualVacEl.value = '';
-            var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
-            actualVacEl.max = String(maxVac);
-        }
-        if (setTimeEl) setTimeEl.textContent = setDurationDisplay;
-        if (actualTimeEl) {
-            actualTimeEl.textContent = (data && data.actualDurationDisplay)
-                || (data && data.actualDurationSec != null ? formatMmSs(data.actualDurationSec) : '--');
-        }
-        if (!window._vacuumCalGaugePromptShown) {
-            window._vacuumCalGaugePromptShown = true;
-            showAppModal('Please use pressure gauge', 'Instruction');
-        }
-        if (actualVacEl) {
-            setTimeout(function () {
-                try { actualVacEl.focus(); } catch (e) { /* ignore */ }
-            }, 80);
+        window._vacuumCalEsListener = null;
+        if (window._vacuumCalEs) {
+            try {
+                window._vacuumCalEs.close();
+            } catch (e) { /* ignore */ }
+            window._vacuumCalEs = null;
         }
     }
 
-    window.confirmVacuumCalibration = function () {
-        var data = window._lastFailedValidation || {};
-        var params = window._vdValidationParams || {};
-        var setVacuum = (params.vacuumMmHg != null)
-            ? params.vacuumMmHg
-            : (data.setVacuumMmHg != null ? data.setVacuumMmHg : null);
-        var actualVacEl = document.getElementById('cal-actual-vacuum');
-        var actualRaw = actualVacEl ? String(actualVacEl.value || '').trim() : '';
-        var actualVacuum = parseFloat(actualRaw);
-        var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
-        if (!actualRaw || isNaN(actualVacuum) || actualVacuum < 1) {
-            showAppModal('Enter the actual vacuum (mmHg).', 'Calibration');
-            if (actualVacEl) actualVacEl.focus();
-            return;
-        }
-        if (actualVacuum > maxVac) {
-            showAppModal('Actual vacuum cannot exceed ' + maxVac + ' mmHg.', 'Calibration');
-            if (actualVacEl) actualVacEl.focus();
-            return;
-        }
-        logAuditEvent('Calibration confirmed', 'Operator entered actual vacuum on calibration — no report generated', {
-            eventType: 'lifecycle',
-            entityType: 'calibration',
-            extra: {
-                validationType: 'distance',
-                setVacuumMmHg: setVacuum,
-                actualVacuumMmHg: actualVacuum
+    function _startCalibrationHoldAfterTarget(run) {
+        if (!run || run.phase !== 'evacuating') return;
+        run.phase = 'holding';
+        run.holdSec = 0;
+        _setCalRunEl('cal-run-status', 'Target reached — holding 5 s');
+        _setCalRunEl('cal-hold-elapsed', '00:00');
+        _clearVacuumCalTimers();
+        window._vacuumCalHoldTimer = setInterval(function () {
+            var r = window._vacuumCalRun;
+            if (!r || r.phase !== 'holding') return;
+            r.holdSec += 1;
+            _setCalRunEl('cal-hold-elapsed', formatMmSs(r.holdSec));
+            if (r.holdSec >= r.holdAfterTargetSec) {
+                _clearVacuumCalTimers();
+                r.phase = 'prompt';
+                _setCalRunEl('cal-run-status', 'Enter external gauge reading');
+                showCalibrationGaugeModal(r);
             }
-        });
-        window._lastFailedValidation = null;
-        validationCompletion.distance = false;
-        if (validationSessionResults) validationSessionResults.distance = null;
+        }, 1000);
+    }
+
+    function _clearVacuumCalTimers() {
+        if (window._vacuumCalHoldTimer != null) {
+            clearInterval(window._vacuumCalHoldTimer);
+            window._vacuumCalHoldTimer = null;
+        }
+    }
+
+    function abortVacuumCalibration() {
+        _clearVacuumCalTimers();
+        _closeVacuumCalEs();
+        if (typeof apiRequest === 'function') {
+            apiRequest(API_BASE + '/api/hardware/calibration/stop', { method: 'POST' }).catch(function () {});
+        }
+        window._vacuumCalRun = null;
         goToPage('validate');
+    }
+    window.abortVacuumCalibration = abortVacuumCalibration;
+
+    function vacuumCalibrationHardwareMessage(ev) {
+        var run = window._vacuumCalRun;
+        if (!run || run.phase === 'done' || run.phase === 'prompt') return;
+        try {
+            var raw = ev.data;
+            if (raw == null || raw === '') return;
+            var data = JSON.parse(raw);
+            if (data.ping) return;
+            var parsed = parseVdSseLine(data);
+            var norm = String(data.normalized != null ? data.normalized : data.line || '').toLowerCase().replace(/\*$/, '');
+            var vacuum = null;
+            if (parsed.vacuum != null) vacuum = parseFloat(parsed.vacuum);
+            else if (parsed.pressure != null) vacuum = parseFloat(parsed.pressure);
+            if (vacuum != null && !isNaN(vacuum)) {
+                run.liveVacuumMmHg = vacuum;
+                _setCalRunEl('cal-live-vacuum', vacuum.toFixed(1));
+            }
+            if (run.phase === 'evacuating') {
+                var targetReached = norm.indexOf('target,reached') >= 0
+                    || norm.indexOf('target reached') >= 0
+                    || norm === 'target,reached,exactly'
+                    || norm.indexOf('target,reached,exactly') >= 0;
+                if (targetReached) {
+                    _startCalibrationHoldAfterTarget(run);
+                } else if (vacuum != null && !isNaN(vacuum) && vacuum >= run.targetVacuumMmHg) {
+                    _startCalibrationHoldAfterTarget(run);
+                }
+            }
+        } catch (ex) { /* ignore */ }
+    }
+
+    function showCalibrationGaugeModal(run) {
+        return new Promise(function (resolve) {
+            var modal = document.getElementById('calibration-gauge-modal');
+            var input = document.getElementById('cal-gauge-pressure-input');
+            var submitBtn = document.getElementById('cal-gauge-submit-btn');
+            var cancelBtn = document.getElementById('cal-gauge-cancel-btn');
+            if (!modal || !input) {
+                resolve(null);
+                return;
+            }
+            input.value = '';
+            modal.style.display = 'flex';
+            setTimeout(function () {
+                try { input.focus(); } catch (e) { /* ignore */ }
+            }, 80);
+            function cleanup() {
+                modal.style.display = 'none';
+                if (submitBtn) submitBtn.onclick = null;
+                if (cancelBtn) cancelBtn.onclick = null;
+            }
+            if (cancelBtn) {
+                cancelBtn.onclick = function () {
+                    cleanup();
+                    resolve(null);
+                };
+            }
+            if (submitBtn) {
+                submitBtn.onclick = function () {
+                    var raw = String(input.value || '').trim();
+                    var val = parseFloat(raw);
+                    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
+                    if (!raw || isNaN(val) || val < 1) {
+                        showAppModal('Enter the actual pressure from the external gauge (mmHg).', 'Calibration');
+                        input.focus();
+                        return;
+                    }
+                    if (val > maxVac) {
+                        showAppModal('Actual pressure cannot exceed ' + maxVac + ' mmHg.', 'Calibration');
+                        input.focus();
+                        return;
+                    }
+                    cleanup();
+                    resolve(val);
+                };
+            }
+        }).then(function (actualPressure) {
+            if (actualPressure == null) {
+                _setCalRunEl('cal-run-status', 'Cancelled — ready to retry');
+                if (window._vacuumCalRun) window._vacuumCalRun.phase = 'idle';
+                return;
+            }
+            finishVacuumCalibration(actualPressure);
+        });
+    }
+
+    function buildCalibrationReportPayload(actualPressure, run) {
+        var user = window.currentUser || {};
+        var now = new Date().toISOString();
+        var td = {
+            calibrationSubtype: 'vacuum',
+            setVacuumMmHg: run.targetVacuumMmHg,
+            actualVacuumMmHg: actualPressure,
+            calibValue: actualPressure,
+            releaseTimeSec: run.releaseTimeSec,
+            holdAfterTargetSec: run.holdAfterTargetSec,
+            liveVacuumAtPrompt: run.liveVacuumMmHg,
+            status: 'Completed',
+            operatorName: user.name || user.username || '--',
+            employeeId: user.username || '--',
+            operatedByUsername: (typeof normalizeReportUsername === 'function')
+                ? normalizeReportUsername(user.username || user.name || '')
+                : (user.username || user.name || ''),
+            createdAt: now,
+            completedAt: now
+        };
+        return {
+            name: 'Calibration - Vacuum - ' + run.targetVacuumMmHg + ' mmHg',
+            type: 'calibration',
+            calibrationSubtype: 'vacuum',
+            status: 'Completed',
+            setVacuumMmHg: run.targetVacuumMmHg,
+            actualVacuumMmHg: actualPressure,
+            calibValue: actualPressure,
+            releaseTimeSec: run.releaseTimeSec,
+            createdAt: now,
+            completedAt: now,
+            operatedByUsername: td.operatedByUsername,
+            operatorName: td.operatorName,
+            employeeId: td.employeeId,
+            testData: td
+        };
+    }
+
+    function saveCalibrationReport(payload) {
+        return apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: payload })
+            .then(function (result) {
+                var reportId = result && result.id;
+                currentReportFilter = 'calibration';
+                if (reportId && typeof openReportPreview === 'function') {
+                    openReportPreview(reportId, { setGate: true });
+                } else {
+                    goToPage('reports');
+                }
+            })
+            .catch(function (err) {
+                console.error('Failed to save calibration report', err);
+                showAppModal('Calibration saved to device failed: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
+                goToPage('reports');
+            });
+    }
+
+    function finishVacuumCalibration(actualPressure) {
+        var run = window._vacuumCalRun;
+        if (!run) return;
+        _setCalRunEl('cal-run-status', 'Applying calibration…');
+        apiRequest(API_BASE + '/api/hardware/calibration/apply', {
+            method: 'POST',
+            body: {
+                calibValue: actualPressure,
+                releaseTimeSec: run.releaseTimeSec
+            }
+        }).then(function (res) {
+            if (!res || res.ok !== true) {
+                return Promise.reject(new Error((res && res.error) ? String(res.error) : 'ESP did not acknowledge calibration'));
+            }
+            logAuditEvent('Calibration completed', 'Vacuum calibration K=' + actualPressure + ' RL_TM=' + run.releaseTimeSec, {
+                eventType: 'lifecycle',
+                entityType: 'calibration',
+                extra: {
+                    setVacuumMmHg: run.targetVacuumMmHg,
+                    calibValue: actualPressure,
+                    releaseTimeSec: run.releaseTimeSec
+                }
+            });
+            run.phase = 'done';
+            _clearVacuumCalTimers();
+            _closeVacuumCalEs();
+            apiRequest(API_BASE + '/api/hardware/calibration/stop', { method: 'POST' }).catch(function () {});
+            var payload = buildCalibrationReportPayload(actualPressure, run);
+            window._lastFailedValidation = null;
+            return saveCalibrationReport(payload);
+        }).catch(function (err) {
+            _setCalRunEl('cal-run-status', 'Calibration failed');
+            showAppModal('Failed to apply calibration: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
+        });
+    }
+
+    function startVacuumCalibrationRun() {
+        var settings = getFactoryCalibrationSettings();
+        window._vacuumCalRun = {
+            targetVacuumMmHg: settings.targetVacuumMmHg,
+            releaseTimeSec: settings.releaseTimeSec,
+            holdAfterTargetSec: settings.holdAfterTargetSec,
+            liveVacuumMmHg: null,
+            holdSec: 0,
+            phase: 'starting'
+        };
+        _setCalRunEl('cal-set-vacuum', String(settings.targetVacuumMmHg));
+        _setCalRunEl('cal-live-vacuum', '--');
+        _setCalRunEl('cal-release-time', String(settings.releaseTimeSec));
+        _setCalRunEl('cal-hold-elapsed', '00:00');
+        _setCalRunEl('cal-run-status', 'Starting calibration…');
+        _clearVacuumCalTimers();
+        _closeVacuumCalEs();
+        try {
+            window._vacuumCalEs = new EventSource((typeof _getHardwareSseUrl === 'function') ? _getHardwareSseUrl() : (API_BASE + '/api/hardware/stream'));
+            window._vacuumCalEsListener = vacuumCalibrationHardwareMessage;
+            window._vacuumCalEs.addEventListener('message', window._vacuumCalEsListener);
+        } catch (esErr) {
+            showAppModal('Could not connect to hardware stream.', 'Calibration');
+            return;
+        }
+        apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
+            var fs = (result && result.settings) ? result.settings : (result || {});
+            try { localStorage.setItem('factorySettings', JSON.stringify(fs)); } catch (e) { /* ignore */ }
+            settings = getFactoryCalibrationSettings();
+            if (window._vacuumCalRun) {
+                window._vacuumCalRun.targetVacuumMmHg = settings.targetVacuumMmHg;
+                window._vacuumCalRun.releaseTimeSec = settings.releaseTimeSec;
+                _setCalRunEl('cal-set-vacuum', String(settings.targetVacuumMmHg));
+                _setCalRunEl('cal-release-time', String(settings.releaseTimeSec));
+            }
+        }).catch(function () { /* use cached */ });
+        apiRequest(API_BASE + '/api/hardware/calibration/start', {
+            method: 'POST',
+            body: { targetVacuumMmHg: settings.targetVacuumMmHg }
+        }).then(function (res) {
+            if (!res || res.ok !== true) {
+                return Promise.reject(new Error((res && res.error) ? String(res.error) : 'Hardware did not acknowledge START_CALIB'));
+            }
+            if (window._vacuumCalRun) {
+                window._vacuumCalRun.phase = 'evacuating';
+                _setCalRunEl('cal-run-status', 'Evacuating to ' + settings.targetVacuumMmHg + ' mmHg');
+                _setCalRunEl('cal-live-vacuum', '0.0');
+            }
+        }).catch(function (err) {
+            _closeVacuumCalEs();
+            _setCalRunEl('cal-run-status', 'Start failed');
+            showAppModal('Failed to start calibration: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
+        });
+    }
+
+    function initVacuumCalibrationPage() {
+        showAppModal('Connect external pressure gauge, then calibration will evacuate to the factory target automatically.', 'Instruction', function () {
+            startVacuumCalibrationRun();
+        });
+    }
+
+    window.confirmVacuumCalibration = function () {
+        startVacuumCalibrationRun();
     };
 
     var _origGoToPageVd = window.goToPage;
@@ -606,7 +857,6 @@
             setTimeout(initVdValidationInputPage, 50);
         }
         if (pageName === 'vacuum-calibration') {
-            window._vacuumCalGaugePromptShown = false;
             setTimeout(initVacuumCalibrationPage, 50);
         }
         return result;
