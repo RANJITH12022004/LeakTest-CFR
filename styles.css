@@ -6428,3 +6428,29 @@ input[type="number"] {
     opacity: 0.6;
     cursor: not-allowed;
 }
+
+/* Full-screen lock during post-run pressure release */
+.release-pressure-overlay {
+    z-index: 10050;
+    background: rgba(8, 15, 28, 0.92);
+    pointer-events: all;
+}
+.release-pressure-modal {
+    max-width: 420px;
+    text-align: center;
+    padding: 36px 28px;
+}
+.release-pressure-timer {
+    margin: 20px auto 12px;
+    font-size: 3.2rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    font-variant-numeric: tabular-nums;
+    color: #e2e8f0;
+    line-height: 1.1;
+}
+.release-pressure-sub {
+    margin: 0;
+    opacity: 0.8;
+    font-size: 0.95rem;
+}

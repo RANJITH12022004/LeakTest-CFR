@@ -862,48 +862,127 @@ def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Di
     _append_test_statistics_block(lines, stats, width, thermal, status_raw)
 
 
+def _fmt_mmss_value(total) -> str:
+    try:
+        t = int(float(total))
+    except (TypeError, ValueError):
+        return "--"
+    if t < 0:
+        t = 0
+    return "%02d:%02d" % (t // 60, t % 60)
+
+
+def _report_brand_title(rtype: str) -> str:
+    r = str(rtype or "test").strip().lower()
+    if r == "validation":
+        return "RAISE LAB EQUIPMENT LEAK TEST VALIDATION REPORT"
+    if r == "calibration":
+        return "RAISE LAB EQUIPMENT LEAK TEST CALIBRATION REPORT"
+    return "RAISE LAB EQUIPMENT LEAK TEST REPORT"
+
+
+def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: Dict[str, Any]) -> Dict[str, str]:
+    """Hold = set hold time; Release = factory/release lock; Total = hold + release."""
+    hold = td.get("holdDurationSec")
+    if hold in (None, ""):
+        hold = td.get("setDurationSec")
+    if hold in (None, "") and isinstance(recipe, dict):
+        hold = recipe.get("durationSec")
+    release = td.get("releaseDurationSec")
+    if release in (None, ""):
+        release = td.get("releaseTimeSec")
+    if release in (None, "") and isinstance(fs, dict):
+        release = fs.get("calibrationReleaseTimeSec")
+    if release in (None, ""):
+        release = 80
+    total = td.get("totalDurationSec")
+    try:
+        hold_i = int(round(float(hold))) if hold not in (None, "") else None
+    except (TypeError, ValueError):
+        hold_i = None
+    try:
+        release_i = int(round(float(release))) if release not in (None, "") else None
+    except (TypeError, ValueError):
+        release_i = None
+    if total in (None, "") and hold_i is not None and release_i is not None:
+        total = hold_i + release_i
+    return {
+        "hold": _fmt_mmss_value(hold_i) if hold_i is not None else "--",
+        "release": _fmt_mmss_value(release_i) if release_i is not None else "--",
+        "total": _fmt_mmss_value(total) if total not in (None, "") else "--",
+        "holdSec": hold_i,
+        "releaseSec": release_i,
+        "totalSec": int(total) if total not in (None, "") else None,
+    }
+
+
+def _approver_name_and_id(report_data: Dict[str, Any], td: Dict[str, Any]) -> tuple:
+    """Return (approver_name, approver_user_id)."""
+    name = (
+        report_data.get("approvedByName")
+        or td.get("approvedByName")
+        or ""
+    )
+    user_id = (
+        report_data.get("approvedByUsername")
+        or td.get("approvedByUsername")
+        or ""
+    )
+    by_line = str(report_data.get("approvedBy") or td.get("approvedBy") or "").strip()
+    if not name and by_line:
+        # Stored as "Name (Role)" — strip role suffix for display name.
+        name = by_line.split("(")[0].strip() or by_line
+    name = str(name or "").strip() or "--"
+    user_id = str(user_id or "").strip() or "--"
+    return name, user_id
+
+
 def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH) -> str:
     thermal = width < 70
     sep = _thermal_sep("=", width) if thermal else ("=" * width)
     sep_dash = _thermal_sep("-", width) if thermal else ("-" * width)
     td = report_data.get("testData") or report_data
+    if not isinstance(td, dict):
+        td = {}
     fs = report_data.get("factorySettings") or {}
+    if not isinstance(fs, dict):
+        fs = {}
     rtype = str(report_data.get("type") or "test").strip().lower()
-    if rtype == "validation":
-        title = "LEAK TEST VALIDATION REPORT"
-    elif rtype == "calibration":
-        title = "LEAK TEST CALIBRATION REPORT"
-    else:
-        title = "LEAK TEST REPORT"
+    title = _report_brand_title(rtype)
     lines: list = []
-    if thermal:
-        lines.extend([sep, "RAISE LAB EQUIPMENT", ""])
-    else:
-        lines.append(sep)
+    lines.append(sep)
     lines.append(title if thermal else title.center(width))
-    if thermal:
-        lines.append("")
-    else:
-        lines.append(sep)
+    lines.append(sep)
     derived_hdr: Dict[str, Any] = {}
     if rtype not in ("validation", "calibration"):
         derived_hdr = report_data.get("reportDerived") or {}
         if not isinstance(derived_hdr, dict) or not derived_hdr:
-            td_hdr = td if isinstance(td, dict) else {}
-            recipe_hdr = report_data.get("recipe") or td_hdr.get("recipe") or {}
+            recipe_hdr = report_data.get("recipe") or td.get("recipe") or {}
             if not isinstance(recipe_hdr, dict):
                 recipe_hdr = {}
-            derived_hdr = build_test_report_derived(td_hdr, recipe_hdr, report_data.get("id"))
+            derived_hdr = build_test_report_derived(td, recipe_hdr, report_data.get("id"))
     print_date = derived_hdr.get("printDate", "--") if derived_hdr else "--"
     print_time = derived_hdr.get("printTime", "--") if derived_hdr else "--"
+    if print_date in (None, "", "--") or print_time in (None, "", "--"):
+        try:
+            import rtc_service
+            payload = rtc_service.get_device_wall_datetime_payload()
+            if print_date in (None, "", "--"):
+                print_date = payload.get("date") or "--"
+            if print_time in (None, "", "--"):
+                print_time = payload.get("time") or "--"
+        except Exception:
+            now = datetime.now()
+            if print_date in (None, "", "--"):
+                print_date = now.strftime("%d-%m-%Y")
+            if print_time in (None, "", "--"):
+                print_time = now.strftime("%H:%M:%S")
     if thermal:
         lines.extend(
             [
                 f"Company: {fs.get('companyName', 'N/A')}",
                 f"Model No: {fs.get('modelNo', 'N/A')}",
                 f"Serial No: {fs.get('serialNo', 'N/A')}",
-                f"Print Date: {print_date}",
-                f"Print Time: {print_time}",
                 f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
                 f"Instrument ID: {fs.get('instrumentId', 'N/A')}",
                 f"Last Val: {fs.get('lastValidationDate', 'N/A')}",
@@ -917,8 +996,6 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 ("Company", fs.get("companyName", "N/A")),
                 ("Model No", fs.get("modelNo", "N/A")),
                 ("Serial No", fs.get("serialNo", "N/A")),
-                ("Print Date", print_date),
-                ("Print Time", print_time),
                 ("Location", fs.get("companyLocation", fs.get("location", "N/A"))),
                 ("Instrument ID", fs.get("instrumentId", "N/A")),
                 ("Last Val", fs.get("lastValidationDate", "N/A")),
@@ -929,14 +1006,14 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
     if not thermal:
         lines.append("")
     if rtype == "validation":
-        _append_validation_report_details(lines, td if isinstance(td, dict) else {}, report_data, width, thermal)
+        _append_validation_report_details(lines, td, report_data, width, thermal)
     elif rtype == "calibration":
-        _append_calibration_report_details(lines, td if isinstance(td, dict) else {}, report_data, width, thermal)
+        _append_calibration_report_details(lines, td, report_data, width, thermal)
     else:
-        recipe = report_data.get("recipe") or td.get("recipe") or td
+        recipe = report_data.get("recipe") or td.get("recipe") or {}
         if not isinstance(recipe, dict):
             recipe = {}
-        status_raw = str(td.get("status", "")).lower() if isinstance(td, dict) else ""
+        status_raw = str(td.get("status", "")).lower()
         status_label = "Aborted" if status_raw == "aborted" else "Completed"
         operator = report_data.get("operatorName") or td.get("operatorName", "--")
         comments = report_data.get("remarks") or td.get("remarks") or ""
@@ -947,35 +1024,12 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             or td.get("completedAt")
             or report_data.get("createdAt")
         )
-        duration_sec = test_duration_seconds(td if isinstance(td, dict) else {})
-        duration_str = format_duration_hhmmss(duration_sec) if duration_sec is not None else "--"
-
-        def _fmt_mmss(total):
-            try:
-                t = int(float(total))
-            except (TypeError, ValueError):
-                return None
-            if t < 0:
-                t = 0
-            return "%02d:%02d" % (t // 60, t % 60)
 
         set_vac = td.get("setVacuumMmHg")
         if set_vac in (None, ""):
             set_vac = recipe.get("vacuumMmHg")
         set_vac_disp = str(set_vac) if set_vac not in (None, "") else "--"
-        act_vac = td.get("actualVacuumMmHg")
-        try:
-            act_vac_disp = "%.1f" % float(act_vac) if act_vac not in (None, "") else "--"
-        except (TypeError, ValueError):
-            act_vac_disp = str(act_vac) if act_vac not in (None, "") else "--"
-        set_dur = (
-            td.get("setDurationDisplay")
-            or _fmt_mmss(td.get("setDurationSec"))
-            or recipe.get("durationDisplay")
-            or _fmt_mmss(recipe.get("durationSec"))
-            or "--"
-        )
-        act_dur = td.get("actualDurationDisplay") or _fmt_mmss(td.get("actualDurationSec")) or "--"
+        dur_fields = _hold_release_total_fields(td, recipe, fs)
         result_val = td.get("result") or "--"
 
         batch_size = td.get("batchSize")
@@ -999,7 +1053,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                     if not isinstance(s, dict):
                         continue
                     pct = s.get("percent")
-                    t_disp = s.get("timeDisplay") or _fmt_mmss(s.get("elapsedSec")) or "--"
+                    t_disp = s.get("timeDisplay") or _fmt_mmss_value(s.get("elapsedSec"))
                     try:
                         vac_s = "%.1f" % float(s.get("vacuumMmHg")) if s.get("vacuumMmHg") not in (None, "") else "--"
                     except (TypeError, ValueError):
@@ -1014,7 +1068,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                     if not isinstance(s, dict):
                         continue
                     pct = s.get("percent")
-                    t_disp = s.get("timeDisplay") or _fmt_mmss(s.get("elapsedSec")) or "--"
+                    t_disp = s.get("timeDisplay") or _fmt_mmss_value(s.get("elapsedSec"))
                     try:
                         vac_s = "%.1f" % float(s.get("vacuumMmHg")) if s.get("vacuumMmHg") not in (None, "") else "--"
                     except (TypeError, ValueError):
@@ -1033,14 +1087,13 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 f"Operator: {operator}",
                 f"Test Start: {_format_ts_readable(ts_start)}",
                 f"Completed: {_format_ts_readable(ts_end)}",
-                f"Duration: {duration_str}",
                 f"Test Status: {status_label}",
                 "",
                 "TEST RESULT",
                 f"Set Vacuum (mmHg): {set_vac_disp}",
-                f"Actual Vacuum (mmHg): {act_vac_disp}",
-                f"Set Duration (mm:ss): {set_dur}",
-                f"Actual Duration (mm:ss): {act_dur}",
+                f"Total Duration (mm:ss): {dur_fields['total']}",
+                f"Hold Duration (mm:ss): {dur_fields['hold']}",
+                f"Release Duration (mm:ss): {dur_fields['release']}",
                 f"Result: {result_val}",
             ]
             _append_hold_vacuum_samples(info_lines, True)
@@ -1060,7 +1113,6 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                     ("Operator", operator),
                     ("Test Start", _format_ts_readable(ts_start)),
                     ("Completed", _format_ts_readable(ts_end)),
-                    ("Duration", duration_str),
                     ("Test Status", status_label),
                 ],
                 width,
@@ -1070,9 +1122,9 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 lines,
                 [
                     ("Set Vacuum (mmHg)", set_vac_disp),
-                    ("Actual Vacuum (mmHg)", act_vac_disp),
-                    ("Set Duration (mm:ss)", set_dur),
-                    ("Actual Duration (mm:ss)", act_dur),
+                    ("Total Duration (mm:ss)", dur_fields["total"]),
+                    ("Hold Duration (mm:ss)", dur_fields["hold"]),
+                    ("Release Duration (mm:ss)", dur_fields["release"]),
                     ("Result", result_val),
                 ],
                 width,
@@ -1084,15 +1136,17 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                     [("Comments", _truncate_with_ellipsis(comments, max(16, width - 20)))],
                     width,
                 )
-    if thermal:
-        lines.extend(["", "APPROVAL"])
+    approver_name, approver_id = _approver_name_and_id(report_data, td)
     if thermal:
         lines.extend(
             [
+                "",
+                "APPROVAL",
                 f"Operated by: {report_data.get('operatorName') or td.get('operatorName', '--')}",
-                f"Employee ID: {td.get('employeeId', '--')}",
+                f"Employee ID: {td.get('employeeId', report_data.get('employeeId', '--'))}",
                 f"Approval Result: {report_data.get('approvalPassFail', '--')}",
-                f"Approved By: {report_data.get('approvedBy', '--')}",
+                f"Approver Name: {approver_name}",
+                f"Approver User ID: {approver_id}",
                 f"Approved At: {_format_ts_readable(report_data.get('approvedAt'))}",
                 f"Approval Remarks: {report_data.get('approvalRemarks', '')}",
             ]
@@ -1103,11 +1157,25 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             lines,
             [
                 ("Operated by", report_data.get("operatorName") or td.get("operatorName", "--")),
-                ("Employee ID", td.get("employeeId", "--")),
+                ("Employee ID", td.get("employeeId", report_data.get("employeeId", "--"))),
                 ("Approval Result", report_data.get("approvalPassFail", "--")),
-                ("Approved By", report_data.get("approvedBy", "--")),
+                ("Approver Name", approver_name),
+                ("Approver User ID", approver_id),
                 ("Approved At", _format_ts_readable(report_data.get("approvedAt"))),
                 ("Approval Remarks", _truncate_with_ellipsis(report_data.get("approvalRemarks", ""), max(16, width - 20))),
+            ],
+            width,
+        )
+    # Print date/time once in the footer only (not in the company header).
+    if thermal:
+        lines.extend(["", f"Print Date: {print_date}", f"Print Time: {print_time}"])
+    else:
+        lines.append("")
+        _append_two_column_pairs(
+            lines,
+            [
+                ("Print Date", print_date),
+                ("Print Time", print_time),
             ],
             width,
         )
@@ -1124,15 +1192,12 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
 def format_for_a4_printer(
     report_data: Dict[str, Any], *, include_printed_timestamp: bool = True
 ) -> str:
-    text = _format_report_text(report_data, width=A4_TEXT_WIDTH).rstrip("\n")
-    if not include_printed_timestamp:
-        return text
-    footer = "\n".join(_thermal_printed_timestamp_lines())
-    return text + "\n\n" + footer
+    # Footer Print Date/Time is included by _format_report_text.
+    return _format_report_text(report_data, width=A4_TEXT_WIDTH).rstrip("\n")
 
 
 def _thermal_printed_timestamp_lines() -> list:
-    """Printed date/time from device RTC at format time."""
+    """Print date/time from device RTC (legacy helper for callers that need a stamp)."""
     try:
         import rtc_service
 
@@ -1143,7 +1208,7 @@ def _thermal_printed_timestamp_lines() -> list:
         now = datetime.now()
         pdate = now.strftime("%d-%m-%Y")
         ptime = now.strftime("%H:%M:%S")
-    return ["", f"Printed Date: {pdate}", f"Printed Time: {ptime}"]
+    return ["", f"Print Date: {pdate}", f"Print Time: {ptime}"]
 
 
 def _thermal_trailing_feed() -> str:
@@ -1151,9 +1216,9 @@ def _thermal_trailing_feed() -> str:
 
 
 def format_for_thermal_printer(report_data: Dict[str, Any]) -> str:
+    # Footer Print Date/Time is included by _format_report_text.
     text = _format_report_text(report_data, width=THERMAL_WIDTH).rstrip("\n")
-    footer = "\n".join(_thermal_printed_timestamp_lines())
-    return text + "\n\n" + footer + _thermal_trailing_feed()
+    return text + _thermal_trailing_feed()
 
 
 def save_report_text_files(report_data: Dict[str, Any], report_id: int, reports_dir: pathlib.Path) -> None:

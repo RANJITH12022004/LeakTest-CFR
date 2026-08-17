@@ -1071,6 +1071,10 @@ function applyReportPreviewLockUi(preview) {
     });
     updateReportApprovePanelForPreview(preview);
     updateReportPreviewPrintExportButtons(preview);
+    if (pending || locked) {
+        markAutoLogoutActivity();
+        if (typeof syncKioskScreenWakeLock === 'function') syncKioskScreenWakeLock();
+    }
 }
 
 function stampOperatorOnTestReportPayload(payload) {
@@ -1116,9 +1120,11 @@ function finishTestRunReportSaved(reportId) {
         if (typeof openReportPreview === 'function') {
             openReportPreview(reportId, { setGate: true });
         } else {
+            _postRunSessionHold = false;
             goToPage('reports');
         }
     } else {
+        _postRunSessionHold = false;
         goToPage('reports');
         if (typeof loadReports === 'function') loadReports();
     }
@@ -2336,6 +2342,8 @@ var factoryAutoLogoutMinutes = 0;
 var _autoLogoutLastActivityMs = 0;
 var _autoLogoutIntervalId = null;
 var _autoLogoutListenersAttached = false;
+/** True from post-test wait through report save until pending preview is on screen. */
+var _postRunSessionHold = false;
 
 function applyFactoryAutoLogoutSetting(settings) {
     var raw = settings && settings.autoLogoutMinutes != null ? settings.autoLogoutMinutes : 0;
@@ -2357,10 +2365,90 @@ function markAutoLogoutActivity() {
     _autoLogoutLastActivityMs = Date.now();
 }
 
+function _isDomOverlayVisible(id) {
+    var el = document.getElementById(id);
+    if (!el) return false;
+    if (el.style && el.style.display === 'none') return false;
+    if (el.style && (el.style.display === 'flex' || el.style.display === 'block')) return true;
+    try {
+        var cs = window.getComputedStyle(el);
+        return !!(cs && cs.display !== 'none' && cs.visibility !== 'hidden');
+    } catch (e) {
+        return false;
+    }
+}
+
+function isPendingApprovalReportOpen() {
+    if (window._reportApprovalGate && window._reportApprovalGate.reportId != null) return true;
+    var app = document.querySelector('.app-container');
+    if (app && app.classList.contains('report-approval-locked')) return true;
+    var page = document.getElementById('page-report-preview');
+    if (page && page.classList.contains('active') && typeof isReportPendingApproval === 'function' && isReportPendingApproval()) {
+        return true;
+    }
+    return false;
+}
+
 function isAutoLogoutRunBlocked() {
-    return (testRunButtonState === 'abort') ||
-        (validationRunState === 'running') ||
-        (validationRunBackendPending === true);
+    if (testRunButtonState === 'abort') return true;
+    if (validationRunState === 'running' || validationRunBackendPending === true) return true;
+    if (_postRunSessionHold || window._postRunSessionHold) return true;
+    if (typeof _abortSaveInFlight !== 'undefined' && _abortSaveInFlight) return true;
+    if (_releasePressureTimerId != null) return true;
+    var cal = window._vacuumCalRun;
+    if (cal && cal.phase && cal.phase !== 'idle' && cal.phase !== 'done') return true;
+    if (isPendingApprovalReportOpen()) return true;
+    var overlayIds = [
+        'release-pressure-overlay',
+        'app-loading-overlay',
+        'calibration-gauge-modal',
+        'biometric-progress-overlay',
+        'app-modal-overlay',
+        'test-run-step-complete-overlay',
+        'test-run-abort-overlay',
+        'test-run-completion-overlay'
+    ];
+    for (var i = 0; i < overlayIds.length; i++) {
+        if (_isDomOverlayVisible(overlayIds[i])) return true;
+    }
+    return false;
+}
+
+var _kioskWakeLock = null;
+
+function requestKioskScreenWakeLock() {
+    if (!navigator.wakeLock || typeof navigator.wakeLock.request !== 'function') return;
+    if (document.visibilityState && document.visibilityState !== 'visible') return;
+    navigator.wakeLock.request('screen').then(function (lock) {
+        _kioskWakeLock = lock;
+        if (lock && typeof lock.addEventListener === 'function') {
+            lock.addEventListener('release', function () {
+                if (_kioskWakeLock === lock) _kioskWakeLock = null;
+            });
+        }
+    }).catch(function () {});
+}
+
+function releaseKioskScreenWakeLock() {
+    if (!_kioskWakeLock) return;
+    try { _kioskWakeLock.release(); } catch (e) { /* ignore */ }
+    _kioskWakeLock = null;
+}
+
+function syncKioskScreenWakeLock() {
+    if (isAutoLogoutRunBlocked()) {
+        if (!_kioskWakeLock) requestKioskScreenWakeLock();
+    } else {
+        releaseKioskScreenWakeLock();
+    }
+}
+
+if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible' && isAutoLogoutRunBlocked()) {
+            requestKioskScreenWakeLock();
+        }
+    });
 }
 
 function ensureAutoLogoutListeners() {
@@ -2397,8 +2485,10 @@ function autoLogoutTick() {
     if (!app || app.style.display === 'none') return;
     if (isAutoLogoutRunBlocked()) {
         markAutoLogoutActivity();
+        syncKioskScreenWakeLock();
         return;
     }
+    syncKioskScreenWakeLock();
     if (factoryAutoLogoutMinutes < 1) return;
     var limitMs = factoryAutoLogoutMinutes * 60000;
     if (Date.now() - _autoLogoutLastActivityMs >= limitMs) {
@@ -2408,6 +2498,10 @@ function autoLogoutTick() {
 }
 
 function performAutoLogoutDueToInactivity() {
+    if (isAutoLogoutRunBlocked()) {
+        markAutoLogoutActivity();
+        return;
+    }
     var pendingGate = window._reportApprovalGate && window._reportApprovalGate.reportId != null &&
         !(typeof isFactorySessionUser === 'function' && isFactorySessionUser());
     var finish = function () {
@@ -2791,6 +2885,94 @@ function enrollMemberBiometric() {
         showAppModal('Fingerprint enrollment failed: ' + (err && err.message ? err.message : 'Network error'), 'Register Fingerprint');
     });
 }
+
+// ===== Post-run full-screen "Releasing pressure" lock (Pi-owned timer) =====
+var _releasePressureTimerId = null;
+var _releasePressureResolve = null;
+/** After a completed leak test: keep the screen on this long, then open the pending-approval report. */
+var POST_TEST_PENDING_REPORT_WAIT_SEC = 180;
+
+function getPostTestPendingReportWaitSec() {
+    return POST_TEST_PENDING_REPORT_WAIT_SEC;
+}
+
+function getReleasePressureLockSec() {
+    var sec = 80;
+    try {
+        var stored = localStorage.getItem('factorySettings');
+        if (stored) {
+            var s = JSON.parse(stored);
+            var r = parseInt(s.calibrationReleaseTimeSec, 10);
+            if (!isNaN(r) && r >= 1 && r <= 999) sec = r;
+        }
+    } catch (e) { /* ignore */ }
+    return sec;
+}
+
+function hideReleasePressureLock() {
+    if (_releasePressureTimerId != null) {
+        clearInterval(_releasePressureTimerId);
+        _releasePressureTimerId = null;
+    }
+    var overlay = document.getElementById('release-pressure-overlay');
+    if (overlay) overlay.style.display = 'none';
+    var resolve = _releasePressureResolve;
+    _releasePressureResolve = null;
+    if (typeof resolve === 'function') {
+        try { resolve(); } catch (e) { /* ignore */ }
+    }
+}
+
+/**
+ * Lock the full screen for releaseSec while pressure vents.
+ * Returns a Promise that resolves when the countdown finishes.
+ * Idle auto-logout is suppressed for the whole countdown.
+ */
+function showReleasePressureLock(releaseSec) {
+    return new Promise(function (resolve) {
+        if (_releasePressureTimerId != null) {
+            clearInterval(_releasePressureTimerId);
+            _releasePressureTimerId = null;
+        }
+        if (typeof _releasePressureResolve === 'function') {
+            try { _releasePressureResolve(); } catch (e) { /* ignore */ }
+        }
+        _releasePressureResolve = resolve;
+        var total = parseInt(releaseSec, 10);
+        if (isNaN(total) || total < 1) total = getReleasePressureLockSec();
+        var remaining = total;
+        var overlay = document.getElementById('release-pressure-overlay');
+        var titleEl = document.getElementById('release-pressure-title');
+        var msgEl = document.getElementById('release-pressure-message');
+        var timerEl = document.getElementById('release-pressure-timer');
+        if (titleEl) titleEl.textContent = 'Releasing pressure';
+        if (msgEl) msgEl.textContent = 'Please wait. Do not touch the chamber.';
+        function paint() {
+            if (timerEl) {
+                timerEl.textContent = (typeof formatMmSs === 'function')
+                    ? formatMmSs(remaining)
+                    : String(remaining);
+            }
+        }
+        paint();
+        if (overlay) overlay.style.display = 'flex';
+        markAutoLogoutActivity();
+        syncKioskScreenWakeLock();
+        _releasePressureTimerId = setInterval(function () {
+            remaining -= 1;
+            markAutoLogoutActivity();
+            if (remaining <= 0) {
+                hideReleasePressureLock();
+                return;
+            }
+            paint();
+        }, 1000);
+    });
+}
+window.showReleasePressureLock = showReleasePressureLock;
+window.hideReleasePressureLock = hideReleasePressureLock;
+window.getReleasePressureLockSec = getReleasePressureLockSec;
+window.getPostTestPendingReportWaitSec = getPostTestPendingReportWaitSec;
 
 // ===== Generic Loading Overlay (export progress, long ops) =====
 var _appLoadingCancelHandler = null;
@@ -4449,6 +4631,8 @@ function buildReportPrintPayload(preview, reportId) {
         approvalPassFail: preview.approvalPassFail,
         approvalRemarks: preview.approvalRemarks,
         approvedBy: preview.approvedBy,
+        approvedByUsername: preview.approvedByUsername,
+        approvedByName: preview.approvedByName,
         approvedAt: preview.approvedAt,
         createdAt: preview.createdAt || td.createdAt,
         completedAt: preview.completedAt || td.completedAt,
@@ -4716,8 +4900,12 @@ function hideReportPreviewLoadingOverlayAfterRender() {
 }
 
 function openReportPreview(reportId, options) {
-    if (!reportId) return;
+    if (!reportId) {
+        _postRunSessionHold = false;
+        return;
+    }
     if (!userCanViewReports()) {
+        _postRunSessionHold = false;
         denyPermission('view reports');
         return;
     }
@@ -4732,6 +4920,8 @@ function openReportPreview(reportId, options) {
             applyReportPreviewLockUi(data.preview);
             goToPage('report-preview');
             startReportApprovalPollIfLocked();
+            markAutoLogoutActivity();
+            syncKioskScreenWakeLock();
             setTimeout(function () {
                 if (isReportPreviewLockedForCurrentUser(data.preview)) {
                     scrollReportPendingBannerIntoView();
@@ -4749,6 +4939,7 @@ function openReportPreview(reportId, options) {
     }).catch(function () {
         showAppModal('Could not open report preview. Check your connection and try again from Reports.', 'Reports');
     }).finally(function () {
+        _postRunSessionHold = false;
         hideReportPreviewLoadingOverlayAfterRender();
     });
 }
@@ -4947,6 +5138,52 @@ function _fmtPreviewTs(iso) {
 }
 
 /** Client fallback compact A4-style monospace (Friability screen look). */
+function _releaseDurationSecFromSettings() {
+    var sec = 80;
+    try {
+        var stored = localStorage.getItem('factorySettings');
+        if (stored) {
+            var s = JSON.parse(stored);
+            var r = parseInt(s.calibrationReleaseTimeSec, 10);
+            if (!isNaN(r) && r >= 1 && r <= 999) sec = r;
+        }
+    } catch (e) { /* ignore */ }
+    return sec;
+}
+
+function _reportDurationFieldsFromPreview(td, recipe, fs) {
+    td = td || {};
+    recipe = recipe || {};
+    fs = fs || {};
+    var hold = td.holdDurationSec != null ? td.holdDurationSec : td.setDurationSec;
+    if (hold == null) hold = recipe.durationSec;
+    var release = td.releaseDurationSec != null ? td.releaseDurationSec : td.releaseTimeSec;
+    if (release == null) release = fs.calibrationReleaseTimeSec;
+    if (release == null) release = _releaseDurationSecFromSettings();
+    var total = td.totalDurationSec;
+    var holdN = parseInt(hold, 10);
+    var releaseN = parseInt(release, 10);
+    if ((total == null || isNaN(parseInt(total, 10))) && !isNaN(holdN) && !isNaN(releaseN)) {
+        total = holdN + releaseN;
+    }
+    function fmt(v) {
+        if (v == null || v === '' || isNaN(parseInt(v, 10))) return '--';
+        return (typeof formatMmSs === 'function') ? formatMmSs(parseInt(v, 10)) : String(v);
+    }
+    return { hold: fmt(hold), release: fmt(release), total: fmt(total) };
+}
+
+function _approverFieldsFromPreview(preview, td) {
+    preview = preview || {};
+    td = td || {};
+    var name = preview.approvedByName || td.approvedByName || '';
+    var id = preview.approvedByUsername || td.approvedByUsername || '';
+    var by = String(preview.approvedBy || td.approvedBy || '').trim();
+    if (!name && by) name = by.split('(')[0].trim() || by;
+    if (typeof formatApprovedByLine === 'function' && name) name = formatApprovedByLine(name);
+    return { name: name || '--', id: id || '--' };
+}
+
 function buildClientThermalPreviewText(preview) {
     if (!preview) return '';
     var recipe = preview.recipe || (preview.testData && preview.testData.recipe) || {};
@@ -4963,26 +5200,17 @@ function buildClientThermalPreviewText(preview) {
     }
     var batchSize = (td.batchSize != null && td.batchSize !== '') ? td.batchSize : recipe.batchSize;
     var setVac = (td.setVacuumMmHg != null) ? td.setVacuumMmHg : recipe.vacuumMmHg;
-    var actVac = td.actualVacuumMmHg;
-    var setDur = td.setDurationDisplay
-        || (td.setDurationSec != null && typeof formatMmSs === 'function' ? formatMmSs(td.setDurationSec) : null)
-        || recipe.durationDisplay
-        || '--';
-    var actDur = td.actualDurationDisplay
-        || (td.actualDurationSec != null && typeof formatMmSs === 'function' ? formatMmSs(td.actualDurationSec) : null)
-        || '--';
-    var durationDisp = actDur;
-    if (typeof testDurationSecondsFromData === 'function' && typeof formatDurationSeconds === 'function') {
-        var ds = testDurationSecondsFromData(td, preview);
-        if (ds != null) durationDisp = formatDurationSeconds(ds);
-    }
+    var durs = _reportDurationFieldsFromPreview(td, recipe, fs);
+    var appr = _approverFieldsFromPreview(preview, td);
     function padPair(leftLabel, leftVal, rightLabel, rightVal) {
         var left = (leftLabel + ': ' + (leftVal != null && leftVal !== '' ? leftVal : '--'));
         var right = (rightLabel + ': ' + (rightVal != null && rightVal !== '' ? rightVal : '--'));
         while (left.length < 40) left += ' ';
         return (left + right).slice(0, 80);
     }
-    var title = (preview.type === 'validation') ? 'LEAK TEST VALIDATION REPORT' : 'LEAK TEST REPORT';
+    var title = 'RAISE LAB EQUIPMENT LEAK TEST REPORT';
+    if (preview.type === 'validation') title = 'RAISE LAB EQUIPMENT LEAK TEST VALIDATION REPORT';
+    else if (preview.type === 'calibration') title = 'RAISE LAB EQUIPMENT LEAK TEST CALIBRATION REPORT';
     var sep = '================================================================================';
     var dash = '--------------------------------------------------------------------------------';
     var lines = [
@@ -4990,8 +5218,7 @@ function buildClientThermalPreviewText(preview) {
         title,
         sep,
         padPair('Company', fs.companyName || 'N/A', 'Model No', fs.modelNo || 'N/A'),
-        padPair('Serial No', fs.serialNo || 'N/A', 'Print Date', derived.printDate || '--'),
-        padPair('Print Time', derived.printTime || '--', 'Location', fs.companyLocation || fs.location || 'N/A'),
+        padPair('Serial No', fs.serialNo || 'N/A', 'Location', fs.companyLocation || fs.location || 'N/A'),
         padPair('Instrument ID', fs.instrumentId || 'N/A', 'Last Val', fs.lastValidationDate || 'N/A'),
         padPair('Next Val Due', fs.nextValidationDate || 'N/A', '', ''),
         '',
@@ -5000,13 +5227,12 @@ function buildClientThermalPreviewText(preview) {
         padPair('Product', recipe.productName || td.productName || 'N/A', 'Batch', recipe.batchNumber || td.batchNumber || 'N/A'),
         padPair('Batch Size', (batchSize != null && batchSize !== '' ? batchSize : 'N/A'), 'A.R. No', arNo || 'N/A'),
         padPair('Operator', preview.operatorName || td.operatorName || '--', 'Test Start', _fmtPreviewTs(td.testStartTime || preview.createdAt)),
-        padPair('Completed', _fmtPreviewTs(td.testEndTime || preview.completedAt || preview.createdAt), 'Duration', durationDisp || '--'),
-        padPair('Test Status', statusLabel, '', ''),
+        padPair('Completed', _fmtPreviewTs(td.testEndTime || preview.completedAt || preview.createdAt), 'Test Status', statusLabel),
         '',
         'TEST RESULT',
         dash,
-        padPair('Set Vacuum (mmHg)', setVac != null && setVac !== '' ? setVac : '--', 'Actual Vacuum (mmHg)', _fmtPreviewVacuum(actVac)),
-        padPair('Set Duration (mm:ss)', setDur || '--', 'Actual Duration (mm:ss)', actDur || '--'),
+        padPair('Set Vacuum (mmHg)', setVac != null && setVac !== '' ? setVac : '--', 'Total Duration (mm:ss)', durs.total),
+        padPair('Hold Duration (mm:ss)', durs.hold, 'Release Duration (mm:ss)', durs.release),
         padPair('Result', td.result || '--', '', '')
     ];
     var samples = Array.isArray(td.vacuumSamples) ? td.vacuumSamples : [];
@@ -5027,9 +5253,11 @@ function buildClientThermalPreviewText(preview) {
         'APPROVAL',
         dash,
         padPair('Operated by', preview.operatorName || td.operatorName || '--', 'Employee ID', preview.employeeId || td.employeeId || '--'),
-        padPair('Approval Result', preview.approvalPassFail || '--', 'Approved By', preview.approvedBy || '--'),
-        padPair('Approval Remarks', (preview.approvalRemarks != null && String(preview.approvalRemarks).trim() !== '')
-            ? preview.approvalRemarks : 'N/A', '', '')
+        padPair('Approval Result', preview.approvalPassFail || '--', 'Approver Name', appr.name),
+        padPair('Approver User ID', appr.id, 'Approval Remarks', (preview.approvalRemarks != null && String(preview.approvalRemarks).trim() !== '')
+            ? preview.approvalRemarks : 'N/A'),
+        '',
+        padPair('Print Date', derived.printDate || '--', 'Print Time', derived.printTime || '--')
     );
     return lines.join('\n');
 }
@@ -5087,8 +5315,10 @@ function _populateLegacyReportPreview(preview) {
     var mainTitleEl = document.getElementById('report-main-title');
     if (mainTitleEl) {
         mainTitleEl.textContent = (reportType === 'validation')
-            ? 'LEAK TEST VALIDATION REPORT'
-            : (reportType === 'calibration' ? 'LEAK TEST CALIBRATION REPORT' : 'LEAK TEST REPORT');
+            ? 'RAISE LAB EQUIPMENT LEAK TEST VALIDATION REPORT'
+            : (reportType === 'calibration'
+                ? 'RAISE LAB EQUIPMENT LEAK TEST CALIBRATION REPORT'
+                : 'RAISE LAB EQUIPMENT LEAK TEST REPORT');
     }
 
     var recipe = preview.recipe || (preview.testData && preview.testData.recipe) || preview.testData || {};
@@ -5149,16 +5379,11 @@ function _populateLegacyReportPreview(preview) {
 
     if (reportType === 'test') {
         var setVac = (td.setVacuumMmHg != null) ? td.setVacuumMmHg : (recipe.vacuumMmHg != null ? recipe.vacuumMmHg : null);
-        var actVac = (td.actualVacuumMmHg != null) ? td.actualVacuumMmHg : null;
-        var setDurDisp = td.setDurationDisplay
-            || (td.setDurationSec != null && typeof formatMmSs === 'function' ? formatMmSs(td.setDurationSec) : null)
-            || (recipe.durationDisplay || (recipe.durationSec != null && typeof formatMmSs === 'function' ? formatMmSs(recipe.durationSec) : null));
-        var actDurDisp = td.actualDurationDisplay
-            || (td.actualDurationSec != null && typeof formatMmSs === 'function' ? formatMmSs(td.actualDurationSec) : null);
+        var durs = _reportDurationFieldsFromPreview(td, recipe, fs);
         setReportEl('report-set-vacuum', setVac != null ? String(setVac) : '');
-        setReportEl('report-actual-vacuum', (actVac != null && !isNaN(parseFloat(actVac))) ? parseFloat(actVac).toFixed(1) : '');
-        setReportEl('report-set-duration', setDurDisp || '');
-        setReportEl('report-actual-duration', actDurDisp || '');
+        setReportEl('report-total-duration', durs.total || '');
+        setReportEl('report-hold-duration', durs.hold || '');
+        setReportEl('report-release-duration', durs.release || '');
         setReportEl('report-leak-result', td.result || '');
 
         var arDisp = (typeof resolveAnalysisReportNo === 'function')
@@ -5278,7 +5503,13 @@ function _populateLegacyReportPreview(preview) {
 
     setReportEl('report-operated-by', preview.operatorName || td.operatorName || '--');
     setReportEl('report-employee-id', preview.employeeId || td.employeeId || '--');
-    setReportEl('report-approved-by', formatApprovedByLine(preview.approvedBy || '--'));
+    var apprFields = _approverFieldsFromPreview(preview, td);
+    setReportEl('report-approved-by-name', apprFields.name);
+    setReportEl('report-approved-by-id', apprFields.id);
+    // Keep legacy id populated if still present in older DOM snapshots.
+    setReportEl('report-approved-by', apprFields.name !== '--'
+        ? (apprFields.id !== '--' ? (apprFields.name + ' / ' + apprFields.id) : apprFields.name)
+        : apprFields.id);
     setReportEl('report-approval-pass-fail', preview.approvalPassFail || '--');
     var apprRem = preview.approvalRemarks;
     setReportEl('report-approval-remarks', (apprRem != null && String(apprRem).trim() !== '') ? apprRem : 'N/A');
@@ -6766,7 +6997,7 @@ function _finishTestRunVacuumHold() {
 
     testRunResultText = _computeTestRunResult();
     setRunCard('run-status-text', 'Completed');
-    setRunCard('run-status-subtext', 'Saving report');
+    setRunCard('run-status-subtext', 'Releasing pressure');
     var resultCard = document.getElementById('test-run-result-card');
     if (resultCard) resultCard.hidden = false;
     setRunCard('run-result', testRunResultText);
@@ -6776,7 +7007,16 @@ function _finishTestRunVacuumHold() {
             + ' / ' + (testRunSetVacuumMmHg != null ? testRunSetVacuumMmHg : '--') + ' mmHg';
     }
     _resetTestRunButtonToStart();
-    saveTestRunReportAndGoToReportPreview();
+    _postRunSessionHold = true;
+    markAutoLogoutActivity();
+    syncKioskScreenWakeLock();
+    var releaseSec = (typeof getPostTestPendingReportWaitSec === 'function')
+        ? getPostTestPendingReportWaitSec()
+        : POST_TEST_PENDING_REPORT_WAIT_SEC;
+    showReleasePressureLock(releaseSec).then(function () {
+        setRunCard('run-status-subtext', 'Saving report');
+        saveTestRunReportAndGoToReportPreview();
+    });
 }
 
 function applyQuickVacuumPreset(mmHg) {
@@ -7215,6 +7455,12 @@ function buildTestRunReportPayload() {
     var elapsedDisplay = (elapsedSec != null && typeof formatMmSs === 'function') ? formatMmSs(elapsedSec) : '--';
     var resultText = testRunResultText || _computeTestRunResult();
 
+    var releaseSec = (typeof getPostTestPendingReportWaitSec === 'function')
+        ? getPostTestPendingReportWaitSec()
+        : POST_TEST_PENDING_REPORT_WAIT_SEC;
+    var holdSec = (testRunSetDurationSec != null) ? testRunSetDurationSec : null;
+    var totalSec = (holdSec != null) ? (parseInt(holdSec, 10) + parseInt(releaseSec, 10)) : null;
+
     var testData = {
         recipe: recipe,
         productName: recipe.productName,
@@ -7230,6 +7476,10 @@ function buildTestRunReportPayload() {
         actualVacuumMmHg: testRunCurrentVacuumMmHg,
         setDurationSec: testRunSetDurationSec,
         setDurationDisplay: testRunSetDurationDisplay,
+        holdDurationSec: holdSec,
+        releaseDurationSec: releaseSec,
+        releaseTimeSec: releaseSec,
+        totalDurationSec: totalSec,
         actualDurationSec: elapsedSec,
         actualDurationDisplay: elapsedDisplay,
         vacuumSamples: Array.isArray(testRunVacuumSamples) ? testRunVacuumSamples.slice() : [],
@@ -7393,8 +7643,11 @@ function _abortTestRunAndSaveWithRemarks(remarks) {
 }
 
 function saveTestRunReportAndGoToReportPreview() {
+    _postRunSessionHold = true;
+    markAutoLogoutActivity();
     var payload = buildTestRunReportPayload();
     if (!payload) {
+        _postRunSessionHold = false;
         if (testRunIntervalId != null) {
             clearInterval(testRunIntervalId);
             testRunIntervalId = null;
@@ -7428,14 +7681,18 @@ function saveTestRunReportAndGoToReportPreview() {
             finishTestRunReportSaved(reportId);
         })
         .catch(function (err) {
+            _postRunSessionHold = false;
             console.error('Save report failed', err);
             showAppModal('Failed to save report.', 'Report');
         });
 }
 
 function saveTestRunReportAndGoToReports() {
+    _postRunSessionHold = true;
+    markAutoLogoutActivity();
     var payload = buildTestRunReportPayload();
     if (!payload) {
+        _postRunSessionHold = false;
         closeTestRunStepCompleteModal();
         if (testRunIntervalId != null) {
             clearInterval(testRunIntervalId);
@@ -7470,6 +7727,7 @@ function saveTestRunReportAndGoToReports() {
             finishTestRunReportSaved(reportId);
         })
         .catch(function (err) {
+            _postRunSessionHold = false;
             console.error('Save report failed', err);
             showAppModal('Failed to save report.', 'Report');
         });
@@ -7795,13 +8053,8 @@ function openBatchNumberModal() {
     var arEl = document.getElementById('load-recipe-analysis-no');
     var errEl = document.getElementById('load-recipe-batch-error');
     if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
-    var defaultSamples = 1;
-    if (pendingRecipeToLoad && pendingRecipeToLoad.testSource !== 'quick'
-        && pendingRecipeToLoad.noOfSamples != null
-        && !isNaN(parseInt(pendingRecipeToLoad.noOfSamples, 10))) {
-        defaultSamples = Math.max(1, Math.min(999, parseInt(pendingRecipeToLoad.noOfSamples, 10)));
-    }
-    if (samplesEl) samplesEl.value = String(defaultSamples);
+    // Always start at 0 — operator must enter sample count (recipe default must not prefill).
+    if (samplesEl) samplesEl.value = '0';
     if (arEl) arEl.value = '';
     if (overlay) overlay.style.display = 'flex';
     if (input) {
@@ -7816,7 +8069,7 @@ function closeBatchNumberModal() {
     var input = document.getElementById('load-recipe-batch-input');
     if (input) input.value = '';
     var samplesEl = document.getElementById('load-recipe-samples-input');
-    if (samplesEl) samplesEl.value = '1';
+    if (samplesEl) samplesEl.value = '0';
     var arEl = document.getElementById('load-recipe-analysis-no');
     if (arEl) arEl.value = '';
     var errEl = document.getElementById('load-recipe-batch-error');
@@ -7853,16 +8106,12 @@ function confirmBatchNumberAndLoad() {
     }
     var samples = parseInt(samplesEl && samplesEl.value ? samplesEl.value : '', 10);
     if (isNaN(samples) || samples < 1 || samples > 999) {
-        setBatchErr('Enter a valid number of samples (1–999).');
+        setBatchErr('Enter number of samples (1–999). Default is 0 — you must enter a value.');
         if (samplesEl) samplesEl.focus();
         return;
     }
+    // Analysis Report No. / PR is optional
     var analysisReportNo = arEl ? String(arEl.value || '').trim() : '';
-    if (!analysisReportNo) {
-        setBatchErr('Enter Analysis Report No. to continue.');
-        if (arEl) arEl.focus();
-        return;
-    }
     var isQuick = pendingRecipeToLoad.testSource === 'quick';
     if (!isQuick && getEffectiveRecipeApprovalStatus(pendingRecipeToLoad) === 'pending') {
         showAppModal('This recipe is pending QA approval and cannot be loaded for testing.', 'Load Recipe');
@@ -7879,6 +8128,7 @@ function confirmBatchNumberAndLoad() {
     if (overlay) overlay.style.display = 'none';
     if (input) input.value = '';
     if (arEl) arEl.value = '';
+    if (samplesEl) samplesEl.value = '0';
     startTestRun(recipe);
 }
 
@@ -8486,6 +8736,8 @@ function buildCombinedValidationReportPayload() {
 function saveCombinedValidationReport() {
     var reportPayload = buildCombinedValidationReportPayload();
     if (!reportPayload) return Promise.resolve();
+    _postRunSessionHold = true;
+    markAutoLogoutActivity();
     return apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: reportPayload })
         .then(function (result) {
             validationSessionResults = { distance: null, load: null };
@@ -8494,12 +8746,17 @@ function saveCombinedValidationReport() {
             currentReportFilter = 'validation';
             if (reportId) {
                 if (typeof openReportPreview === 'function') openReportPreview(reportId, { setGate: true });
-                else goToPage('reports');
+                else {
+                    _postRunSessionHold = false;
+                    goToPage('reports');
+                }
             } else {
+                _postRunSessionHold = false;
                 goToPage('reports');
             }
         })
         .catch(function (err) {
+            _postRunSessionHold = false;
             console.error('Failed to save validation report', err);
             currentReportFilter = 'validation';
             goToPage('reports');

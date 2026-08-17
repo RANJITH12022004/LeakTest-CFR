@@ -7,7 +7,7 @@
     <meta name="viewport"
         content="width=1024, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Leak Test Apparatus</title>
-    <link rel="stylesheet" href="styles.css?v=39">
+    <link rel="stylesheet" href="styles.css?v=41">
 </head>
 
 <body>
@@ -105,12 +105,12 @@
             </div>
             <div class="form-group">
                 <label for="load-recipe-samples-input">No. of Samples <span class="required">*</span></label>
-                <input type="number" id="load-recipe-samples-input" class="input-field" min="1" max="999"
-                    inputmode="numeric" value="1"
+                <input type="number" id="load-recipe-samples-input" class="input-field" min="0" max="999"
+                    inputmode="numeric" value="0"
                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
             </div>
             <div class="form-group">
-                <label for="load-recipe-analysis-no">Analysis Report No. <span class="required">*</span></label>
+                <label for="load-recipe-analysis-no">Analysis Report No. (optional)</label>
                 <input type="text" id="load-recipe-analysis-no" class="input-field"
                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
             </div>
@@ -148,6 +148,16 @@
                 <button type="button" id="biometric-progress-retry-btn" class="btn-role-select btn-role-user" style="display: none;" onclick="retryBiometricProgress()">Try again</button>
                 <button type="button" class="btn-role-select btn-role-cancel" onclick="cancelBiometricProgress()">Cancel</button>
             </div>
+        </div>
+    </div>
+
+    <!-- Full-screen lock while chamber pressure releases after test / validation / calibration -->
+    <div id="release-pressure-overlay" class="modal-overlay release-pressure-overlay" style="display: none;" aria-live="polite">
+        <div class="role-modal release-pressure-modal">
+            <h3 id="release-pressure-title">Releasing pressure</h3>
+            <p id="release-pressure-message" class="section-subtitle">Please wait. Do not touch the chamber.</p>
+            <div id="release-pressure-timer" class="release-pressure-timer" aria-label="Release countdown">03:00</div>
+            <p id="release-pressure-sub" class="release-pressure-sub">Screen stays on. Report opens when this finishes.</p>
         </div>
     </div>
 
@@ -883,27 +893,29 @@
                         <div class="report-preview-container report-print-template" id="report-content">
                             <pre id="report-a4-text-preview" class="report-a4-text-preview" style="display: none;" aria-label="Thermal report preview"></pre>
                             <div id="report-legacy-preview">
-                            <h1>RAISE LAB EQUIPMENT</h1>
-                            <h2 id="report-main-title">LEAK TEST REPORT</h2>
-                            <h2 id="report-company-name">COMPANY NAME</h2>
+                            <h1 id="report-main-title">RAISE LAB EQUIPMENT LEAK TEST REPORT</h1>
                             <table class="report-ident-table">
                                 <tr>
+                                    <th>Company</th>
+                                    <td id="report-company-name"></td>
                                     <th>Model No</th>
                                     <td id="report-model-no"></td>
+                                </tr>
+                                <tr>
                                     <th>Serial No</th>
                                     <td id="report-serial-no"></td>
-                                </tr>
-                                <tr>
                                     <th>Location</th>
                                     <td id="report-location"></td>
-                                    <th>Instrument No</th>
-                                    <td id="report-instrument-no"></td>
                                 </tr>
                                 <tr>
+                                    <th>Instrument No</th>
+                                    <td id="report-instrument-no"></td>
                                     <th>Last Validation Date</th>
                                     <td id="report-previous-val"></td>
+                                </tr>
+                                <tr>
                                     <th>Next Validation Due</th>
-                                    <td id="report-next-validation"></td>
+                                    <td id="report-next-validation" colspan="3"></td>
                                 </tr>
                             </table>
                             <!-- Validation details (shown only for validation reports) -->
@@ -916,12 +928,6 @@
                             <div id="report-test-sections">
                                 <h3>TEST INFORMATION</h3>
                                 <table class="report-info-table">
-                                    <tr>
-                                        <th>PRINT DATE</th>
-                                        <td id="report-print-date"></td>
-                                        <th>PRINT TIME</th>
-                                        <td id="report-print-time"></td>
-                                    </tr>
                                     <tr>
                                         <th>TEST NUMBER</th>
                                         <td id="report-test-number"></td>
@@ -943,8 +949,8 @@
                                     <tr>
                                         <th>REPORT/TEST START</th>
                                         <td id="report-test-start"></td>
-                                        <th>TEST DURATION</th>
-                                        <td id="report-test-duration"></td>
+                                        <th>TEST STATUS</th>
+                                        <td id="report-test-status"></td>
                                     </tr>
                                     <tr>
                                         <th>COMPLETED DATE</th>
@@ -952,28 +958,24 @@
                                         <th>COMPLETED TIME</th>
                                         <td id="report-completed-time"></td>
                                     </tr>
-                                    <tr>
-                                        <th>TEST STATUS</th>
-                                        <td id="report-test-status" colspan="3"></td>
-                                    </tr>
                                 </table>
                                 <h3>TEST RESULT</h3>
                                 <table class="report-info-table">
                                     <tr>
                                         <th>SET VACUUM (mmHg)</th>
-                                        <td id="report-set-vacuum"></td>
-                                        <th>ACTUAL VACUUM (mmHg)</th>
-                                        <td id="report-actual-vacuum"></td>
+                                        <td id="report-set-vacuum" colspan="3"></td>
                                     </tr>
                                     <tr>
-                                        <th>SET DURATION (mm:ss)</th>
-                                        <td id="report-set-duration"></td>
-                                        <th>ACTUAL DURATION (mm:ss)</th>
-                                        <td id="report-actual-duration"></td>
+                                        <th>TOTAL DURATION (mm:ss)</th>
+                                        <td id="report-total-duration"></td>
+                                        <th>HOLD DURATION (mm:ss)</th>
+                                        <td id="report-hold-duration"></td>
                                     </tr>
                                     <tr>
+                                        <th>RELEASE DURATION (mm:ss)</th>
+                                        <td id="report-release-duration"></td>
                                         <th>RESULT</th>
-                                        <td id="report-leak-result" colspan="3"></td>
+                                        <td id="report-leak-result"></td>
                                     </tr>
                                 </table>
                                 <div id="report-vacuum-samples-wrap" style="display: none;">
@@ -999,14 +1001,24 @@
                                     <td id="report-employee-id"></td>
                                 </tr>
                                 <tr>
-                                    <th>Approved By</th>
-                                    <td id="report-approved-by"></td>
-                                    <th>Pass / Fail</th>
-                                    <td id="report-approval-pass-fail"></td>
+                                    <th>Approver Name</th>
+                                    <td id="report-approved-by-name"></td>
+                                    <th>Approver User ID</th>
+                                    <td id="report-approved-by-id"></td>
                                 </tr>
                                 <tr>
+                                    <th>Pass / Fail</th>
+                                    <td id="report-approval-pass-fail"></td>
                                     <th>Approval remarks</th>
-                                    <td id="report-approval-remarks" colspan="3"></td>
+                                    <td id="report-approval-remarks"></td>
+                                </tr>
+                            </table>
+                            <table class="report-ident-table report-print-footer-table" style="margin-top: 16px;">
+                                <tr>
+                                    <th>Print Date</th>
+                                    <td id="report-print-date"></td>
+                                    <th>Print Time</th>
+                                    <td id="report-print-time"></td>
                                 </tr>
                             </table>
                             </div>
@@ -2093,9 +2105,9 @@
                                 <label>Auto logout after idle (minutes)</label>
                                 <input type="number" id="factory-auto-logout-minutes" class="input-field" min="0" max="10080" placeholder="0"
                                     value="0"
-                                    title="0 = disabled. While a test or validation run is active, logout is never forced."
+                                    title="0 = disabled. Never forced during a test, validation, calibration, pressure release, report save, or pending-approval report."
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                                <p class="section-subtitle" style="margin-top:6px;font-size:13px;">0 disables auto logout. When set, users are logged out after this many minutes with no screen activity. No auto logout during an active test run or validation run.</p>
+                                <p class="section-subtitle" style="margin-top:6px;font-size:13px;">0 disables auto logout. When set, users are logged out after this many minutes with no screen activity. Auto logout does not run during an active test/validation/calibration, while pressure is releasing, while a report is saving, or while a pending-approval report is open.</p>
                             </div>
                         </div>
                         <div class="validation-actions-row">
@@ -2111,9 +2123,9 @@
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=3"></script>
     <script src="rbac.js?v=6"></script>
-    <script src="script.js?v=70"></script>
+    <script src="script.js?v=74"></script>
     <script src="leaktest_patch.js?v=2"></script>
-    <script src="validation_vd.js?v=13"></script>
+    <script src="validation_vd.js?v=15"></script>
 </body>
 
 </html>

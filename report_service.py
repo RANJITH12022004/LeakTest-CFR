@@ -569,6 +569,8 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
         "status": report.get("status", "PASS"),
         "remarks": remarks,
         "approvedBy": report.get("approvedBy"),
+        "approvedByUsername": report.get("approvedByUsername"),
+        "approvedByName": report.get("approvedByName"),
         "approvedAt": report.get("approvedAt"),
         "reportApprovalStatus": report.get("reportApprovalStatus"),
         "approvalPassFail": report.get("approvalPassFail"),
@@ -803,19 +805,38 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
     status_label = "Aborted" if status_raw == "aborted" else "Completed"
     start_ts = _format_report_ts(td.get("testStartTime") or preview.get("createdAt"))
     end_ts = _format_report_ts(td.get("testEndTime") or preview.get("completedAt") or preview.get("createdAt"))
-    duration_str = format_duration_hhmmss(test_duration_seconds(td))
 
     remarks = preview.get("remarks") or td.get("remarks") or "N/A"
     remarks_heading = "Abort remarks" if is_aborted else "Remarks"
     if is_approved:
         appr_result = preview.get("approvalPassFail") or "--"
-        appr_by = preview.get("approvedBy") or "--"
         appr_remarks = preview.get("approvalRemarks")
         appr_remarks_disp = appr_remarks if appr_remarks not in (None, "") else "N/A"
     else:
         appr_result = "N/A"
-        appr_by = "N/A"
         appr_remarks_disp = "N/A"
+
+    try:
+        from print_service import _report_brand_title, _approver_name_and_id, _hold_release_total_fields
+        title = _report_brand_title(rtype)
+        appr_name, appr_id = _approver_name_and_id(preview, td)
+        dur_fields = _hold_release_total_fields(td, recipe, fs)
+    except Exception:
+        title = "RAISE LAB EQUIPMENT LEAK TEST REPORT"
+        if rtype == "validation":
+            title = "RAISE LAB EQUIPMENT LEAK TEST VALIDATION REPORT"
+        elif rtype == "calibration":
+            title = "RAISE LAB EQUIPMENT LEAK TEST CALIBRATION REPORT"
+        appr_name = preview.get("approvedByName") or (str(preview.get("approvedBy") or "").split("(")[0].strip() or "--")
+        appr_id = preview.get("approvedByUsername") or "--"
+        dur_fields = {"total": "--", "hold": "--", "release": "--"}
+    if not is_approved:
+        appr_name = "N/A"
+        appr_id = "N/A"
+
+    pts = _report_print_timestamp()
+    pdate = (preview.get("reportDerived") or {}).get("printDate") or pts.get("printDate")
+    ptime = (preview.get("reportDerived") or {}).get("printTime") or pts.get("printTime")
 
     if rtype == "validation":
         val_section = (
@@ -825,30 +846,10 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         test_section = ""
     else:
         val_section = ""
-
-        def _fmt_mmss(total):
-            try:
-                t = int(float(total))
-            except (TypeError, ValueError):
-                return None
-            if t < 0:
-                t = 0
-            return "{:02d}:{:02d}".format(t // 60, t % 60)
-
         set_vac = td.get("setVacuumMmHg")
         if set_vac in (None, ""):
             set_vac = recipe.get("vacuumMmHg")
-        act_vac = td.get("actualVacuumMmHg")
-        set_dur = td.get("setDurationDisplay") or _fmt_mmss(td.get("setDurationSec"))
-        if not set_dur:
-            set_dur = recipe.get("durationDisplay") or _fmt_mmss(recipe.get("durationSec"))
-        act_dur = td.get("actualDurationDisplay") or _fmt_mmss(td.get("actualDurationSec"))
         result_val = td.get("result") or "--"
-
-        try:
-            act_vac_disp = "{:.1f}".format(float(act_vac)) if act_vac not in (None, "") else "--"
-        except (TypeError, ValueError):
-            act_vac_disp = str(act_vac) if act_vac not in (None, "") else "--"
 
         vacuum_samples = td.get("vacuumSamples") or []
         samples_html = ""
@@ -858,7 +859,11 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
                 if not isinstance(s, dict):
                     continue
                 pct = s.get("percent")
-                t_disp = s.get("timeDisplay") or _fmt_mmss(s.get("elapsedSec")) or "--"
+                try:
+                    t = int(float(s.get("elapsedSec")))
+                    t_disp = s.get("timeDisplay") or "{:02d}:{:02d}".format(t // 60, t % 60)
+                except (TypeError, ValueError):
+                    t_disp = s.get("timeDisplay") or "--"
                 try:
                     vac_s = "{:.1f}".format(float(s.get("vacuumMmHg"))) if s.get("vacuumMmHg") not in (None, "") else "--"
                 except (TypeError, ValueError):
@@ -892,88 +897,86 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         if batch_size in (None, ""):
             batch_size = recipe.get("batchSize")
 
-        pts = _report_print_timestamp()
-        test_section = (
-            '<h3>TEST INFORMATION</h3>'
-            '<table class="ident">'
-            '<tr><th>Print Date</th><td>{pdate}</td><th>Print Time</th><td>{ptime}</td></tr>'
-            '<tr><th>Product Name</th><td>{prod}</td><th>Batch No</th><td>{batch}</td></tr>'
-            '<tr><th>Batch Size</th><td>{bsize}</td><th>Analysis Report No.</th><td>{ar}</td></tr>'
-            '<tr><th>Operator</th><td>{op}</td><th>Test Start</th><td>{start}</td></tr>'
-            '<tr><th>Completed Date / Time</th><td colspan="3">{end}</td></tr>'
-            '<tr><th>Duration</th><td>{dur}</td><th>Test Status</th><td>{status}</td></tr>'
-            '</table>'
-            '<h3>TEST RESULT</h3>'
-            '<table class="ident">'
-            '<tr><th>Set Vacuum (mmHg)</th><td>{set_vac}</td><th>Actual Vacuum (mmHg)</th><td>{act_vac}</td></tr>'
-            '<tr><th>Set Duration (mm:ss)</th><td>{set_dur}</td><th>Actual Duration (mm:ss)</th><td>{act_dur}</td></tr>'
-            '<tr><th>Result</th><td colspan="3">{result}</td></tr>'
-            '</table>'
-            '{samples}'
-            '<div class="remarks"><strong>{remarks_heading}:</strong> {remarks}</div>'
-        ).format(
-            remarks_heading=_html_esc(remarks_heading),
-            pdate=_html_esc(pts.get("printDate")),
-            ptime=_html_esc(pts.get("printTime")),
-            op=_html_esc(preview.get("operatorName") or td.get("operatorName")),
-            prod=_html_esc(recipe.get("productName") or td.get("productName")),
-            batch=_html_esc(recipe.get("batchNumber") or td.get("batchNumber")),
-            bsize=_html_esc(batch_size if batch_size not in (None, "") else "--"),
-            ar=_html_esc(ar_disp or "--"),
-            start=_html_esc(start_ts),
-            end=_html_esc(end_ts),
-            dur=_html_esc(duration_str),
-            status=_html_esc(status_label),
-            set_vac=_html_esc(set_vac if set_vac not in (None, "") else "--"),
-            act_vac=_html_esc(act_vac_disp),
-            set_dur=_html_esc(set_dur or "--"),
-            act_dur=_html_esc(act_dur or "--"),
-            result=_html_esc(result_val),
-            samples=samples_html,
-            remarks=_html_esc(remarks),
-        )
-
-    title = "LEAK TEST VALIDATION REPORT" if rtype == "validation" else "LEAK TEST REPORT"
-    if is_aborted:
-        title_note = " (ABORTED)"
-    elif is_approved:
-        title_note = ""
-    else:
-        title_note = ""
+        if rtype == "calibration":
+            test_section = (
+                '<h3>CALIBRATION DETAILS</h3>'
+                '<table class="ident">'
+                '<tr><th>Set Vacuum (mmHg)</th><td>{set_vac}</td><th>Calibration Value</th><td>{calib}</td></tr>'
+                '<tr><th>Release Duration (mm:ss)</th><td>{release}</td><th>Status</th><td>{status}</td></tr>'
+                '</table>'
+                '<div class="remarks"><strong>{remarks_heading}:</strong> {remarks}</div>'
+            ).format(
+                remarks_heading=_html_esc(remarks_heading),
+                set_vac=_html_esc(set_vac if set_vac not in (None, "") else "--"),
+                calib=_html_esc(td.get("calibValue") if td.get("calibValue") not in (None, "") else td.get("actualVacuumMmHg") or "--"),
+                release=_html_esc(dur_fields.get("release") or "--"),
+                status=_html_esc(status_label),
+                remarks=_html_esc(remarks),
+            )
+        else:
+            test_section = (
+                '<h3>TEST INFORMATION</h3>'
+                '<table class="ident">'
+                '<tr><th>Product Name</th><td>{prod}</td><th>Batch No</th><td>{batch}</td></tr>'
+                '<tr><th>Batch Size</th><td>{bsize}</td><th>Analysis Report No.</th><td>{ar}</td></tr>'
+                '<tr><th>Operator</th><td>{op}</td><th>Test Start</th><td>{start}</td></tr>'
+                '<tr><th>Completed Date / Time</th><td>{end}</td><th>Test Status</th><td>{status}</td></tr>'
+                '</table>'
+                '<h3>TEST RESULT</h3>'
+                '<table class="ident">'
+                '<tr><th>Set Vacuum (mmHg)</th><td colspan="3">{set_vac}</td></tr>'
+                '<tr><th>Total Duration (mm:ss)</th><td>{total}</td><th>Hold Duration (mm:ss)</th><td>{hold}</td></tr>'
+                '<tr><th>Release Duration (mm:ss)</th><td>{release}</td><th>Result</th><td>{result}</td></tr>'
+                '</table>'
+                '{samples}'
+                '<div class="remarks"><strong>{remarks_heading}:</strong> {remarks}</div>'
+            ).format(
+                remarks_heading=_html_esc(remarks_heading),
+                op=_html_esc(preview.get("operatorName") or td.get("operatorName")),
+                prod=_html_esc(recipe.get("productName") or td.get("productName")),
+                batch=_html_esc(recipe.get("batchNumber") or td.get("batchNumber")),
+                bsize=_html_esc(batch_size if batch_size not in (None, "") else "--"),
+                ar=_html_esc(ar_disp or "--"),
+                start=_html_esc(start_ts),
+                end=_html_esc(end_ts),
+                status=_html_esc(status_label),
+                set_vac=_html_esc(set_vac if set_vac not in (None, "") else "--"),
+                total=_html_esc(dur_fields.get("total") or "--"),
+                hold=_html_esc(dur_fields.get("hold") or "--"),
+                release=_html_esc(dur_fields.get("release") or "--"),
+                result=_html_esc(result_val),
+                samples=samples_html,
+                remarks=_html_esc(remarks),
+            )
 
     body = (
         '<div class="doc">'
-        '<h1>{title}{note}</h1>'
-        '<h2>{company}</h2>'
+        '<h1>{title}</h1>'
         '<table class="ident">'
-        '<tr><th>Model No</th><td>{model}</td><th>Serial No</th><td>{serial}</td></tr>'
-        '<tr><th>Print Date</th><td>{pdate}</td><th>Print Time</th><td>{ptime}</td></tr>'
-        '<tr><th>Location</th><td>{loc}</td><th>Instrument ID</th><td>{inst}</td></tr>'
-        '<tr><th>Last Validation</th><td>{lastv}</td><th>Next Validation</th><td>{nextv}</td></tr>'
+        '<tr><th>Company</th><td>{company}</td><th>Model No</th><td>{model}</td></tr>'
+        '<tr><th>Serial No</th><td>{serial}</td><th>Location</th><td>{loc}</td></tr>'
+        '<tr><th>Instrument ID</th><td>{inst}</td><th>Last Validation</th><td>{lastv}</td></tr>'
+        '<tr><th>Next Validation</th><td colspan="3">{nextv}</td></tr>'
         '</table>'
         '{val}'
         '{test}'
         '<h3>APPROVAL</h3>'
         '<table class="ident">'
         '<tr><th>Operated by</th><td>{op}</td><th>Employee ID</th><td>{emp}</td></tr>'
-        '<tr><th>Approval Result</th><td>{appr}</td><th>Approved By</th><td>{by}</td></tr>'
-        '<tr><th>Approval Remarks</th><td colspan="3">{appr_rem}</td></tr>'
+        '<tr><th>Approval Result</th><td>{appr}</td><th>Approver Name</th><td>{appr_name}</td></tr>'
+        '<tr><th>Approver User ID</th><td>{appr_id}</td><th>Approval Remarks</th><td>{appr_rem}</td></tr>'
+        '</table>'
+        '<table class="ident" style="margin-top:12px;">'
+        '<tr><th>Print Date</th><td>{pdate}</td><th>Print Time</th><td>{ptime}</td></tr>'
         '</table>'
         '</div>'
     ).format(
         title=_html_esc(title),
-        note=title_note,
         company=_html_esc(fs.get("companyName")),
         model=_html_esc(fs.get("modelNo")),
         serial=_html_esc(fs.get("serialNo")),
-        pdate=_html_esc(
-            (preview.get("reportDerived") or {}).get("printDate")
-            or _report_print_timestamp().get("printDate")
-        ),
-        ptime=_html_esc(
-            (preview.get("reportDerived") or {}).get("printTime")
-            or _report_print_timestamp().get("printTime")
-        ),
+        pdate=_html_esc(pdate),
+        ptime=_html_esc(ptime),
         loc=_html_esc(fs.get("companyLocation") or fs.get("location")),
         inst=_html_esc(fs.get("instrumentId")),
         lastv=_html_esc(fs.get("lastValidationDate")),
@@ -983,7 +986,8 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         op=_html_esc(preview.get("operatorName") or td.get("operatorName")),
         emp=_html_esc(preview.get("employeeId") or td.get("employeeId")),
         appr=_html_esc(appr_result),
-        by=_html_esc(appr_by),
+        appr_name=_html_esc(appr_name),
+        appr_id=_html_esc(appr_id),
         appr_rem=_html_esc(appr_remarks_disp),
     )
 
@@ -1002,6 +1006,7 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         '<!doctype html><html><head><meta charset="utf-8"><title>Report</title>'
         '<style>{}</style></head><body>{}</body></html>'
     ).format(css, body)
+
 
 
 def create_pdf_report(report_data: Dict[str, Any], template_type: str = "standard") -> Optional[pathlib.Path]:

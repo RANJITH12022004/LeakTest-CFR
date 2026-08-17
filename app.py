@@ -1420,6 +1420,7 @@ def approve_report(report_id):
         report["approvalPassFail"] = pf
         report["approvalRemarks"] = remarks
         report["approvedBy"] = by_line
+        report["approvedByName"] = verified_name
         report["approvedByUsername"] = verified_username
         report["approvedAt"] = _utc_now_iso()
         data_service.save_report(report)
@@ -3916,6 +3917,19 @@ def hardware_calibration_start():
             "error": f"Calibration target must be 1–{int(max_vac)} mmHg",
         }), 400
     result = hardware_service.cmd_start_calibration(target)
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/hardware/calibration/esp-start", methods=["POST"])
+def hardware_calibration_esp_start():
+    """Send #START_CALIB* after TARGET_REACHED during calibration evacuate."""
+    gate = _require_session_internal(
+        "calibration-menu",
+        "Forbidden. You do not have permission to run calibration.",
+    )
+    if gate:
+        return gate
+    result = hardware_service.cmd_esp_start_calib()
     return jsonify(result), (200 if result.get("ok") else 400)
 
 
