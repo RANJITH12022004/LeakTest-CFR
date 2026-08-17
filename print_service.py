@@ -65,8 +65,14 @@ THERMAL_LINE_CHUNK = 32
 A4_TEXT_WIDTH = 80
 # Blank lines after content so the last lines clear the tear bar (single feed at send only).
 THERMAL_POST_PRINT_FEED_LINES = 3
-THERMAL_LOGO_PATH = pathlib.Path(__file__).resolve().parent / "assets" / "apple-touch-icon.png"
-THERMAL_LOGO_WIDTH_PX = 384
+# ESC/POS raster width for 58mm thermal (must be multiple of 8). DT-Bath-CFR21 aligned.
+THERMAL_RASTER_WIDTH = 384
+THERMAL_LOGO_PRINT_WIDTH = 384
+_ASSETS_DIR = pathlib.Path(__file__).resolve().parent / "assets"
+_THERMAL_LOGO_CANDIDATES = (
+    _ASSETS_DIR / "apple-touch-icon.png",
+    _ASSETS_DIR / "rle_logo.png",
+)
 
 _PRINTER_INIT_SEQ = b"\x1b\x40"
 _log = logging.getLogger(__name__)
@@ -76,6 +82,13 @@ _a4_port = None
 _a4_baud = None
 _thermal_port = None
 _thermal_baud = None
+_thermal_logo_raster_cache: Optional[bytes] = None
+_thermal_logo_raster_mtime: Optional[float] = None
+
+try:
+    from PIL import Image as _PILImage
+except ImportError:
+    _PILImage = None
 
 
 def init(config):
@@ -293,46 +306,118 @@ def _normalize_display_date_slash(value: Any) -> str:
     return s
 
 
+def _resolve_thermal_logo_path() -> Optional[pathlib.Path]:
+    for path in _THERMAL_LOGO_CANDIDATES:
+        try:
+            if path.is_file():
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def _pil_to_escpos_raster(img: Any, width_pixels: int) -> bytes:
+    """Convert a PIL image to ESC/POS GS v 0 raster bytes (width multiple of 8)."""
+    if _PILImage is None:
+        raise RuntimeError("Pillow (PIL) is required for thermal logo printing")
+    width_pixels = max(8, int(width_pixels) - (int(width_pixels) % 8))
+    img = img.convert("L")
+    w, h = img.size
+    if w != width_pixels:
+        new_h = max(1, int(round(h * (width_pixels / float(w)))))
+        img = img.resize((width_pixels, new_h), _PILImage.LANCZOS)
+        w, h = img.size
+    # Dark pixels print (1), light stay white (0) — DT threshold 160
+    bw = img.point(lambda p: 0 if p > 160 else 1, "1")
+    m = 0
+    xL = (w // 8) & 0xFF
+    xH = ((w // 8) >> 8) & 0xFF
+    yL = h & 0xFF
+    yH = (h >> 8) & 0xFF
+    header = bytes([0x1D, 0x76, 0x30, m, xL, xH, yL, yH])
+    row_bytes = w // 8
+    raw = bw.tobytes()
+    out = bytearray(header)
+    for row in range(h):
+        start = row * row_bytes
+        out.extend(raw[start : start + row_bytes])
+    return bytes(out)
+
+
+def _build_centered_thermal_logo_raster(
+    logo_path: pathlib.Path,
+    *,
+    paper_width: int = THERMAL_RASTER_WIDTH,
+    logo_width: int = THERMAL_LOGO_PRINT_WIDTH,
+) -> bytes:
+    """DT-Bath-CFR21 style: trim, scale to logo_width, center on paper_width canvas."""
+    if _PILImage is None:
+        raise RuntimeError("Pillow (PIL) is required for thermal logo printing")
+    paper_width = max(8, int(paper_width) - (int(paper_width) % 8))
+    logo_width = max(8, int(logo_width) - (int(logo_width) % 8))
+    logo_width = min(logo_width, paper_width)
+
+    src = _PILImage.open(logo_path)
+    src.load()
+
+    if src.mode in ("1", "L"):
+        mono = src.convert("L")
+    else:
+        # Color brand art → mono for thermal (DT color→black rules)
+        rgba = src.convert("RGBA")
+        gray = _PILImage.new("L", rgba.size, 255)
+        px = rgba.load()
+        gp = gray.load()
+        w0, h0 = rgba.size
+        for y in range(h0):
+            for x in range(w0):
+                r, g, b, a = px[x, y]
+                if a < 20:
+                    continue
+                if r < 50 and g < 55 and b < 70:
+                    continue
+                if (r + g + b) < 90:
+                    continue
+                if (r + g + b) > 120 or max(r, g, b) > 100:
+                    gp[x, y] = 0
+        mono = gray
+
+    inv = _PILImage.eval(mono, lambda p: 255 - p)
+    bbox = inv.getbbox()
+    if bbox:
+        mono = mono.crop(bbox)
+
+    new_h = max(1, int(round(mono.height * (logo_width / float(max(1, mono.width))))))
+    mono = mono.resize((logo_width, new_h), _PILImage.LANCZOS)
+    mono = mono.point(lambda p: 0 if p < 160 else 255)
+
+    canvas = _PILImage.new("L", (paper_width, mono.height), 255)
+    ox = max(0, (paper_width - logo_width) // 2)
+    canvas.paste(mono, (ox, 0))
+    return _pil_to_escpos_raster(canvas, paper_width)
+
+
 def _thermal_logo_raster_bytes() -> Optional[bytes]:
-    """Build ESC/POS raster for the thermal header logo (full paper width)."""
-    try:
-        from PIL import Image
-    except ImportError:
+    """Cached ESC/POS raster for thermal header logo (DT pipeline)."""
+    global _thermal_logo_raster_cache, _thermal_logo_raster_mtime
+    if _PILImage is None:
         _log.warning("Pillow not installed; thermal logo skipped")
         return None
-    path = THERMAL_LOGO_PATH
-    if not path.is_file():
-        _log.warning("Thermal logo missing: %s", path)
+    path = _resolve_thermal_logo_path()
+    if path is None:
+        _log.warning("Thermal logo missing (checked apple-touch-icon.png, rle_logo.png)")
         return None
     try:
-        img = Image.open(path).convert("L")
-        w, h = img.size
-        width_pixels = THERMAL_LOGO_WIDTH_PX
-        if w != width_pixels:
-            new_h = max(1, int(h * (width_pixels / float(w))))
-            img = img.resize((width_pixels, new_h), Image.LANCZOS)
-            w, h = img.size
-        # Width must be multiple of 8 for ESC/POS bit image.
-        if w % 8:
-            pad = 8 - (w % 8)
-            from PIL import ImageOps
-
-            img = ImageOps.expand(img, border=(0, 0, pad, 0), fill=255)
-            w, h = img.size
-        bw = img.point(lambda p: 0 if p > 127 else 1, "1")
-        m = 0
-        xL = (w // 8) & 0xFF
-        xH = ((w // 8) >> 8) & 0xFF
-        yL = h & 0xFF
-        yH = (h >> 8) & 0xFF
-        header = bytes([0x1D, 0x76, 0x30, m, xL, xH, yL, yH])
-        row_bytes = w // 8
-        raw = bw.tobytes()
-        out = bytearray(header)
-        for row in range(h):
-            start = row * row_bytes
-            out.extend(raw[start : start + row_bytes])
-        return bytes(out)
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    if _thermal_logo_raster_cache is not None and _thermal_logo_raster_mtime == mtime:
+        return _thermal_logo_raster_cache
+    try:
+        raster = _build_centered_thermal_logo_raster(path)
+        _thermal_logo_raster_cache = raster
+        _thermal_logo_raster_mtime = mtime
+        return raster
     except Exception as e:
         _log.warning("Thermal logo raster failed: %s", e)
         return None
@@ -683,6 +768,8 @@ def _validation_overall_status_label(td: Dict[str, Any], report_data: Dict[str, 
     overall = td.get("status") or report_data.get("status") or "--"
     s = str(overall).strip()
     low = s.lower()
+    if low == "aborted":
+        return "Aborted"
     if low == "pass":
         return "Pass"
     if low == "fail":
@@ -702,7 +789,7 @@ def _format_thermal_validation_runs_block(runs: list, width: int = THERMAL_WIDTH
         lines.append(f"Set Time: {_validation_set_time_display(run)}")
         act_sec = run.get("actualDurationSec")
         lines.append(f"Actual Time: {_fmt_mmss(act_sec) if act_sec is not None else '--'}")
-        lines.append(f"Status: {_cell_str(run.get('status'))}")
+        lines.append(f"Status: {'Aborted' if str(run.get('status') or '').strip().lower() == 'aborted' else _cell_str(run.get('status'))}")
     lines.extend(["", _thermal_sep("-", w), ""])
     return lines
 
@@ -721,9 +808,10 @@ def _append_calibration_report_details(
     set_vac = td.get("setVacuumMmHg", report_data.get("setVacuumMmHg"))
     act_vac = td.get("actualVacuumMmHg", report_data.get("actualVacuumMmHg"))
     calib_k = td.get("calibValue", report_data.get("calibValue", act_vac))
-    rl_tm = td.get("releaseTimeSec", report_data.get("releaseTimeSec"))
-    live_vac = td.get("liveVacuumAtPrompt")
-    status = td.get("status") or report_data.get("status") or "Completed"
+    status_raw = str(td.get("status") or report_data.get("status") or "Completed").strip()
+    status = "Aborted" if status_raw.lower() == "aborted" else (
+        "Completed" if status_raw.lower() == "completed" or not status_raw else status_raw
+    )
     remarks = report_data.get("remarks")
     if remarks is None:
         remarks = td.get("remarks")
@@ -751,11 +839,8 @@ def _append_calibration_report_details(
                 f"Target Vacuum (mmHg): {_vac_disp(set_vac)}",
                 f"External Gauge K (mmHg): {_vac_disp(calib_k)}",
                 f"Instrument Reading (mmHg): {_vac_disp(act_vac)}",
-                f"Release Time RL_TM (s): {_cell_str(rl_tm)}",
             ]
         )
-        if live_vac not in (None, ""):
-            lines.append(f"Live Vacuum at Prompt (mmHg): {_vac_disp(live_vac)}")
         if remarks not in (None, ""):
             lines.append(f"Remarks: {remarks}")
         lines.append("")
@@ -776,16 +861,9 @@ def _append_calibration_report_details(
                 ("Target Vacuum (mmHg)", _vac_disp(set_vac)),
                 ("External Gauge K (mmHg)", _vac_disp(calib_k)),
                 ("Instrument Reading (mmHg)", _vac_disp(act_vac)),
-                ("Release Time RL_TM (s)", _cell_str(rl_tm)),
             ],
             width,
         )
-        if live_vac not in (None, ""):
-            _append_two_column_pairs(
-                lines,
-                [("Live Vacuum at Prompt (mmHg)", _vac_disp(live_vac))],
-                width,
-            )
         if remarks not in (None, ""):
             _append_two_column_pairs(
                 lines,
@@ -956,10 +1034,10 @@ def _fmt_mmss_value(total) -> str:
 def _report_brand_title(rtype: str) -> str:
     r = str(rtype or "test").strip().lower()
     if r == "validation":
-        return "RAISE LAB EQUIPMENT LEAK TEST VALIDATION REPORT"
+        return "LEAK TEST APPARATUS VALIDATION REPORT"
     if r == "calibration":
-        return "RAISE LAB EQUIPMENT LEAK TEST CALIBRATION REPORT"
-    return "RAISE LAB EQUIPMENT LEAK TEST REPORT"
+        return "LEAK TEST APPARATUS CALIBRATION REPORT"
+    return "LEAK TEST APPARATUS TEST REPORT"
 
 
 def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: Dict[str, Any]) -> Dict[str, str]:
@@ -1097,7 +1175,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         recipe = report_data.get("recipe") or td.get("recipe") or {}
         if not isinstance(recipe, dict):
             recipe = {}
-        status_raw = str(td.get("status", "")).lower()
+        status_raw = str(td.get("status") or report_data.get("status") or "").lower()
         status_label = "Aborted" if status_raw == "aborted" else "Completed"
         operator = report_data.get("operatorName") or td.get("operatorName", "--")
         comments = report_data.get("remarks") or td.get("remarks") or ""

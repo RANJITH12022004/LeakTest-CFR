@@ -107,6 +107,12 @@ def register_members_routes(bp, kiosk):
             before_member = data_service.get_member(member_id)
             if not before_member:
                 return jsonify({"error": "Member not found"}), 404
+            new_status = str(member_data.get("status") or "").strip().lower()
+            old_status = str(before_member.get("status") or "active").strip().lower()
+            if new_status == "disabled" and old_status != "disabled":
+                return jsonify({
+                    "error": "Use DELETE /members/{id} with admin verification to disable a member."
+                }), 400
             is_self = auth_store.is_self_member(user, member_id)
             if is_self:
                 try:
@@ -172,6 +178,8 @@ def register_members_routes(bp, kiosk):
             member = data_service.get_member(member_id)
             if not member:
                 return jsonify({"error": "Member not found"}), 404
+            target = (member.get("username") or member.get("name") or "").strip() or "--"
+            actor = (user.get("username") or user.get("name") or "--").strip() or "--"
             verified, verify_err = auth_store.consume_approval_verify_token("user_admin")
             if not verified:
                 audit_event(
@@ -181,12 +189,15 @@ def register_members_routes(bp, kiosk):
                     outcome="denied",
                     entity_type="member",
                     entity_id=member_id,
-                    entity_name=member.get("username") or member.get("name") or "",
-                    details=verify_err or "Approval verification required",
-                    target_user=member.get("username") or "",
+                    entity_name=target,
+                    details="{} attempted to disable {}: {}".format(
+                        actor, target, verify_err or "Approval verification required"
+                    ),
+                    target_user=target,
                     before=member,
                 )
                 return jsonify({"error": verify_err}), 403
+            verifier_name = (verified.get("username") or verified.get("name") or actor or "--").strip() or "--"
             before_member = dict(member)
             template_id = member.get("fingerprintTemplateId")
             if template_id is not None:
@@ -202,10 +213,14 @@ def register_members_routes(bp, kiosk):
                             outcome="failed",
                             entity_type="member",
                             entity_id=member_id,
-                            entity_name=member.get("username") or member.get("name") or "",
-                            details=deleted.get("error")
-                            or "Failed to delete fingerprint template from sensor",
-                            target_user=member.get("username") or "",
+                            entity_name=target,
+                            details="{} attempted to disable {}: {}".format(
+                                verifier_name,
+                                target,
+                                deleted.get("error")
+                                or "Failed to delete fingerprint template from sensor",
+                            ),
+                            target_user=target,
                             before=before_member,
                             signature={
                                 "mode": "password_reconfirm",
@@ -232,9 +247,9 @@ def register_members_routes(bp, kiosk):
                 outcome="success",
                 entity_type="member",
                 entity_id=member_id,
-                entity_name=member.get("username") or member.get("name") or "",
-                details="Member disabled",
-                target_user=member.get("username") or "",
+                entity_name=target,
+                details="{} disabled {}".format(verifier_name, target),
+                target_user=target,
                 before=before_member,
                 after=member,
                 signature={
@@ -285,6 +300,8 @@ def register_members_routes(bp, kiosk):
             before_member = data_service.get_member(member_id)
             sig = auth_store.desktop_signature(user)
             member = data_service.enable_member(member_id)
+            target = (member.get("username") or member.get("name") or "").strip() or "--"
+            actor = (user.get("username") or user.get("name") or "--").strip() or "--"
             audit_event(
                 kiosk,
                 user,
@@ -292,9 +309,9 @@ def register_members_routes(bp, kiosk):
                 outcome="success",
                 entity_type="member",
                 entity_id=member_id,
-                entity_name=member.get("username") or member.get("name") or "",
-                details="Member enabled",
-                target_user=member.get("username") or "",
+                entity_name=target,
+                details="{} enabled {}".format(actor, target),
+                target_user=target,
                 before=data_service.sanitize_member_for_client(before_member) if before_member else None,
                 after=data_service.sanitize_member_for_client(member) or member,
                 signature=sig,

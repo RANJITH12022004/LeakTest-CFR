@@ -37,11 +37,15 @@ def validate_recipe(recipe_data: Dict[str, Any]) -> Dict[str, Any]:
     if not product_type:
         errors.append("Product type is required")
     try:
-        samples = int(recipe_data.get("noOfSamples"))
-        if samples < 1 or samples > 999:
-            errors.append("No. of samples must be between 1 and 999")
+        raw_samples = recipe_data.get("noOfSamples")
+        if raw_samples in (None, ""):
+            pass  # optional
+        else:
+            samples = int(raw_samples)
+            if samples < 1:
+                errors.append("No. of samples must be 1 or more when provided")
     except (TypeError, ValueError):
-        errors.append("No. of samples is required")
+        errors.append("No. of samples must be a whole number when provided")
     try:
         batch_size = int(recipe_data.get("batchSize"))
         if batch_size < 1 or batch_size > 999:
@@ -103,10 +107,14 @@ def validate_recipe(recipe_data: Dict[str, Any]) -> Dict[str, Any]:
 
 def process_recipe_form_data(form_data: Dict[str, Any]) -> Dict[str, Any]:
     recipe = dict(form_data)
-    try:
-        recipe["noOfSamples"] = int(recipe.get("noOfSamples"))
-    except (TypeError, ValueError):
-        pass
+    raw_samples = recipe.get("noOfSamples")
+    if raw_samples in (None, ""):
+        recipe["noOfSamples"] = None
+    else:
+        try:
+            recipe["noOfSamples"] = int(raw_samples)
+        except (TypeError, ValueError):
+            recipe["noOfSamples"] = None
     try:
         recipe["batchSize"] = int(recipe.get("batchSize"))
     except (TypeError, ValueError):

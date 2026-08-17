@@ -35,6 +35,18 @@ def _is_suppressed_actor(user: Optional[str], role: Optional[str]) -> bool:
     return u == FACTORY_USERNAME and r.lower() == FACTORY_ROLE.lower()
 
 
+# Member administration must remain auditable even when Factory performs it.
+_COMPLIANCE_ALWAYS_LOG_ACTIONS = frozenset({
+    "User disabled",
+    "User enabled",
+    "User locked",
+    "User unlocked",
+    "User permissions updated",
+    "Added new user",
+    "Password changed",
+})
+
+
 def is_hidden_factory_actor(user: Optional[str], role: Optional[str]) -> bool:
     """True when this user/role pair is the hidden factory actor (UI/export filter)."""
     return _is_suppressed_actor(user, role)
@@ -398,7 +410,8 @@ def log_structured_event(
 ):
     if not _audit_db_path:
         return
-    if _is_suppressed_actor(user, role):
+    action_norm = (action or "").strip()
+    if _is_suppressed_actor(user, role) and action_norm not in _COMPLIANCE_ALWAYS_LOG_ACTIONS:
         return
     ts = int(timestamp_ms if timestamp_ms is not None else (time.time() * 1000))
     dt_str = (date_time or "").strip() or datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -408,7 +421,7 @@ def log_structured_event(
         "dateTime": dt_str,
         "user": (user or "--").strip(),
         "role": (role or "--").strip(),
-        "action": (action or "").strip(),
+        "action": action_norm,
         "details": (details or "").strip(),
         "eventType": (event_type or "").strip(),
         "entityType": (entity_type or "").strip(),
@@ -668,11 +681,17 @@ def list_entries(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any
     try:
         where = ["1=1"]
         params: List[Any] = []
-        # Never return rows for the hidden factory actor (UI, export, PDF).
+        # Hide routine factory-actor noise, but keep member-admin compliance rows visible.
+        compliance = sorted(_COMPLIANCE_ALWAYS_LOG_ACTIONS)
+        placeholders = ", ".join("?" for _ in compliance) or "NULL"
         where.append(
+            "("
             "NOT (TRIM(COALESCE(user, '')) = ? AND LOWER(TRIM(COALESCE(role, ''))) = LOWER(?))"
+            " OR COALESCE(action, '') IN (" + placeholders + ")"
+            ")"
         )
         params.extend((FACTORY_USERNAME, FACTORY_ROLE))
+        params.extend(compliance)
         user_val = filters.get("user")
         if user_val:
             where.append("COALESCE(user, '--') = ?")

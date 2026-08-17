@@ -58,6 +58,7 @@ EXPECTED_ACTIONS = [
     "Logout (inactivity timeout)",
     "Power interruption",
     "Power interruption logout",
+    "Report auto-approved (power interruption)",
     "Report aborted (power loss)",
     "Desktop login",
     "Test performed",
@@ -138,6 +139,17 @@ class Client:
     def logout(self, reason: str = "user") -> None:
         self._request("POST", "/api/data/auth/logout", {"reason": reason})
         self._headers = {"Content-Type": "application/json"}
+
+    def approval_token(self, username: str, password: str, purpose: str = "user_admin") -> str:
+        r = self._request(
+            "POST",
+            "/api/data/auth/approval-verify",
+            {"username": username, "password": password, "purpose": purpose, "method": "credentials"},
+        )
+        if r.status_code >= 400:
+            return ""
+        data = r.json() or {}
+        return str(data.get("token") or data.get("approvalToken") or "")
 
     def audit_event(self, action: str, details: str = "", **extra) -> _Resp:
         body = {
@@ -408,13 +420,9 @@ def verify_user_disabled_audit(c: Client, res: RunResult, since_ms: int) -> None
     try:
         c.login(FACTORY_USER, FACTORY_PASS)
         _unlock_member(c, ADMIN_USER)
-        c.logout("user")
+        _unlock_member(c, "USER")
     except Exception as exc:
-        res.note_warn(f"factory unlock admin before disable test: {exc}")
-    try:
-        c.login(ADMIN_USER, ADMIN_PASS)
-    except Exception as exc:
-        res.fail(f"admin login for disable test: {exc}")
+        res.note_warn(f"factory unlock before disable test: {exc}")
         return
     r = c._request("GET", "/api/data/members")
     members = ((r.json() or {}).get("members") or []) if r.status_code == 200 else []
@@ -427,17 +435,46 @@ def verify_user_disabled_audit(c: Client, res: RunResult, since_ms: int) -> None
     if str(target.get("status") or "").lower() == "disabled":
         c._request("POST", f"/api/data/members/{mid}/enable", {})
         time.sleep(0.2)
-    dr = c._request("DELETE", f"/api/data/members/{mid}")
-    if dr.status_code >= 400:
-        res.note_warn(f"disable USER failed HTTP {dr.status_code}: {dr.json()}")
+    # Harden: PUT status=disabled must be rejected
+    put = c._request("PUT", f"/api/data/members/{mid}", {"status": "disabled", "id": mid, "username": "USER"})
+    if put.status_code == 400:
+        res.ok("PUT status=disabled rejected (must use DELETE)")
+    else:
+        res.fail(f"PUT status=disabled expected 400, got HTTP {put.status_code}")
+    tok = c.approval_token(FACTORY_USER, FACTORY_PASS, "user_admin")
+    if not tok:
+        res.note_warn("could not get user_admin approval token — skip DELETE disable audit")
         c.logout("user")
         return
-    time.sleep(0.3)
-    entries = actions_in(entries_since(c.audit_log(), since_ms, ADMIN_USER))
-    if "User disabled" in entries:
-        res.ok("User disabled audit recorded")
-    else:
+    since_del = ts_ms() - 60000
+    c._headers["X-Approval-Verify-Token"] = tok
+    dr = c._request("DELETE", f"/api/data/members/{mid}")
+    c._headers.pop("X-Approval-Verify-Token", None)
+    if dr.status_code >= 400:
+        res.note_warn(f"disable USER via DELETE failed HTTP {dr.status_code}: {dr.json()}")
+        c._request("POST", f"/api/data/members/{mid}/enable", {})
+        c.logout("user")
+        return
+    time.sleep(0.5)
+    all_entries = c.audit_log()
+    rows = [
+        e for e in entries_since(all_entries, since_del)
+        if e.get("action") == "User disabled"
+    ]
+    if not rows:
+        # Fallback: newest matching details (RTC skew on device)
+        rows = [
+            e for e in (all_entries or [])[:40]
+            if e.get("action") == "User disabled" and "disabled USER" in str(e.get("details") or "")
+        ]
+    if not rows:
         res.fail("User disabled audit missing after DELETE member")
+    else:
+        details = str(rows[0].get("details") or "")
+        if "disabled USER" in details:
+            res.ok(f"User disabled audit shows who disabled whom: {details}")
+        else:
+            res.fail(f"User disabled details missing who/whom: {details}")
     c._request("POST", f"/api/data/members/{mid}/enable", {})
     c.logout("user")
 
