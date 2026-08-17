@@ -1826,13 +1826,12 @@ def get_factory_settings():
         raw = data_service.get_factory_settings() or {}
         if not isinstance(raw, dict):
             raw = {}
-        # Keep full factory settings (including recipe vacuum/time presets).
-        # enrich_factory_settings only fills report display fields and must not
-        # replace the complete settings object.
-        enriched = report_service.enrich_factory_settings(raw) or {}
         settings = dict(raw)
+        enriched = report_service.enrich_factory_settings(raw) or {}
         if isinstance(enriched, dict):
-            settings.update(enriched)
+            for key in ("lastValidationDate", "nextValidationDate"):
+                if enriched.get(key):
+                    settings[key] = enriched[key]
         return jsonify({"settings": settings}), 200
     except Exception as e:
         app.logger.exception("Error getting factory settings")
@@ -1888,6 +1887,8 @@ def factory_reset():
             "auditRowsRemaining": audit_remaining,
             "biometricTemplatesCleared": biometric_cleared,
             "requiresLogin": True,
+            "settings": result.get("factorySettings") or {},
+            "preservedFactorySettings": bool(result.get("preservedFactorySettings")),
         }), 200
     except Exception as e:
         app.logger.exception("Error during factory reset")
