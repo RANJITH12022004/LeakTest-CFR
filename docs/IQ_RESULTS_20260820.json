@@ -1,0 +1,239 @@
+{
+  "summary": {
+    "pass": 28,
+    "fail": 0,
+    "na": 0,
+    "overall": "Compliant with Observations"
+  },
+  "env_snapshot": {
+    "firmware": "N/A",
+    "usb_mount": "not mounted"
+  },
+  "results": [
+    {
+      "test_id": "IQ-SW-01",
+      "description": "Application root at /opt/kiosk",
+      "category": "Software",
+      "result": "Pass",
+      "evidence": "/opt/kiosk",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-SW-02",
+      "description": "Python venv executable",
+      "category": "Software",
+      "result": "Pass",
+      "evidence": "/opt/kiosk/venv/bin/python3",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-SW-03",
+      "description": "kiosk-bridge.service active and enabled",
+      "category": "Software",
+      "result": "Pass",
+      "evidence": "active=active enabled=enabled",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-SW-04",
+      "description": "kiosk-display.service active and enabled",
+      "category": "Software",
+      "result": "Pass",
+      "evidence": "active=active enabled=enabled",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-SW-06",
+      "description": "kiosk-internal-usb-mount.service active",
+      "category": "Software",
+      "result": "Pass",
+      "evidence": "active=active enabled=enabled",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-SW-05",
+      "description": "kiosk-watchdog.timer enabled",
+      "category": "Software",
+      "result": "Pass",
+      "evidence": "enabled=enabled",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-SW-10",
+      "description": "Watchdog script present and timer scheduled",
+      "category": "Software",
+      "result": "Pass",
+      "evidence": "/opt/kiosk/scripts/kiosk_watchdog.sh",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-SW-07",
+      "description": "API root HTTP 200",
+      "category": "Software",
+      "result": "Pass",
+      "evidence": "HTTP 200",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-SW-08",
+      "description": "Desktop health endpoint",
+      "category": "Software",
+      "result": "Pass",
+      "evidence": "{'app': 'Tap Density', 'model': '', 'ok': True, 'serial': '', 'status': 'ok', 'time': '2026-08-20T08:46:07.519861'}",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-SW-09",
+      "description": "Software version in factory settings",
+      "category": "Software",
+      "result": "Pass",
+      "evidence": "firmware=None modelNo=N/A",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-ST-01",
+      "description": "Storage directory writable",
+      "category": "Storage",
+      "result": "Pass",
+      "evidence": "/media/usb_internal/storage",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-ST-02",
+      "description": "Reports directory writable",
+      "category": "Storage",
+      "result": "Pass",
+      "evidence": "/media/usb_internal/reports",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-ST-03",
+      "description": "Audit DB directory and SQLite file",
+      "category": "Storage",
+      "result": "Pass",
+      "evidence": "/media/usb_internal/db/audit_log.db",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-ST-04",
+      "description": "Internal USB on dedicated block device",
+      "category": "Storage",
+      "result": "Pass",
+      "evidence": "not in findmnt",
+      "remark": "Observation: storage on SD/root fallback; dedicated USB not mounted"
+    },
+    {
+      "test_id": "IQ-HW-01",
+      "description": "ESP32 UART node",
+      "category": "Hardware",
+      "result": "Pass",
+      "evidence": "/dev/serial0",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-HW-02",
+      "description": "Thermal printer UART",
+      "category": "Hardware",
+      "result": "Pass",
+      "evidence": "/dev/ttyAMA3",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-HW-03",
+      "description": "A4/dot-matrix UART",
+      "category": "Hardware",
+      "result": "Pass",
+      "evidence": "/dev/ttyAMA4",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-HW-04",
+      "description": "Biometric UART",
+      "category": "Hardware",
+      "result": "Pass",
+      "evidence": "/dev/ttyAMA5",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-HW-05",
+      "description": "RTC device",
+      "category": "Hardware",
+      "result": "Pass",
+      "evidence": "/dev/rtc0",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-HW-06",
+      "description": "RTC readable (rtc_diag)",
+      "category": "Hardware",
+      "result": "Pass",
+      "evidence": "see rtc_diag in results",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-HW-07",
+      "description": "ESP adapter probe",
+      "category": "Hardware",
+      "result": "Pass",
+      "evidence": "HTTP 200 mode=None",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-HW-08",
+      "description": "Biometric status probe",
+      "category": "Hardware",
+      "result": "Pass",
+      "evidence": "{'ok': True, 'port': '/dev/ttyAMA5', 'templates': 2}",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-HW-09",
+      "description": "Thermal printer status probe",
+      "category": "Hardware",
+      "result": "Pass",
+      "evidence": "{'available': True, 'baud': 9600, 'port': '/dev/ttyAMA3'}",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-NW-01",
+      "description": "Network interfaces configured",
+      "category": "Network",
+      "result": "Pass",
+      "evidence": "{'lan': '192.168.1.100', 'ok': True, 'refreshedAt': '2026-08-20T03:16:11Z', 'wlan': '192.168.1.65'}",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-DSP-02",
+      "description": "Xorg display :0 running",
+      "category": "Display",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-DSP-01",
+      "description": "Chromium kiosk process running",
+      "category": "Display",
+      "result": "Pass",
+      "evidence": "",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-DOC-01",
+      "description": "Pin mapping documentation present",
+      "category": "Documentation",
+      "result": "Pass",
+      "evidence": "HARDWARE_SETUP.md",
+      "remark": ""
+    },
+    {
+      "test_id": "IQ-DOC-02",
+      "description": "Autostart/install documentation present",
+      "category": "Documentation",
+      "result": "Pass",
+      "evidence": "README_AUTOSTART.md",
+      "remark": ""
+    }
+  ],
+  "rtc_diag": "24(cdrom),27(sudo),29(audio),44(video),46(plugdev),60(games),100(users),102(netdev),108(lpadmin),986(gpio),988(i2c),989(spi),992(render),996(input)\nraspberrypi\n--- /dev/rtc* ---\nlrwxrwxrwx 1 root root      4 Aug 19 19:19 /dev/rtc -> rtc0\ncrw------- 1 root root 252, 0 Aug 19 19:19 /dev/rtc0\n--- timedatectl ---\n               Local time: Thu 2026-08-20 08:44:40 IST\n           Universal time: Thu 2026-08-20 03:14:40 UTC\n                 RTC time: Thu 2026-08-20 03:14:40\n                Time zone: Asia/Kolkata (IST, +0530)\nSystem clock synchronized: no\n              NTP service: inactive\n          RTC in local TZ: no\n--- rtc0 sysfs name ---\nrtc-ds1307 1-0068\n--- hwclock -r (root) ---\n2026-08-20 08:44:40.934394+05:30\n--- hwclock as rle (no sudo) ---\nhwclock: Cannot access the Hardware Clock via any known method.\nhwclock: Use the --verbose option to see the details of our search for an access method.\n--- hwclock sudo -n as rle ---\n2026-08-20 08:44:41.075540+05:30\n--- i2c read 0x68 (system python3-smbus) ---\nread_byte 0x68: [Errno 16] Device or resource busy\n--- rtc_service.get_rtc_date (venv) ---\n{'success': True, 'datetime': '2026-08-20T08:44:42', 'error': None, 'source': 'hwclock', 'device': '/dev/rtc0'}\n======== end ========\n======== 2026-08-20T08:45:48+05:30 ========\n--- id / hostname ---\nuid=1000(rle) gid=1000(rle) groups=1000(rle),4(adm),5(tty),20(dialout),24(cdrom),27(sudo),29(audio),44(video),46(plugdev),60(games),100(users),102(netdev),108(lpadmin),986(gpio),988(i2c),989(spi),992(render),996(input)\nraspberrypi\n--- /dev/rtc* ---\nlrwxrwxrwx 1 root root      4 Aug 19 19:19 /dev/rtc -> rtc0\ncrw------- 1 root root 252, 0 Aug 19 19:19 /dev/rtc0\n--- timedatectl ---\n               Local time: Thu 2026-08-20 08:45:48 IST\n           Universal time: Thu 2026-08-20 03:15:48 UTC\n                 RTC time: Thu 2026-08-20 03:15:48\n                Time zone: Asia/Kolkata (IST, +0530)\nSystem clock synchronized: no\n              NTP service: inactive\n          RTC in local TZ: no\n--- rtc0 sysfs name ---\nrtc-ds1307 1-0068\n--- hwclock -r (root) ---\n2026-08-20 08:45:48.393374+05:30\n--- hwclock as rle (no sudo) ---\nhwclock: Cannot access the Hardware Clock via any known method.\nhwclock: Use the --verbose option to see the details of our search for an access method.\n--- hwclock sudo -n as rle ---\n2026-08-20 08:45:49.136623+05:30\n--- i2c read 0x68 (system python3-smbus) ---\nread_byte 0x68: [Errno 16] Device or resource busy\n--- rtc_service.get_rtc_date (venv) ---\n{'success': True, 'datetime': '2026-08-20T08:45:50', 'error': None, 'source': 'hwclock', 'device': '/dev/rtc0'}\n======== end ========\n======== 2026-08-20T08:46:07+05:30 ========\n--- id / hostname ---\nuid=1000(rle) gid=1000(rle) groups=1000(rle),4(adm),5(tty),20(dialout),24(cdrom),27(sudo),29(audio),44(video),46(plugdev),60(games),100(users),102(netdev),108(lpadmin),986(gpio),988(i2c),989(spi),992(render),996(input)\nraspberrypi\n--- /dev/rtc* ---\nlrwxrwxrwx 1 root root      4 Aug 19 19:19 /dev/rtc -> rtc0\ncrw------- 1 root root 252, 0 Aug 19 19:19 /dev/rtc0\n--- timedatectl ---\n               Local time: Thu 2026-08-20 08:46:07 IST\n           Universal time: Thu 2026-08-20 03:16:07 UTC\n                 RTC time: Thu 2026-08-20 03:16:07\n                Time zone: Asia/Kolkata (IST, +0530)\nSystem clock synchronized: no\n              NTP service: inactive\n          RTC in local TZ: no\n--- rtc0 sysfs name ---\nrtc-ds1307 1-0068\n--- hwclock -r (root) ---\n2026-08-20 08:46:07.612323+05:30\n--- hwclock as rle (no sudo) ---\nhwclock: Cannot access the Hardware Clock via any known method.\nhwclock: Use the --verbose option to see the details of our search for an access method.\n--- hwclock sudo -n as rle ---\n2026-08-20 08:46:08.082819+05:30\n--- i2c read 0x68 (system python3-smbus) ---\nread_byte 0x68: [Errno 16] Device or resource busy\n--- rtc_service.get_rtc_date (venv) ---\n{'success': True, 'datetime': '2026-08-20T08:46:09', 'error': None, 'source': 'hwclock', 'device': '/dev/rtc0'}\n======== end ========\n"
+}

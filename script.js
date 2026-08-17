@@ -6555,13 +6555,31 @@ function _testRunSseUrl() {
 }
 
 function _parseTestRunSseLine(data) {
-    var norm = String(data.normalized != null ? data.normalized : data.line || '').replace(/\*$/, '');
+    var raw = String(data.normalized != null ? data.normalized : data.line || '');
+    var norm = raw.replace(/^#/, '').replace(/\*$/, '');
     var out = {};
+    if (norm.indexOf(':') >= 0 && norm.indexOf(',') < 0) {
+        var head = norm.split(':');
+        out[head[0].trim().toLowerCase()] = head.slice(1).join(':').trim();
+    }
     norm.split(',').forEach(function (part) {
         var kv = part.split(':');
         if (kv.length >= 2) out[kv[0].trim().toLowerCase()] = kv.slice(1).join(':').trim();
     });
     return out;
+}
+
+function _startTestRunHoldAfterTarget() {
+    if (testRunHoldStarted || testRunButtonState !== 'abort') return;
+    testRunHoldStarted = true;
+    testRunElapsedSec = 0;
+    testRunVacuumSamples = [];
+    testRunNextSamplePercent = 10;
+    setRunCard('run-status-text', 'Holding vacuum');
+    setRunCard('run-status-subtext', 'Hold in progress');
+    setRunCard('run-elapsed-time', '00:00');
+    if (testRunIntervalId != null) clearInterval(testRunIntervalId);
+    testRunIntervalId = setInterval(_testRunTimerTick, 1000);
 }
 
 function _openTestRunHardwareStream() {
@@ -6580,9 +6598,12 @@ function _openTestRunHardwareStream() {
             var data = JSON.parse(raw);
             if (data.ping) return;
             var kind = String(data.kind || '');
-            var norm = String(data.normalized != null ? data.normalized : '').toLowerCase().replace(/\*$/, '');
+            var norm = String(data.normalized != null ? data.normalized : '').toLowerCase().replace(/^#/, '').replace(/\*$/, '');
             var parsed = _parseTestRunSseLine(data);
-            var vac = parsed.vacuum != null ? parsed.vacuum : parsed.pressure;
+            if (norm === 'target_reached' || norm.indexOf('target_reached') >= 0) {
+                _startTestRunHoldAfterTarget();
+            }
+            var vac = parsed.su != null ? parsed.su : (parsed.vacuum != null ? parsed.vacuum : parsed.pressure);
             if (vac != null) {
                 var v = parseFloat(vac);
                 if (!isNaN(v)) {
@@ -6591,20 +6612,12 @@ function _openTestRunHardwareStream() {
                     if (!testRunHoldStarted
                         && testRunSetVacuumMmHg != null
                         && v >= testRunSetVacuumMmHg) {
-                        testRunHoldStarted = true;
-                        testRunElapsedSec = 0;
-                        testRunVacuumSamples = [];
-                        testRunNextSamplePercent = 10;
-                        setRunCard('run-status-text', 'Holding vacuum');
-                        setRunCard('run-status-subtext', 'Hold in progress');
-                        setRunCard('run-elapsed-time', '00:00');
-                        if (testRunIntervalId != null) clearInterval(testRunIntervalId);
-                        testRunIntervalId = setInterval(_testRunTimerTick, 1000);
+                        _startTestRunHoldAfterTarget();
                     }
                 }
             }
             // Hold elapsed is driven by the local timer after vacuum is reached.
-            if (kind === 'completed' || norm === 'completed' || norm === 'complete.') {
+            if (kind === 'completed' || norm === 'completed' || norm === 'complete.' || norm === 'idle') {
                 if (testRunHoldStarted) {
                     _finishTestRunVacuumHold();
                 }

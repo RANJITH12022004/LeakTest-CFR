@@ -3812,11 +3812,13 @@ def calibrate_tare():
 
 
 def _adapter_kind_from_check_result(result):
-    """Parse usp,chk* response: usp1, usp2, error, or None."""
+    """Parse #GET_PRESSURE response (#PRESSURE:NNN) or legacy usp,chk lines."""
     if not result or not result.get("ok"):
         return None
     norm = hardware_service.normalize_line(result.get("normalized") or result.get("response") or "")
-    s = str(norm).lower()
+    s = str(norm).lower().lstrip("#")
+    if s.startswith("pressure:"):
+        return "ok"
     if "adapt" in s and "error" in s:
         return "error"
     if "usp1" in s and "ok" in s:

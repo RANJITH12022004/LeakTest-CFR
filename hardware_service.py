@@ -56,30 +56,63 @@ def normalize_line(line: str) -> str:
     return s
 
 
+def _esp_mmhg_value(value) -> int:
+    """ESP protocol: 3-digit zero-padded absolute mmHg (1–999)."""
+    try:
+        v = int(round(abs(float(value))))
+    except (TypeError, ValueError):
+        raise ValueError("Invalid vacuum value")
+    if v < 1 or v > 999:
+        raise ValueError("Vacuum must be 1–999 mmHg")
+    return v
+
+
+def _esp_sec_value(value) -> int:
+    try:
+        v = int(round(float(value)))
+    except (TypeError, ValueError):
+        raise ValueError("Invalid time value")
+    if v < 1 or v > 999:
+        raise ValueError("Release time must be 1–999 seconds")
+    return v
+
+
 def classify_line(line: str) -> str:
-    s = normalize_line(line).lower()
+    s = normalize_line(line).lower().lstrip("#")
     if not s:
         return "empty"
     if s == "ok":
         return "ok"
     if s in ("completed", "complete."):
         return "completed"
-    if s == "stopped":
+    if s in ("stopped", "stop_ack"):
         return "stopped"
-    if s == "adapt,error":
-        return "adapter_error"
-    if s == "error" or s.startswith("error:"):
-        return "error"
-    if s.startswith("pressure:") or s.startswith("cycle:") or s.startswith("leak:"):
+    if s in ("idle",):
+        return "completed"
+    if s in ("ready",):
+        return "info"
+    if s == "target_reached" or s.startswith("target_reached"):
         return "progress"
-    if s.startswith("vacuum:") or s.startswith("elapsed:"):
-        return "progress"
+    if "start_ack" in s or s.startswith("start_ack"):
+        return "ok"
     if "start_calib_ack" in s or s.startswith("start_calib_ack"):
         return "ok"
     if "calibvalue_ack" in s or s.startswith("calibvalue_ack"):
         return "ok"
     if "rl_tm_ack" in s or s.startswith("rl_tm_ack"):
         return "ok"
+    if "calib_clear_ack" in s or s.startswith("calib_clear_ack"):
+        return "ok"
+    if s.startswith("su:") or s.startswith("pressure:"):
+        return "progress"
+    if s == "adapt,error":
+        return "adapter_error"
+    if s == "error" or s.startswith("error:"):
+        return "error"
+    if s.startswith("cycle:") or s.startswith("leak:"):
+        return "progress"
+    if s.startswith("vacuum:") or s.startswith("elapsed:"):
+        return "progress"
     if s.startswith("target") or "target,reached" in s:
         return "progress"
     if s.isdigit():
@@ -230,6 +263,7 @@ def _simulation_loop():
 
 
 def send_command(cmd: str, timeout=COMMAND_TIMEOUT, max_retries=MAX_RETRIES, ignore_numeric_response=False):
+    global esp_ser
     if not cmd:
         return {"ok": False, "error": "Empty command"}
     cmd = cmd.strip()
@@ -317,10 +351,13 @@ def _reader_loop():
                     esp_read_buffer += chunk.decode("ascii", errors="ignore")
                 except Exception:
                     continue
+                esp_read_buffer = esp_read_buffer.replace("*", "\n")
                 while "\n" in esp_read_buffer:
                     line, esp_read_buffer = esp_read_buffer.split("\n", 1)
                     line = line.strip()
                     if line:
+                        if not line.endswith("*"):
+                            line = line + "*"
                         _broadcast_line(line)
                 if len(esp_read_buffer) > 4096:
                     esp_read_buffer = esp_read_buffer[-2048:]
@@ -362,31 +399,73 @@ def drain_queue(max_lines=10):
 
 
 def cmd_check_adapter():
-    return send_command("leak,chk*", ignore_numeric_response=True)
+    """Verify ESP link by reading current pressure (#GET_PRESSURE → #PRESSURE:NNN)."""
+    result = send_command("#GET_PRESSURE*", timeout=COMMAND_TIMEOUT)
+    if not result.get("ok"):
+        return result
+    norm = normalize_line(result.get("normalized") or result.get("response") or "").lower().lstrip("#")
+    if norm.startswith("pressure:"):
+        result["pressureMmHg"] = norm.split(":", 1)[1].strip()
+    return result
+
+
+def _extract_vacuum_mmhg_from_params(params: Dict[str, Any]) -> Optional[int]:
+    if not isinstance(params, dict):
+        return None
+    for key in ("vacuumMmHg", "targetVacuumMmHg", "target"):
+        if params.get(key) not in (None, ""):
+            try:
+                return _esp_mmhg_value(params.get(key))
+            except ValueError:
+                return None
+    if params.get("targetVacuumMbar") not in (None, ""):
+        try:
+            return _esp_mmhg_value(abs(float(params.get("targetVacuumMbar"))))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _cmd_start_vacuum_target(vacuum_mmhg: int):
+    """Send #START:NNN* and expect #START_ACK:NNN* from ESP."""
+    vac = _esp_mmhg_value(vacuum_mmhg)
+    cmd = f"#START:{vac:03d}*"
+    result = send_command(cmd, timeout=TEST_COMMAND_TIMEOUT)
+    if result.get("ok"):
+        result["targetVacuumMmHg"] = vac
+        norm = normalize_line(result.get("normalized") or result.get("response") or "").lower().lstrip("#")
+        if "start_ack" not in norm and "error" not in norm:
+            result["ack"] = norm or "START_ACK"
+    return result
 
 
 def cmd_start_test(params: Dict[str, Any]):
     global _sim_active, _sim_thread, _sim_params
-    target = float(params.get("targetVacuumMbar", -50))
-    evacuation_rate = str(params.get("evacuationRate", "STANDARD")).upper()
-    cycles = params.get("cycles") or [{"holdSeconds": 30}]
-    if not cycles:
-        return {"ok": False, "error": "At least one test cycle is required"}
+    vac = _extract_vacuum_mmhg_from_params(params or {})
+    if vac is None:
+        return {"ok": False, "error": "vacuumMmHg target is required (1–999 mmHg)"}
+    hold_sec = 30
+    cycles = (params or {}).get("cycles") or [{"holdSeconds": 30}]
+    if cycles and isinstance(cycles[0], dict):
+        try:
+            hold_sec = max(1, int(cycles[0].get("holdSeconds", 30)))
+        except (TypeError, ValueError):
+            hold_sec = 30
     if _simulate_enabled():
         with _sim_lock:
             _sim_active = False
             if _sim_thread and _sim_thread.is_alive():
                 time.sleep(0.2)
-            _sim_params = dict(params)
+            _sim_params = {"vacuumMmHg": vac, "holdSeconds": hold_sec}
             _sim_active = True
-            _sim_thread = threading.Thread(target=_simulation_loop, daemon=True)
+            _sim_thread = threading.Thread(
+                target=_vacuum_validation_loop,
+                args=(float(vac), float(hold_sec)),
+                daemon=True,
+            )
             _sim_thread.start()
-        return {"ok": True, "simulated": True, "targetVacuumMbar": target, "cycles": len(cycles)}
-    cycle_str = ",".join(str(int(c.get("holdSeconds", 30))) for c in cycles)
-    return send_command(
-        f"leak,start,{target},{evacuation_rate},{cycle_str}*",
-        timeout=TEST_COMMAND_TIMEOUT,
-    )
+        return {"ok": True, "simulated": True, "targetVacuumMmHg": vac, "holdSeconds": hold_sec}
+    return _cmd_start_vacuum_target(vac)
 
 
 def cmd_stop():
@@ -394,9 +473,9 @@ def cmd_stop():
     if _simulate_enabled():
         with _sim_lock:
             _sim_active = False
-        _broadcast_line("stopped*")
+        _broadcast_line("#STOP_ACK*")
         return {"ok": True, "simulated": True}
-    return send_command("stop*")
+    return send_command("#STOP*", timeout=COMMAND_TIMEOUT)
 
 
 def cmd_status():
@@ -406,53 +485,61 @@ def cmd_status():
                 "ok": True,
                 "simulated": True,
                 "active": _sim_active,
-                "pressureMbar": round(_sim_pressure_mbar, 2),
+                "pressureMmHg": max(0, int(round(-_sim_pressure_mbar))),
                 "cycleIndex": _sim_cycle_index,
             }
-    return send_command("status*")
+    result = send_command("#GET_PRESSURE*", timeout=COMMAND_TIMEOUT)
+    if result.get("ok"):
+        norm = normalize_line(result.get("normalized") or result.get("response") or "").lower().lstrip("#")
+        if norm.startswith("pressure:"):
+            result["pressureMmHg"] = norm.split(":", 1)[1].strip()
+    return result
 
 
 def _vacuum_validation_loop(vacuum_mmhg: float, duration_sec: float):
-    """Evacuate to target, then hold for duration_sec (elapsed counts only during hold)."""
+    """Evacuate to target, broadcast #SU, then #TARGET_REACHED when at target."""
     global _sim_active
     target = max(1.0, float(vacuum_mmhg))
     duration = max(1.0, float(duration_sec))
     current = 0.0
     hold_elapsed = 0.0
-    tick = 0.5
+    tick = 1.0
     evac_rate = target / max(3.0, duration * 0.3)
     phase = "evacuate"
+    target_announced = False
 
     while _sim_active:
         if phase == "evacuate":
             current = min(target, current + evac_rate * tick)
-            _broadcast_line(f"vacuum:{current:.1f},elapsed:0.0*")
-            if current >= target:
+            _broadcast_line(f"#SU:{int(round(current)):03d}*")
+            if current >= target and not target_announced:
+                _broadcast_line("#TARGET_REACHED*")
+                target_announced = True
                 phase = "hold"
                 hold_elapsed = 0.0
         else:
             current += random.uniform(-0.5, 0.8)
             current = max(target * 0.95, min(target * 1.02, current))
             hold_elapsed += tick
-            _broadcast_line(f"vacuum:{current:.1f},elapsed:{hold_elapsed:.1f}*")
+            _broadcast_line(f"#SU:{int(round(current)):03d}*")
             if hold_elapsed >= duration:
                 break
         time.sleep(tick)
 
     if _sim_active:
-        _broadcast_line("completed*")
+        _broadcast_line("#IDLE*")
     _sim_active = False
 
 
 def cmd_start_vacuum_validation(vacuum_mmhg: float, duration_sec: float):
     global _sim_active, _sim_thread
     try:
-        vac = float(vacuum_mmhg)
+        vac = _esp_mmhg_value(vacuum_mmhg)
         dur = float(duration_sec)
     except (TypeError, ValueError):
         return {"ok": False, "error": "Invalid vacuum or duration"}
-    if vac < 1 or dur < 1:
-        return {"ok": False, "error": "Vacuum and duration must be at least 1"}
+    if dur < 1:
+        return {"ok": False, "error": "Duration must be at least 1 second"}
     if _simulate_enabled():
         with _sim_lock:
             _sim_active = False
@@ -461,15 +548,15 @@ def cmd_start_vacuum_validation(vacuum_mmhg: float, duration_sec: float):
             _sim_active = True
             _sim_thread = threading.Thread(
                 target=_vacuum_validation_loop,
-                args=(vac, dur),
+                args=(float(vac), dur),
                 daemon=True,
             )
             _sim_thread.start()
         return {"ok": True, "simulated": True, "vacuumMmHg": vac, "durationSec": dur}
-    return send_command(
-        f"leak,val,start,{vac},{int(dur)}*",
-        timeout=TEST_COMMAND_TIMEOUT,
-    )
+    result = _cmd_start_vacuum_target(vac)
+    if result.get("ok"):
+        result["durationSec"] = dur
+    return result
 
 
 def cmd_start_validation(mode: str):
@@ -482,20 +569,24 @@ def cmd_start_validation(mode: str):
 
 
 def _calibration_sim_loop(target_mmhg: float):
-    """Simulate evacuation to calibration target and hold."""
+    """Simulate evacuation to calibration target; broadcast #SU and #TARGET_REACHED."""
     global _sim_active
     target = max(1.0, float(target_mmhg))
     current = 0.0
-    tick = 0.5
+    tick = 1.0
     evac_rate = max(5.0, target / 4.0)
+    target_announced = False
     while _sim_active and current < target:
         current = min(target, current + evac_rate * tick)
-        _broadcast_line(f"vacuum:{current:.1f}*")
+        _broadcast_line(f"#SU:{int(round(current)):03d}*")
         time.sleep(tick)
+    if _sim_active and not target_announced:
+        _broadcast_line("#TARGET_REACHED*")
+        target_announced = True
     while _sim_active:
         current += random.uniform(-0.4, 0.4)
         current = max(target * 0.98, min(target * 1.02, current))
-        _broadcast_line(f"vacuum:{current:.1f}*")
+        _broadcast_line(f"#SU:{int(round(current)):03d}*")
         time.sleep(tick)
 
 
@@ -532,22 +623,18 @@ def cmd_start_calibration(target_mmhg: float = 400.0):
 def cmd_apply_calibration(calib_value: float, release_time_sec: int):
     """Send measured gauge pressure (K) and release time (RL_TM) to ESP."""
     try:
-        k = int(round(float(calib_value)))
-        rl = int(release_time_sec)
-    except (TypeError, ValueError):
-        return {"ok": False, "error": "Invalid calibration value or release time"}
-    if k < 1 or k > 650:
-        return {"ok": False, "error": "Calibration value must be 1–650 mmHg"}
-    if rl < 1 or rl > 5999:
-        return {"ok": False, "error": "Release time must be 1–5999 seconds"}
+        k = _esp_mmhg_value(calib_value)
+        rl = _esp_sec_value(release_time_sec)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
     if _simulate_enabled():
-        _broadcast_line(f"#CALIBVALUE_ACK:{k}*")
-        _broadcast_line(f"#RL_TM_ACK:{rl}*")
+        _broadcast_line(f"#CALIBVALUE_ACK:{k:03d}*")
+        _broadcast_line(f"#RL_TM_ACK:{rl:03d}*")
         return {"ok": True, "simulated": True, "calibValue": k, "releaseTimeSec": rl}
-    r1 = send_command(f"#CALIBVALUE:{k}*", timeout=COMMAND_TIMEOUT)
+    r1 = send_command(f"#CALIBVALUE:{k:03d}*", timeout=COMMAND_TIMEOUT)
     if not r1.get("ok"):
         return r1
-    r2 = send_command(f"#RL_TM:{rl}*", timeout=COMMAND_TIMEOUT)
+    r2 = send_command(f"#RL_TM:{rl:03d}*", timeout=COMMAND_TIMEOUT)
     if r2.get("ok"):
         r2["calibValue"] = k
         r2["releaseTimeSec"] = rl
