@@ -3923,7 +3923,7 @@ def hardware_calibration_start():
 
 @app.route("/api/hardware/calibration/esp-start", methods=["POST"])
 def hardware_calibration_esp_start():
-    """Send #START_CALIB* after TARGET_REACHED during calibration evacuate."""
+    """Send #START_CALIB* after the operator enters the external gauge reading."""
     gate = _require_session_internal(
         "calibration-menu",
         "Forbidden. You do not have permission to run calibration.",
@@ -3945,9 +3945,20 @@ def hardware_calibration_apply():
     data = request.get_json(force=True, silent=True) or {}
     factory = data_service.get_factory_settings() or {}
     try:
-        calib_value = float(data.get("calibValue"))
+        if data.get("calibDiff") is not None:
+            calib_diff = float(data.get("calibDiff"))
+        elif data.get("gaugeValue") is not None and data.get("setVacuumMmHg") is not None:
+            calib_diff = float(data.get("gaugeValue")) - float(data.get("setVacuumMmHg"))
+        elif data.get("calibValue") is not None and data.get("setVacuumMmHg") is not None:
+            # Legacy body: treat calibValue as gauge reading, send gauge−set.
+            calib_diff = float(data.get("calibValue")) - float(data.get("setVacuumMmHg"))
+        elif data.get("calibValue") is not None:
+            # Last resort: body already carries the signed difference.
+            calib_diff = float(data.get("calibValue"))
+        else:
+            return jsonify({"ok": False, "error": "calibDiff or gaugeValue+setVacuumMmHg is required"}), 400
     except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "calibValue is required"}), 400
+        return jsonify({"ok": False, "error": "Invalid calibration difference"}), 400
     try:
         release_time = int(
             data.get("releaseTimeSec")
@@ -3956,16 +3967,50 @@ def hardware_calibration_apply():
         )
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "Invalid release time"}), 400
-    result = hardware_service.cmd_apply_calibration(calib_value, release_time)
+    gauge_value = data.get("gaugeValue")
+    set_vacuum = data.get("setVacuumMmHg")
+    try:
+        if gauge_value is not None:
+            gauge_value = float(gauge_value)
+        if set_vacuum is not None:
+            set_vacuum = float(set_vacuum)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid gauge or set vacuum"}), 400
+    result = hardware_service.cmd_apply_calibration(
+        calib_diff,
+        release_time_sec=release_time,
+        gauge_value=gauge_value,
+        set_vacuum_mmhg=set_vacuum,
+    )
     if result.get("ok"):
+        token = result.get("calibValueToken") or str(int(round(calib_diff)))
         _audit_event(
             action="Calibration applied",
             outcome="success",
             entity_type="calibration",
             entity_name="vacuum",
-            details=f"K={int(round(calib_value))} RL_TM={release_time}",
-            extra={"calibValue": calib_value, "releaseTimeSec": release_time},
+            details=f"CALIBVALUE={token} gauge={gauge_value} set={set_vacuum}",
+            extra={
+                "calibDiff": calib_diff,
+                "calibValueToken": token,
+                "gaugeValue": gauge_value,
+                "setVacuumMmHg": set_vacuum,
+                "releaseTimeSec": release_time,
+            },
         )
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/hardware/calibration/stop-calib", methods=["POST"])
+def hardware_calibration_stop_calib():
+    """Send #STOP_CALIB* and wait for #STOP_CALIB_ACK* after CALIBVALUE."""
+    gate = _require_session_internal(
+        "calibration-menu",
+        "Forbidden. You do not have permission to run calibration.",
+    )
+    if gate:
+        return gate
+    result = hardware_service.cmd_esp_stop_calib()
     return jsonify(result), (200 if result.get("ok") else 400)
 
 
