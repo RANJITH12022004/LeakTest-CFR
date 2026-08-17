@@ -5,7 +5,7 @@ Used by data_service normalization and app.py route guards.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Set
 
 PERMISSIONS_VERSION = 2
 
@@ -17,6 +17,7 @@ PERMISSION_CARD_KEYS = [
     "perm_profile_admin",
     "perm_validation_test",
     "perm_validation_report_approve",
+    "perm_calibration",
     "perm_datetime",
     "perm_reports_view",
     "perm_audit_view",
@@ -40,6 +41,7 @@ PERM_CARD_EXPAND: Dict[str, List[str]] = {
     ],
     "perm_validation_test": ["validation-test", "settings"],
     "perm_validation_report_approve": ["validation-report-approve"],
+    "perm_calibration": ["calibration-menu", "settings"],
     "perm_datetime": ["edit-datetime", "settings"],
     "perm_reports_view": ["reports-view"],
     "perm_audit_view": ["audit-view"],
@@ -233,89 +235,3 @@ def migrate_member_permissions_v1_to_v2(member: Dict[str, Any]) -> None:
         new_allow = _internal_to_perm_cards_strict(internal)
     member["featureOverrides"] = {"allow": sorted(set(new_allow)), "deny": []}
     member["permissionsVersion"] = PERMISSIONS_VERSION
-
-
-PERMISSION_CARD_LABELS: Dict[str, str] = {
-    "perm_test_access": "Test access",
-    "perm_test_report_approve": "Test report approval",
-    "perm_recipe_manage": "Manage recipes",
-    "perm_recipe_approve": "Recipe approval",
-    "perm_profile_admin": "Profile management",
-    "perm_validation_test": "Validation test access",
-    "perm_validation_report_approve": "Validation report approval",
-    "perm_datetime": "Edit date and time",
-    "perm_reports_view": "View and print reports",
-    "perm_audit_view": "View and export audit trails",
-    "perm_export_usb": "Export reports and audit (USB)",
-    "perm_export_approve": "Export approval",
-}
-
-
-def permission_allow_cards(member: Optional[Dict[str, Any]]) -> List[str]:
-    """Normalized permission card keys granted to a member."""
-    if not isinstance(member, dict):
-        return []
-    raw = member.get("featureOverrides") or {}
-    allow_in = raw.get("allow") if isinstance(raw.get("allow"), list) else []
-    cards = sorted(
-        {
-            str(x).strip()
-            for x in allow_in
-            if str(x or "").strip() in PERM_CARD_EXPAND
-        }
-    )
-    return cards
-
-
-def _permission_card_labels(card_keys: List[str]) -> List[str]:
-    return [PERMISSION_CARD_LABELS.get(k, k) for k in card_keys]
-
-
-def member_permissions_audit_snapshot(member: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if not isinstance(member, dict):
-        return {"role": "", "permissions": []}
-    return {
-        "role": str(member.get("role") or "").strip(),
-        "permissions": permission_allow_cards(member),
-    }
-
-
-def build_permission_change_audit(
-    before_member: Optional[Dict[str, Any]],
-    after_member: Optional[Dict[str, Any]],
-    target_username: str = "",
-) -> Optional[Dict[str, Any]]:
-    """
-    Build audit details when permission cards and/or role changed.
-    Returns None if there was no permissions/role change.
-    """
-    before_allow = set(permission_allow_cards(before_member))
-    after_allow = set(permission_allow_cards(after_member))
-    before_role = str((before_member or {}).get("role") or "").strip()
-    after_role = str((after_member or {}).get("role") or "").strip()
-    granted = sorted(after_allow - before_allow)
-    revoked = sorted(before_allow - after_allow)
-    role_changed = before_role.lower() != after_role.lower()
-    if not granted and not revoked and not role_changed:
-        return None
-    uname = (target_username or "").strip() or str(
-        (after_member or {}).get("username") or (after_member or {}).get("name") or ""
-    ).strip()
-    parts: List[str] = []
-    if role_changed:
-        parts.append("role {} → {}".format(before_role or "—", after_role or "—"))
-    if granted:
-        parts.append("granted: {}".format(", ".join(_permission_card_labels(granted))))
-    if revoked:
-        parts.append("revoked: {}".format(", ".join(_permission_card_labels(revoked))))
-    return {
-        "details": "User permissions updated for {}: {}".format(uname or "—", "; ".join(parts)),
-        "extra": {
-            "granted": granted,
-            "revoked": revoked,
-            "roleBefore": before_role,
-            "roleAfter": after_role,
-        },
-        "before": member_permissions_audit_snapshot(before_member),
-        "after": member_permissions_audit_snapshot(after_member),
-    }

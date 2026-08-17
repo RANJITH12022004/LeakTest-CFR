@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-bridge.py - Kiosk entry point for Tap Density. Sets APP_ROOT and runs Flask app.
+bridge.py - Kiosk entry point for Leak Test. Sets APP_ROOT and runs Flask app.
 Registers the isolated RLE Desktop Client API without modifying app.py routes.
 """
 

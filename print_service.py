@@ -24,21 +24,13 @@ except ImportError:
 try:
     from report_service import (
         build_test_report_derived,
-        completed_step_drop_counts,
         format_duration_hhmmss,
-        performed_total_drops,
         test_duration_seconds,
         _format_derived_number,
     )
 except ImportError:
     def build_test_report_derived(td, recipe=None, report_id=None):
         return {}
-
-    def performed_total_drops(td, recipe=None):
-        return None
-
-    def completed_step_drop_counts(td, recipe=None):
-        return []
 
     def _format_derived_number(val, decimals=3):
         return "--" if val is None else str(val)
@@ -199,6 +191,23 @@ def _apply_thermal_line_spacing(lines: list, width: int = THERMAL_WIDTH) -> list
             out.append(part)
             if part.strip():
                 out.append("")
+    return out
+
+
+def _compact_thermal_lines(lines: list, width: int = THERMAL_WIDTH) -> list:
+    """Fit thermal lines without adding filler space between every row."""
+    out: list = []
+    previous_blank = False
+    for line in lines:
+        parts = _fit_thermal_line(line, width)
+        for part in parts:
+            is_blank = not str(part or "").strip()
+            if is_blank and previous_blank:
+                continue
+            out.append(part)
+            previous_blank = is_blank
+    while out and not str(out[-1] or "").strip():
+        out.pop()
     return out
 
 
@@ -367,7 +376,7 @@ def _section_sep(char: str, width: int, thermal: bool) -> str:
 
 
 def _thermal_test_data_row(sn: int, cnt: str, vol: str, dvol: str, bulk: str, tap: str) -> str:
-    """Thermal step row with per-step tap count."""
+    """Thermal step row with per-step hold time."""
     return f"{sn:>2} {str(cnt):>4} {str(vol):>5} {str(dvol):>4} {str(bulk):>4} {str(tap):>4}"
 
 
@@ -450,110 +459,6 @@ def _recipe_total_tap_count(recipe: Dict[str, Any]) -> Optional[int]:
     return total if total > 0 else None
 
 
-def _recipe_total_taps_from_steps_only(recipe: Dict[str, Any]) -> Optional[int]:
-    """A4 text report helper: sum only per-step taps, ignore custom total taps."""
-    if not isinstance(recipe, dict):
-        return None
-    steps = recipe.get("steps")
-    if not isinstance(steps, list) or not steps:
-        return None
-    total = 0
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        try:
-            total += int(step.get("tapCount") or 0)
-        except (TypeError, ValueError):
-            pass
-    return total if total > 0 else None
-
-
-def _performed_total_taps(td: Dict[str, Any], recipe: Dict[str, Any]) -> Optional[int]:
-    """Sum taps only for steps that were actually performed."""
-    if not isinstance(td, dict):
-        return None
-    results = td.get("stepResults") or []
-    if not isinstance(results, list) or not results:
-        return None
-    steps = recipe.get("steps") if isinstance(recipe, dict) else []
-    if not isinstance(steps, list):
-        steps = []
-    total = 0
-    found = False
-    for i in range(len(results)):
-        step_taps = None
-        if i < len(steps) and isinstance(steps[i], dict):
-            step_taps = steps[i].get("tapCount")
-        if step_taps in (None, "") and isinstance(results[i], dict):
-            step_taps = results[i].get("tapCount")
-        try:
-            n = int(step_taps)
-            if n > 0:
-                total += n
-                found = True
-        except (TypeError, ValueError):
-            continue
-    return total if found else None
-
-
-def _completed_steps_total_taps(td: Dict[str, Any], recipe: Dict[str, Any]) -> Optional[int]:
-    """
-    Fallback total taps from recipe steps limited to completed step count.
-    Keeps totals aligned with "completed/performed" semantics.
-    """
-    if not isinstance(td, dict) or not isinstance(recipe, dict):
-        return None
-    steps = recipe.get("steps")
-    if not isinstance(steps, list) or not steps:
-        return None
-    try:
-        completed = int(td.get("completedSteps"))
-    except (TypeError, ValueError):
-        return None
-    if completed <= 0:
-        return None
-    count = min(completed, len(steps))
-    total = 0
-    found = False
-    for i in range(count):
-        step = steps[i] if i < len(steps) and isinstance(steps[i], dict) else {}
-        try:
-            n = int(step.get("tapCount") or 0)
-            if n > 0:
-                total += n
-                found = True
-        except (TypeError, ValueError):
-            continue
-    return total if found else None
-
-
-def _performed_diff_last_two_steps(td: Dict[str, Any]) -> Any:
-    """
-    Difference between last two performed step volumes.
-    If only one performed step exists, use its available volume delta.
-    """
-    if not isinstance(td, dict):
-        return None
-    results = td.get("stepResults") or []
-    if not isinstance(results, list) or not results:
-        return None
-    if len(results) >= 2:
-        try:
-            v1 = float((results[-2] or {}).get("volumeMl"))
-            v2 = float((results[-1] or {}).get("volumeMl"))
-            return abs(v2 - v1)
-        except Exception:
-            return None
-    one = results[0] if isinstance(results[0], dict) else {}
-    try:
-        dv = one.get("volumeDeltaMl")
-        if dv in (None, ""):
-            return None
-        return abs(float(dv))
-    except Exception:
-        return None
-
-
 def _append_derived_test_summary_and_result(
     lines: list, derived: Dict[str, Any], width: int, thermal: bool
 ) -> None:
@@ -561,11 +466,7 @@ def _append_derived_test_summary_and_result(
         return
     eq = _section_sep("=", width, thermal)
     dash = _section_sep("-", width, thermal)
-    total_taps = derived.get("totalTapsPerformed")
-    if total_taps is None:
-        total_taps = derived.get("totalDrops")
-    if total_taps is None:
-        total_taps = derived.get("totalTaps")
+    total_taps = derived.get("totalTaps")
     total_taps_str = str(total_taps) if total_taps is not None else "--"
     if thermal:
         lines.extend(
@@ -576,7 +477,7 @@ def _append_derived_test_summary_and_result(
                 dash,
                 f"Sample Weight (g): {_format_derived_number(derived.get('sampleWeightG'), 2)}",
                 f"Total No. of Drops: {total_taps_str}",
-                f"Initial Volume V0 (ml): {_format_derived_number(derived.get('initialVolumeMl'), 4)}",
+                f"Target Vacuum V0 (ml): {_format_derived_number(derived.get('initialVolumeMl'), 4)}",
                 f"Diff Last Two Vol (ml): {_format_derived_number(derived.get('diffLastTwoVolumesMl'), 4)}",
                 "",
                 eq,
@@ -598,13 +499,8 @@ def _append_derived_test_summary_and_result(
         [
             ("Sample Weight (g)", _format_derived_number(derived.get("sampleWeightG"), 2)),
             ("Total No. of Drops", total_taps_str),
-            ("Initial Volume V0 (ml)", _format_derived_number(derived.get("initialVolumeMl"), 4)),
-            (
-                "Diff Last Two Vol (ml)",
-                _format_derived_number(
-                    derived.get("diffLastTwoVolumesMlPerformed", derived.get("diffLastTwoVolumesMl")), 4
-                ),
-            ),
+            ("Target Vacuum V0 (ml)", _format_derived_number(derived.get("initialVolumeMl"), 4)),
+            ("Diff Last Two Vol (ml)", _format_derived_number(derived.get("diffLastTwoVolumesMl"), 4)),
         ],
         width,
     )
@@ -678,7 +574,7 @@ def _validation_usp_label(run: Dict[str, Any]) -> str:
     usp = run.get("usp")
     if usp:
         return str(usp)
-    return "USP 2" if run.get("validationSubtype") == "load" else "USP 1"
+    return "Pressure Decay" if run.get("validationSubtype") == "load" else "Vacuum Decay"
 
 
 def _validation_expected_display(run: Dict[str, Any]) -> str:
@@ -710,7 +606,7 @@ def _format_thermal_validation_runs_block(runs: list, width: int = THERMAL_WIDTH
         if idx > 0:
             lines.append("")
         lines.append(_validation_usp_label(run))
-        lines.append(f"Taps/Min: {_cell_str(run.get('tapsMin'))}")
+        lines.append(f"mbar/s: {_cell_str(run.get('tapsMin'))}")
         lines.append(f"Drop(mm): {_cell_str(run.get('dropHeight'))}")
         lines.append(f"Expected: {_validation_expected_display(run)}")
         lines.append(f"Actual: {_cell_str(run.get('actualTapCount'))}")
@@ -778,7 +674,7 @@ def _append_validation_report_details(
                 lines.append("")
             lines.append(_validation_usp_label(run))
             run_pairs = [
-                ("Taps/Min", _cell_str(run.get("tapsMin"))),
+                ("mbar/s", _cell_str(run.get("tapsMin"))),
                 ("Drop (mm)", _cell_str(run.get("dropHeight"))),
                 ("Expected", _validation_expected_display(run)),
                 ("Actual", _cell_str(run.get("actualTapCount"))),
@@ -838,20 +734,6 @@ def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Di
     derived = report_data.get("reportDerived")
     if not isinstance(derived, dict) or not derived:
         derived = build_test_report_derived(td, recipe, report_data.get("id"))
-    else:
-        derived = dict(derived)
-
-    taps_performed = performed_total_drops(td, recipe)
-    if taps_performed is None:
-        taps_performed = _performed_total_taps(td, recipe)
-    if taps_performed is None:
-        taps_performed = _completed_steps_total_taps(td, recipe)
-    if taps_performed is not None:
-        derived["totalTapsPerformed"] = taps_performed
-        derived["totalDrops"] = taps_performed
-    diff_performed = _performed_diff_last_two_steps(td)
-    if diff_performed is not None:
-        derived["diffLastTwoVolumesMlPerformed"] = diff_performed
 
     if row_count > 0:
         if thermal:
@@ -859,7 +741,7 @@ def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Di
         else:
             eq = _section_sep("=", width, False)
             lines.extend(["", eq, "TEST DATA", dash if dash else ""])
-            hdr = f"{'S':>2}  {'Drop Count':>10}  {'Vol(ml)':>9}  {'dVol':>8}  {'Bulk':>9}  {'Tap':>9}"
+            hdr = f"{'S':>2}  {'Count':>6}  {'Vol(ml)':>9}  {'dVol':>8}  {'Bulk':>9}  {'Tap':>9}"
             lines.append(hdr)
             if dash:
                 lines.append(dash)
@@ -880,7 +762,7 @@ def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Di
                     tap = _fmt_density_val(tap)
                 sn = i + 1
                 lines.append(
-                    f"{sn:2d}  {str(cnt):>10}  {str(vol):>9}  {str(dvol):>8}  {str(bulk):>9}  {str(tap):>9}"
+                    f"{sn:2d}  {str(cnt):>6}  {str(vol):>9}  {str(dvol):>8}  {str(bulk):>9}  {str(tap):>9}"
                 )
             lines.append(dash if dash else "")
     elif str(report_data.get("type") or "test").strip().lower() == "test":
@@ -889,9 +771,8 @@ def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Di
     if str(report_data.get("type") or "test").strip().lower() == "test":
         _append_derived_test_summary_and_result(lines, derived, width, thermal)
 
-    if thermal:
-        stats = report_data.get("statistics") or td.get("statistics") or {}
-        _append_test_statistics_block(lines, stats, width, thermal, status_raw)
+    stats = report_data.get("statistics") or td.get("statistics") or {}
+    _append_test_statistics_block(lines, stats, width, thermal, status_raw)
 
 
 def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH) -> str:
@@ -901,23 +782,36 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
     td = report_data.get("testData") or report_data
     fs = report_data.get("factorySettings") or {}
     rtype = str(report_data.get("type") or "test").strip().lower()
-    title = "TAP DENSITY VALIDATION REPORT" if rtype == "validation" else "TAP DENSITY TEST REPORT"
+    title = "LEAK TEST VALIDATION REPORT" if rtype == "validation" else "LEAK TEST REPORT"
     lines: list = []
     if thermal:
         lines.extend([sep, "RAISE LAB EQUIPMENT", ""])
     else:
-        lines.extend([sep, "RAISE LAB EQUIPMENT".center(width), ""])
+        lines.append(sep)
     lines.append(title if thermal else title.center(width))
     if thermal:
         lines.append("")
     else:
         lines.append(sep)
+    derived_hdr: Dict[str, Any] = {}
+    if rtype != "validation":
+        derived_hdr = report_data.get("reportDerived") or {}
+        if not isinstance(derived_hdr, dict) or not derived_hdr:
+            td_hdr = td if isinstance(td, dict) else {}
+            recipe_hdr = report_data.get("recipe") or td_hdr.get("recipe") or {}
+            if not isinstance(recipe_hdr, dict):
+                recipe_hdr = {}
+            derived_hdr = build_test_report_derived(td_hdr, recipe_hdr, report_data.get("id"))
+    print_date = derived_hdr.get("printDate", "--") if derived_hdr else "--"
+    print_time = derived_hdr.get("printTime", "--") if derived_hdr else "--"
     if thermal:
         lines.extend(
             [
                 f"Company: {fs.get('companyName', 'N/A')}",
                 f"Model No: {fs.get('modelNo', 'N/A')}",
                 f"Serial No: {fs.get('serialNo', 'N/A')}",
+                f"Print Date: {print_date}",
+                f"Print Time: {print_time}",
                 f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
                 f"Instrument ID: {fs.get('instrumentId', 'N/A')}",
                 f"Last Val: {fs.get('lastValidationDate', 'N/A')}",
@@ -931,6 +825,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 ("Company", fs.get("companyName", "N/A")),
                 ("Model No", fs.get("modelNo", "N/A")),
                 ("Serial No", fs.get("serialNo", "N/A")),
+                ("Print Date", print_date),
+                ("Print Time", print_time),
                 ("Location", fs.get("companyLocation", fs.get("location", "N/A"))),
                 ("Instrument ID", fs.get("instrumentId", "N/A")),
                 ("Last Val", fs.get("lastValidationDate", "N/A")),
@@ -947,35 +843,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         if not isinstance(recipe, dict):
             recipe = {}
         status_raw = str(td.get("status", "")).lower() if isinstance(td, dict) else ""
-        approval_st = str(report_data.get("reportApprovalStatus") or "").strip().lower()
-        if approval_st == "pending":
-            status_label = "Not Approved"
-        elif status_raw == "aborted" or approval_st == "aborted":
-            status_label = "Aborted"
-        else:
-            status_label = "Completed"
-        recipe_taps = dict(recipe)
-        if isinstance(td, dict):
-            if not recipe_taps.get("steps") and td.get("steps"):
-                recipe_taps["steps"] = td.get("steps")
-            if recipe_taps.get("customTotalTaps") is None and td.get("customTotalTaps") is not None:
-                recipe_taps["customTotalTaps"] = td.get("customTotalTaps")
-        derived = report_data.get("reportDerived")
-        if not isinstance(derived, dict) or not derived:
-            derived = build_test_report_derived(
-                td if isinstance(td, dict) else {}, recipe, report_data.get("id")
-            )
-        total_drops = performed_total_drops(td if isinstance(td, dict) else {}, recipe_taps)
-        if total_drops is None:
-            total_drops = derived.get("totalDrops")
-        if total_drops is None:
-            total_drops = derived.get("totalTaps")
-        total_taps_str = str(total_drops) if total_drops is not None else "N/A"
-        step_drop_counts = (
-            derived.get("stepDropCounts")
-            or derived.get("stepTapCounts")
-            or completed_step_drop_counts(td if isinstance(td, dict) else {}, recipe_taps)
-        )
+        status_label = "Aborted" if status_raw == "aborted" else "Completed"
         operator = report_data.get("operatorName") or td.get("operatorName", "--")
         comments = report_data.get("remarks") or td.get("remarks") or ""
         ts_start = td.get("testStartTime") or report_data.get("createdAt")
@@ -985,70 +853,143 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             or td.get("completedAt")
             or report_data.get("createdAt")
         )
+        duration_sec = test_duration_seconds(td if isinstance(td, dict) else {})
+        duration_str = format_duration_hhmmss(duration_sec) if duration_sec is not None else "--"
+
+        def _fmt_mmss(total):
+            try:
+                t = int(float(total))
+            except (TypeError, ValueError):
+                return None
+            if t < 0:
+                t = 0
+            return "%02d:%02d" % (t // 60, t % 60)
+
+        set_vac = td.get("setVacuumMmHg")
+        if set_vac in (None, ""):
+            set_vac = recipe.get("vacuumMmHg")
+        set_vac_disp = str(set_vac) if set_vac not in (None, "") else "--"
+        act_vac = td.get("actualVacuumMmHg")
+        try:
+            act_vac_disp = "%.1f" % float(act_vac) if act_vac not in (None, "") else "--"
+        except (TypeError, ValueError):
+            act_vac_disp = str(act_vac) if act_vac not in (None, "") else "--"
+        set_dur = (
+            td.get("setDurationDisplay")
+            or _fmt_mmss(td.get("setDurationSec"))
+            or recipe.get("durationDisplay")
+            or _fmt_mmss(recipe.get("durationSec"))
+            or "--"
+        )
+        act_dur = td.get("actualDurationDisplay") or _fmt_mmss(td.get("actualDurationSec")) or "--"
+        result_val = td.get("result") or "--"
+
+        batch_size = td.get("batchSize")
+        if batch_size in (None, ""):
+            batch_size = recipe.get("batchSize")
+        ar_no = td.get("analysisReportNo") or recipe.get("analysisReportNo")
+        if ar_no in (None, ""):
+            legacy_ar = td.get("arNumbers") or recipe.get("arNumbers") or []
+            if isinstance(legacy_ar, list) and legacy_ar:
+                ar_no = legacy_ar[0]
+            elif legacy_ar not in (None, "", []):
+                ar_no = legacy_ar
+
+        def _append_hold_vacuum_samples(dest: list, for_thermal: bool) -> None:
+            samples = td.get("vacuumSamples") or []
+            if not isinstance(samples, list) or not samples:
+                return
+            if for_thermal:
+                dest.extend(["", "HOLD VACUUM SAMPLES", "Time          Vacuum"])
+                for s in samples:
+                    if not isinstance(s, dict):
+                        continue
+                    pct = s.get("percent")
+                    t_disp = s.get("timeDisplay") or _fmt_mmss(s.get("elapsedSec")) or "--"
+                    try:
+                        vac_s = "%.1f" % float(s.get("vacuumMmHg")) if s.get("vacuumMmHg") not in (None, "") else "--"
+                    except (TypeError, ValueError):
+                        vac_s = str(s.get("vacuumMmHg") or "--")
+                    pct_disp = "%s%%" % pct if pct not in (None, "") else "--"
+                    left = ("%s/%s" % (pct_disp, t_disp))[:14].ljust(14)
+                    dest.append("%s%s" % (left, vac_s))
+            else:
+                dest.extend(["", "HOLD VACUUM SAMPLES", sep_dash])
+                dest.append("Time (% / mm:ss)".ljust(40) + "Vacuum (mmHg)")
+                for s in samples:
+                    if not isinstance(s, dict):
+                        continue
+                    pct = s.get("percent")
+                    t_disp = s.get("timeDisplay") or _fmt_mmss(s.get("elapsedSec")) or "--"
+                    try:
+                        vac_s = "%.1f" % float(s.get("vacuumMmHg")) if s.get("vacuumMmHg") not in (None, "") else "--"
+                    except (TypeError, ValueError):
+                        vac_s = str(s.get("vacuumMmHg") or "--")
+                    pct_disp = "%s%%" % pct if pct not in (None, "") else "--"
+                    left = ("%s / %s" % (pct_disp, t_disp)).ljust(40)
+                    dest.append((left + vac_s)[:width])
+
         if thermal:
-            tap_count_lines = []
-            for idx, tc in enumerate(step_drop_counts or []):
-                tap_count_lines.append(f"Drop Count {idx + 1}: {tc}")
-            start_date, start_time = _split_ts_date_and_time(ts_start)
-            end_date, end_time = _split_ts_date_and_time(ts_end)
-            test_date, test_time = _split_ts_date_and_time(ts_end)
             info_lines = [
                 "TEST INFORMATION",
-                f"Test No: {derived.get('testNumber', '--')}",
                 f"Product: {recipe.get('productName', td.get('productName', 'N/A'))}",
                 f"Batch: {recipe.get('batchNumber', td.get('batchNumber', 'N/A'))}",
+                f"Batch Size: {batch_size if batch_size not in (None, '') else 'N/A'}",
+                f"A.R. No: {ar_no if ar_no not in (None, '') else 'N/A'}",
                 f"Operator: {operator}",
-                f"Test Type: {derived.get('testType', '--')}",
-                f"Test Method: {derived.get('testMethod', '--')}",
-                f"Drops/Min: {derived.get('dropsPerMin', '--')}",
-                f"Drop Height: {derived.get('dropHeight', '--')}",
-                f"Total Drops: {total_taps_str}",
+                f"Test Start: {_format_ts_readable(ts_start)}",
+                f"Completed: {_format_ts_readable(ts_end)}",
+                f"Duration: {duration_str}",
+                f"Test Status: {status_label}",
+                "",
+                "TEST RESULT",
+                f"Set Vacuum (mmHg): {set_vac_disp}",
+                f"Actual Vacuum (mmHg): {act_vac_disp}",
+                f"Set Duration (mm:ss): {set_dur}",
+                f"Actual Duration (mm:ss): {act_dur}",
+                f"Result: {result_val}",
             ]
-            info_lines.extend(tap_count_lines)
-            info_lines.extend(
-                [
-                    f"Test Date: {test_date}",
-                    f"Test Time: {test_time}",
-                    f"Test Start Date: {start_date}",
-                    f"Test Start Time: {start_time}",
-                    f"Completed Date: {end_date}",
-                    f"Completed Time: {end_time}",
-                    f"Test Status: {status_label}",
-                ]
-            )
+            _append_hold_vacuum_samples(info_lines, True)
             if comments not in (None, ""):
                 info_lines.append(f"Comments: {comments}")
             info_lines.append("")
             lines.extend(info_lines)
         else:
-            a4_info = [
-                "",
-                "TEST INFORMATION",
-                sep_dash,
-            ]
-            lines.extend(a4_info)
-            info_pairs = [
-                ("Test No", derived.get("testNumber", "--")),
-                ("Product", recipe.get("productName", td.get("productName", "N/A"))),
-                ("Batch", recipe.get("batchNumber", td.get("batchNumber", "N/A"))),
-                ("Operator", operator),
-                ("Test Type", derived.get("testType", "--")),
-                ("Test Method", derived.get("testMethod", "--")),
-                ("Drops/Min", derived.get("dropsPerMin", "--")),
-                ("Drop Height", derived.get("dropHeight", "--")),
-                ("Total Drops", total_taps_str),
-                ("Test Start", _format_ts_readable(ts_start)),
-                ("Completed", _format_ts_readable(ts_end)),
-                ("Test Status", status_label),
-            ]
+            lines.extend(["", "TEST INFORMATION", sep_dash])
+            _append_two_column_pairs(
+                lines,
+                [
+                    ("Product", recipe.get("productName", td.get("productName", "N/A"))),
+                    ("Batch", recipe.get("batchNumber", td.get("batchNumber", "N/A"))),
+                    ("Batch Size", batch_size if batch_size not in (None, "") else "N/A"),
+                    ("A.R. No", ar_no if ar_no not in (None, "") else "N/A"),
+                    ("Operator", operator),
+                    ("Test Start", _format_ts_readable(ts_start)),
+                    ("Completed", _format_ts_readable(ts_end)),
+                    ("Duration", duration_str),
+                    ("Test Status", status_label),
+                ],
+                width,
+            )
+            lines.extend(["", "TEST RESULT", sep_dash])
+            _append_two_column_pairs(
+                lines,
+                [
+                    ("Set Vacuum (mmHg)", set_vac_disp),
+                    ("Actual Vacuum (mmHg)", act_vac_disp),
+                    ("Set Duration (mm:ss)", set_dur),
+                    ("Actual Duration (mm:ss)", act_dur),
+                    ("Result", result_val),
+                ],
+                width,
+            )
+            _append_hold_vacuum_samples(lines, False)
             if comments not in (None, ""):
-                info_pairs.append(("Comments", _truncate_with_ellipsis(comments, max(16, width - 20))))
-            _append_two_column_pairs(lines, info_pairs, width)
-            for idx, dc in enumerate(step_drop_counts or []):
                 _append_two_column_pairs(
-                    lines, [(f"Drop Count {idx + 1}", str(dc))], width
+                    lines,
+                    [("Comments", _truncate_with_ellipsis(comments, max(16, width - 20)))],
+                    width,
                 )
-        _append_test_report_details(lines, td if isinstance(td, dict) else {}, report_data, width, thermal)
     if thermal:
         lines.extend(["", "APPROVAL"])
     if thermal:
@@ -1081,7 +1022,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         flat: list = []
         for line in lines:
             flat.extend(_fit_thermal_line(line, width))
-        lines = _apply_thermal_line_spacing(flat, width)
+        lines = _compact_thermal_lines(flat, width)
         return "\n".join(lines)
     return "\n".join(_wrap_lines(lines, width))
 
@@ -1106,7 +1047,7 @@ def _thermal_printed_timestamp_lines() -> list:
         ptime = payload.get("time") or "--"
     except Exception:
         now = datetime.now()
-        pdate = now.strftime("%d/%m/%Y")
+        pdate = now.strftime("%d-%m-%Y")
         ptime = now.strftime("%H:%M:%S")
     return ["", f"Printed Date: {pdate}", f"Printed Time: {ptime}"]
 
@@ -1228,7 +1169,7 @@ def _format_recipe_text(recipe_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
     fs = recipe_data.get("factorySettings") or {}
     lines = [
         sep,
-        "TAP DENSITY RECIPE" if thermal else "TAP DENSITY RECIPE".center(width),
+        "LEAK TEST RECIPE" if thermal else "LEAK TEST RECIPE".center(width),
         sep_dash if thermal else sep,
         f"Company: {fs.get('companyName', 'N/A')}",
         f"Model No: {fs.get('modelNo', 'N/A')}",

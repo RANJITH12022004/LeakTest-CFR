@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-data_service.py - Data storage and management service for Tap Density
+data_service.py - Data storage and management service for Leak Test
 Handles CRUD for recipes, reports, members, and factory settings.
 All data stored as JSON files under STORAGE_DIR.
 """
@@ -11,7 +11,6 @@ import json
 import os
 import pathlib
 import secrets
-import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
@@ -32,7 +31,7 @@ FACTORY_USER = {
 }
 
 def _creation_password_pepper() -> str:
-    return os.environ.get("KIOSK_PASSWORD_PEPPER", "tapdensity-kiosk-default-pepper-v1")
+    return os.environ.get("KIOSK_PASSWORD_PEPPER", "leaktest-kiosk-default-pepper-v1")
 
 
 def hash_creation_password(salt: str, password: str) -> str:
@@ -214,40 +213,23 @@ def _save_json_file(filepath: pathlib.Path, data):
 # =================== RECIPE OPERATIONS ==========================
 
 
-def _normalize_recipe_status(recipe: Dict[str, Any]) -> str:
-    status = str((recipe or {}).get("status") or "active").strip().lower()
-    return status if status in ("active", "disabled") else "active"
-
-
-def _normalize_recipe_record(recipe: Dict[str, Any]) -> Dict[str, Any]:
-    item = dict(recipe or {})
-    item["status"] = _normalize_recipe_status(item)
-    return item
-
-
-def list_recipes(filter_type=None, status: str = "active"):
-    """List recipes, optionally filtered by type and active/disabled status."""
+def list_recipes(filter_type=None):
+    """List all recipes, optionally filtered by type."""
     recipes_path = _get_storage_path("recipes.json")
     recipes = _load_json_file(recipes_path, default=[])
     if not isinstance(recipes, list):
         recipes = []
-    recipes = [_normalize_recipe_record(r) for r in recipes]
     if filter_type:
         recipes = [r for r in recipes if r.get("type") == filter_type]
-    status_norm = str(status or "active").strip().lower()
-    if status_norm == "disabled":
-        recipes = [r for r in recipes if r.get("status") == "disabled"]
-    elif status_norm != "all":
-        recipes = [r for r in recipes if r.get("status") != "disabled"]
     return recipes
 
 
-def get_recipe(recipe_id: int, include_disabled: bool = False):
+def get_recipe(recipe_id: int):
     """Get recipe by ID."""
     want = _norm_recipe_id(recipe_id)
     if want is None:
         return None
-    recipes = list_recipes(status="all" if include_disabled else "active")
+    recipes = list_recipes()
     for recipe in recipes:
         if _norm_recipe_id(recipe.get("id")) == want:
             return recipe
@@ -267,7 +249,7 @@ def _norm_recipe_id(recipe_id) -> Optional[int]:
 def save_recipe(recipe_data: Dict[str, Any]) -> int:
     """Save recipe (create or update). Enforces maxRecipes from factory settings."""
     recipes_path = _get_storage_path("recipes.json")
-    recipes = list_recipes(status="all")
+    recipes = list_recipes()
     recipe_id = _norm_recipe_id(recipe_data.get("id"))
     if recipe_id is not None:
         recipe_data["id"] = recipe_id
@@ -276,46 +258,14 @@ def save_recipe(recipe_data: Dict[str, Any]) -> int:
     )
 
     if not is_update:
-        # Deduplication guard: if a recipe with the same productName was created within the
-        # last 2 seconds and has no id (or id=0), treat this as an update to avoid duplicates
-        # that can arise when save_recipe is called more than once for the same new recipe.
-        import time as _time
-        now_ts = _time.time()
-        pname_new = str(recipe_data.get("productName") or "").strip().lower()
-        if pname_new:
-            for r in recipes:
-                if str(r.get("productName") or "").strip().lower() == pname_new:
-                    created_at = r.get("createdAt") or ""
-                    try:
-                        from datetime import datetime as _dt
-                        r_ts = _dt.fromisoformat(str(created_at).replace("Z", "")).timestamp()
-                        if abs(now_ts - r_ts) <= 2:
-                            existing_id = _norm_recipe_id(r.get("id"))
-                            if existing_id is not None:
-                                recipe_id = existing_id
-                                recipe_data["id"] = recipe_id
-                                is_update = True
-                                break
-                    except Exception:
-                        pass
-
-    if not is_update:
         fs = get_factory_settings()
         max_recipes = int(fs.get("maxRecipes") or 150)
-        active_recipes = [r for r in recipes if _normalize_recipe_status(r) != "disabled"]
-        if len(active_recipes) >= max_recipes:
+        if len(recipes) >= max_recipes:
             raise ValueError("Your limit for recipes reached. Contact support for upgrade.")
-
-    recipe_data = _normalize_recipe_record(recipe_data)
 
     if recipe_id and is_update:
         for i, r in enumerate(recipes):
             if r.get("id") == recipe_id:
-                if "status" not in recipe_data and r.get("status"):
-                    recipe_data["status"] = _normalize_recipe_status(r)
-                if recipe_data.get("status") != "disabled":
-                    for key in ("disabledAt", "disabledBy", "disabledByUsername"):
-                        recipe_data.pop(key, None)
                 recipes[i] = recipe_data
                 _save_json_file(recipes_path, recipes)
                 return recipe_id
@@ -334,51 +284,22 @@ def save_recipe(recipe_data: Dict[str, Any]) -> int:
 
 
 def delete_recipe(recipe_id: int) -> bool:
-    """Backward-compatible alias for disable_recipe()."""
-    return disable_recipe(recipe_id) is not None
-
-
-def disable_recipe(recipe_id: int, disabled_by: Optional[str] = None, disabled_by_username: Optional[str] = None):
-    """Soft-disable recipe by ID and preserve it in storage."""
+    """Delete recipe by ID."""
     recipes_path = _get_storage_path("recipes.json")
-    recipes = list_recipes(status="all")
-    for i, recipe in enumerate(recipes):
-        if _norm_recipe_id(recipe.get("id")) == _norm_recipe_id(recipe_id):
-            updated = _normalize_recipe_record(recipe)
-            updated["status"] = "disabled"
-            updated["disabledAt"] = datetime.utcnow().isoformat() + "Z"
-            if disabled_by is not None:
-                updated["disabledBy"] = str(disabled_by or "").strip() or "--"
-            if disabled_by_username is not None:
-                updated["disabledByUsername"] = str(disabled_by_username or "").strip() or "--"
-            recipes[i] = updated
-            _save_json_file(recipes_path, recipes)
-            return updated
-    return None
-
-
-def enable_recipe(recipe_id: int):
-    """Re-enable recipe by ID."""
-    recipes_path = _get_storage_path("recipes.json")
-    recipes = list_recipes(status="all")
-    for i, recipe in enumerate(recipes):
-        if _norm_recipe_id(recipe.get("id")) == _norm_recipe_id(recipe_id):
-            updated = _normalize_recipe_record(recipe)
-            updated["status"] = "active"
-            for key in ("disabledAt", "disabledBy", "disabledByUsername"):
-                updated.pop(key, None)
-            recipes[i] = updated
-            _save_json_file(recipes_path, recipes)
-            return updated
-    return None
+    recipes = list_recipes()
+    original_len = len(recipes)
+    recipes = [r for r in recipes if r.get("id") != recipe_id]
+    if len(recipes) < original_len:
+        _save_json_file(recipes_path, recipes)
+        return True
+    return False
 
 
 # =================== REPORT OPERATIONS ==========================
 
 
-def list_reports(filter_type="all", include_pending=True):
+def list_reports(filter_type="all"):
     """List reports, optionally filtered by type."""
-    _ = include_pending  # all reports returned; flag kept for Hardness-CFR API parity
     reports_path = _get_storage_path("reports.json")
     reports = _load_json_file(reports_path, default=[])
     if not isinstance(reports, list):
@@ -442,158 +363,6 @@ def delete_report(report_id: int) -> bool:
         _save_json_file(reports_path, reports)
         return True
     return False
-
-
-REPORT_EXPORT_RETENTION_MS = 24 * 60 * 60 * 1000
-
-
-def _report_export_schedule_path() -> pathlib.Path:
-    return _get_storage_path("report_export_schedule.json")
-
-
-def _load_report_export_schedule() -> Dict[str, Any]:
-    path = _report_export_schedule_path()
-    if not path.is_file():
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_report_export_schedule(data: Dict[str, Any]) -> None:
-    path = _report_export_schedule_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-def clear_report_export_schedule() -> None:
-    """Remove pending report export purge schedule (factory reset)."""
-    path = _report_export_schedule_path()
-    if path.exists():
-        try:
-            path.unlink()
-        except Exception:
-            pass
-
-
-def _delete_report_artifact_files(report_id: int) -> None:
-    """Remove PDF and print text files for a report id."""
-    try:
-        rid = int(report_id)
-    except (TypeError, ValueError):
-        return
-    if not _reports_dir or not _reports_dir.exists():
-        return
-    for name in (
-        "report_{}.pdf".format(rid),
-        "report_{}_a4.txt".format(rid),
-        "report_{}_thermal.txt".format(rid),
-    ):
-        path = _reports_dir / name
-        if path.is_file():
-            try:
-                path.unlink()
-            except Exception:
-                pass
-
-
-def purge_reports_by_ids(report_ids: List[int]) -> int:
-    """Delete reports from storage JSON and remove associated files."""
-    ids: List[int] = []
-    for x in report_ids or []:
-        try:
-            n = int(x)
-            if n > 0:
-                ids.append(n)
-        except (TypeError, ValueError):
-            continue
-    removed = 0
-    for rid in ids:
-        if delete_report(rid):
-            removed += 1
-        _delete_report_artifact_files(rid)
-    return removed
-
-
-def stage_report_export_pending(
-    *,
-    export_id: str,
-    report_ids: List[int],
-    exported_by: Dict[str, Any],
-    approved_by: Dict[str, Any],
-) -> None:
-    """Store a successful USB report export awaiting operator verification (no purge yet)."""
-    now_ms = int(time.time() * 1000)
-    ids: List[int] = []
-    for x in report_ids or []:
-        try:
-            n = int(x)
-            if n > 0:
-                ids.append(n)
-        except (TypeError, ValueError):
-            continue
-    state = _load_report_export_schedule()
-    state["staged"] = {
-        "export_id": str(export_id or "").strip(),
-        "report_ids": ids,
-        "exported_by": dict(exported_by or {}),
-        "approved_by": dict(approved_by or {}),
-        "exported_at_ms": now_ms,
-    }
-    _save_report_export_schedule(state)
-
-
-def confirm_report_export_verified(export_id: str) -> Optional[Dict[str, Any]]:
-    """Operator confirmed USB export OK: schedule purge in 24h (replaces prior schedule)."""
-    want = str(export_id or "").strip()
-    if not want:
-        return None
-    state = _load_report_export_schedule()
-    staged = state.get("staged") if isinstance(state.get("staged"), dict) else {}
-    if str(staged.get("export_id") or "").strip() != want:
-        return None
-    now_ms = int(time.time() * 1000)
-    scheduled = {
-        "export_id": want,
-        "report_ids": list(staged.get("report_ids") or []),
-        "exported_by": dict(staged.get("exported_by") or {}),
-        "approved_by": dict(staged.get("approved_by") or {}),
-        "exported_at_ms": int(staged.get("exported_at_ms") or now_ms),
-        "confirmed_at_ms": now_ms,
-        "purge_at_ms": now_ms + REPORT_EXPORT_RETENTION_MS,
-    }
-    state["scheduled"] = scheduled
-    state.pop("staged", None)
-    _save_report_export_schedule(state)
-    return scheduled
-
-
-def run_due_report_export_purge() -> Optional[Dict[str, Any]]:
-    """If a confirmed report export purge is due, delete only its report_ids."""
-    state = _load_report_export_schedule()
-    scheduled = state.get("scheduled") if isinstance(state.get("scheduled"), dict) else {}
-    purge_at = scheduled.get("purge_at_ms")
-    if purge_at is None:
-        return None
-    try:
-        purge_at_ms = int(purge_at)
-    except (TypeError, ValueError):
-        return None
-    now_ms = int(time.time() * 1000)
-    if now_ms < purge_at_ms:
-        return None
-    report_ids = list(scheduled.get("report_ids") or [])
-    purge_reports_by_ids(report_ids)
-    state.pop("scheduled", None)
-    _save_report_export_schedule(state)
-    out = dict(scheduled)
-    out["purged_at_ms"] = now_ms
-    out["reports_removed"] = len(report_ids)
-    return out
 
 
 # =================== MEMBER OPERATIONS ==========================
@@ -662,12 +431,11 @@ def count_active_supervisor_members() -> int:
 
 
 def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], existing_member: Optional[Dict] = None):
-    """Check factory limits for users, admins, supervisors, and QA. Raise ValueError if exceeded."""
+    """Check factory limits for users, admins, supervisors. Raise ValueError if exceeded."""
     fs = get_factory_settings()
     max_users = int(fs.get("maxUsers") or 10)
     max_admins = int(fs.get("maxAdmins") or 2)
     max_supervisors = int(fs.get("maxSupervisors") or 3)
-    max_qa = int(fs.get("maxQa") or 3)
 
     def count_role(ms: List, r: str) -> int:
         return sum(1 for m in ms if str(m.get("role", "")).strip().lower() == r)
@@ -676,7 +444,6 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
     users = count_role(members, "user")
     admins = count_role(members, "admin")
     supervisors = count_role(members, "supervisor")
-    qa = count_role(members, "qa")
 
     if existing_member:
         old_role = str(existing_member.get("role", "")).strip().lower()
@@ -686,8 +453,6 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
             admins -= 1
         elif old_role == "supervisor":
             supervisors -= 1
-        elif old_role == "qa":
-            qa -= 1
 
     if new_role == "user":
         users += 1
@@ -695,8 +460,6 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
         admins += 1
     elif new_role == "supervisor":
         supervisors += 1
-    elif new_role == "qa":
-        qa += 1
 
     if users > max_users:
         raise ValueError("Your limit for users reached. Contact support for upgrade.")
@@ -704,8 +467,6 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
         raise ValueError("Your limit for admins reached. Contact support for upgrade.")
     if supervisors > max_supervisors:
         raise ValueError("Your limit for reviewers reached. Contact support for upgrade.")
-    if qa > max_qa:
-        raise ValueError("Your limit for QA profiles reached. Contact support for upgrade.")
 
 
 def _member_username_key(member: Dict[str, Any]) -> str:
@@ -817,50 +578,53 @@ def _parse_installation_date(value: Any) -> Optional[datetime]:
 
 
 def get_password_policy_for_members() -> Dict[str, Any]:
-    """Return parsed password policy from factory settings (always read fresh from disk)."""
+    """Return parsed password policy from factory settings."""
     fs = get_factory_settings()
+    install_dt = _parse_installation_date(fs.get("installationDate"))
     try:
         period_days = int(fs.get("passwordResetPeriodDays"))
     except (TypeError, ValueError):
         period_days = 0
     if period_days < 1:
         period_days = 0
-    enabled = period_days > 0
+    enabled = bool(install_dt and period_days > 0)
     return {
         "enabled": enabled,
-        "installationDate": _parse_installation_date(fs.get("installationDate")),
+        "installationDate": install_dt,
         "periodDays": period_days,
     }
 
 
 def get_member_password_expiry_state(member: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
     """
-    Password expires when it has not been changed within passwordResetPeriodDays
-    (rolling from passwordLastChangedAt or account createdAt).
+    Compute password expiry status for a non-factory member.
+    Global cycle anchor: installationDate + N * periodDays.
     """
     policy = get_password_policy_for_members()
     if not policy.get("enabled"):
         return {"expired": False, "reason": "policy-disabled"}
+    anchor = policy.get("installationDate")
     period_days = int(policy.get("periodDays") or 0)
-    if period_days < 1:
-        return {"expired": False, "reason": "invalid-policy"}
     now_dt = now or datetime.now()
     if now_dt.tzinfo is not None:
         now_dt = now_dt.replace(tzinfo=None)
-    plc_dt = _parse_isoish_datetime(member.get("passwordLastChangedAt")) or _parse_isoish_datetime(
-        member.get("createdAt")
-    )
+    if not anchor or period_days < 1:
+        return {"expired": False, "reason": "invalid-policy"}
+    if now_dt < anchor:
+        return {"expired": False, "reason": "before-anchor"}
+    # First enforcement boundary uses "after N full days from installation".
+    # Example: 01-03 + 30 days => enforce from 01-04.
+    cycle_start = anchor + timedelta(days=period_days + 1)
+    plc_dt = _parse_isoish_datetime(member.get("passwordLastChangedAt")) or _parse_isoish_datetime(member.get("createdAt"))
     if not plc_dt:
-        return {"expired": True, "reason": "no-password-timestamp", "periodDays": period_days}
-    age_days = (now_dt.date() - plc_dt.date()).days
-    expired = age_days >= period_days
-    expires_on = (plc_dt + timedelta(days=period_days)).strftime("%Y-%m-%d")
+        plc_dt = datetime.min
+    expired = now_dt >= cycle_start and plc_dt < cycle_start
     return {
         "expired": bool(expired),
-        "expiresOn": expires_on,
+        "expiresOn": cycle_start.strftime("%Y-%m-%d"),
+        "cycleStart": cycle_start.strftime("%Y-%m-%dT%H:%M:%S"),
         "passwordLastChangedAt": plc_dt.strftime("%Y-%m-%dT%H:%M:%S"),
         "periodDays": period_days,
-        "ageDays": age_days,
     }
 
 
@@ -1128,11 +892,8 @@ def set_member_password(member_id: int, new_password: str, changed_at: Optional[
     return m
 
 
-MAX_FAILED_LOGIN_ATTEMPTS = 3
-
-
-def record_failed_login(username: str, *, apply_lock: bool = True) -> Optional[Dict[str, Any]]:
-    """Increment failedAttempts; optionally lock after 3 failures (kiosk touchscreen)."""
+def record_failed_login(username: str) -> Optional[Dict[str, Any]]:
+    """Increment failedAttempts and return updated member (if exists and not factory)."""
     m = get_member_by_username(username)
     if not m:
         return None
@@ -1144,7 +905,7 @@ def record_failed_login(username: str, *, apply_lock: bool = True) -> Optional[D
     except (TypeError, ValueError):
         fa = 0
     fa += 1
-    if apply_lock and fa >= MAX_FAILED_LOGIN_ATTEMPTS and status == "active":
+    if fa >= 3 and status == "active":
         status = "locked"
     m["failedAttempts"] = fa
     m["status"] = status
@@ -1166,14 +927,13 @@ def record_successful_login(username: str) -> Optional[Dict[str, Any]]:
 
 
 def unlock_member(member_id: int) -> Dict[str, Any]:
-    """Set member status to active and reset failed login counter."""
+    """Set member status to active. Preserves failedAttempts."""
     m = get_member(member_id)
     if not m:
         raise ValueError("Member not found")
     if str(m.get("username", "")).strip().upper() == FACTORY_USERNAME.upper():
         raise ValueError("The factory user cannot be modified.")
     m["status"] = "active"
-    m["failedAttempts"] = 0
     _save_member_record(m)
     return m
 
@@ -1202,62 +962,187 @@ def enable_member(member_id: int) -> Dict[str, Any]:
     return m
 
 
-def factory_reset() -> Dict[str, Any]:
-    """Delete all operational data. Preserves factorySettings.json only."""
-    clear_report_export_schedule()
-    recipes_path = _get_storage_path("recipes.json")
-    reports_path = _get_storage_path("reports.json")
-    members_path = _get_storage_path("members.json")
-    test_run_path = _get_storage_path("test_run.json")
-    recipes = _load_json_file(recipes_path, default=[])
-    reports = _load_json_file(reports_path, default=[])
-    members = _load_json_file(members_path, default=[])
-    n_recipes = len(recipes) if isinstance(recipes, list) else 0
-    n_reports = len(reports) if isinstance(reports, list) else 0
-    n_members = len(members) if isinstance(members, list) else 0
-    _save_json_file(recipes_path, [])
-    _save_json_file(reports_path, [])
-    _save_json_file(members_path, [])
-    n_report_files = 0
-    if _reports_dir and _reports_dir.exists():
-        for f in list(_reports_dir.iterdir()):
-            if f.is_file():
-                try:
-                    f.unlink()
-                    n_report_files += 1
-                except Exception:
-                    pass
-    n_storage_files = 0
-    for extra_name in ("test_run.json", "datetime.json", "audit_entries.json", "audit_log.json", "audit_export.json"):
-        extra_path = _get_storage_path(extra_name)
-        if extra_path.exists():
+_FACTORY_RESET_EMPTY_JSON = {
+    "recipes.json": [],
+    "reports.json": [],
+    "members.json": [],
+    "users.json": [],
+}
+_FACTORY_RESET_DELETE_FILES = (
+    "test_run.json",
+    "test_run.json.bak",
+    "datetime.json",
+    "current_user.json",
+    "currentUser.json",
+    "session_power_audit_pending.json",
+    "app_clean_stop.flag",
+    "audit_entries.json",
+    "audit_log.json",
+    "audit_export.json",
+    "report_export_schedule.json",
+    "audit_export_schedule.json",
+    "basketBatches.json",
+    "basketConfig.json",
+    "basketDurations.json",
+    "basketModes.json",
+    "basketProducts.json",
+    "configuredBeakers.json",
+    "setTemp.json",
+)
+
+
+def _unique_paths(paths: List[pathlib.Path]) -> List[pathlib.Path]:
+    seen = set()
+    out: List[pathlib.Path] = []
+    for raw in paths:
+        p = pathlib.Path(raw)
+        try:
+            key = str(p.resolve())
+        except OSError:
+            key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def all_known_storage_dirs() -> List[pathlib.Path]:
+    """Every storage tree that may hold kiosk JSON (active USB path + SD fallback)."""
+    dirs: List[pathlib.Path] = []
+    configured = _configured_storage_dir()
+    if configured is not None:
+        dirs.append(configured)
+    dirs.extend(_storage_dir_candidates())
+    if _storage_dir is not None:
+        dirs.append(_storage_dir)
+    return _unique_paths(dirs)
+
+
+def _app_root_path() -> pathlib.Path:
+    raw = (_config.get("APP_ROOT") if _config else None) or os.environ.get("APP_ROOT") or "/opt/kiosk"
+    return pathlib.Path(raw)
+
+
+def all_known_reports_dirs() -> List[pathlib.Path]:
+    dirs: List[pathlib.Path] = []
+    app_root = _app_root_path()
+    for raw in (
+        os.environ.get("REPORTS_DIR"),
+        (_config.get("REPORTS_DIR") if _config else None),
+        str(pathlib.Path(os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal")) / "reports"),
+        str(app_root / "reports"),
+    ):
+        if raw:
+            dirs.append(pathlib.Path(raw))
+    if _reports_dir is not None:
+        dirs.append(_reports_dir)
+    return _unique_paths(dirs)
+
+
+def all_known_audit_db_dirs() -> List[pathlib.Path]:
+    dirs: List[pathlib.Path] = []
+    app_root = _app_root_path()
+    for raw in (
+        os.environ.get("AUDIT_DB_DIR"),
+        (_config.get("AUDIT_DB_DIR") if _config else None),
+        str(pathlib.Path(os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal")) / "db"),
+        str(app_root / "db"),
+    ):
+        if raw:
+            dirs.append(pathlib.Path(raw))
+    return _unique_paths(dirs)
+
+
+def _collect_factory_settings_to_preserve() -> Dict[str, Any]:
+    """Keep the richest factorySettings.json found across all storage roots."""
+    best: Dict[str, Any] = {}
+    for root in all_known_storage_dirs():
+        path = root / "factorySettings.json"
+        data = _load_json_file(path, default={})
+        if isinstance(data, dict) and len(data) >= len(best):
+            best = dict(data)
+    if not best:
+        best = dict(get_factory_settings() or {})
+    return best
+
+
+def _wipe_storage_tree(storage_dir: pathlib.Path, preserved_settings: Dict[str, Any], stats: Dict[str, int]) -> None:
+    if not storage_dir.is_dir():
+        return
+    for name, empty in _FACTORY_RESET_EMPTY_JSON.items():
+        path = storage_dir / name
+        if not path.is_file():
+            continue
+        before = _load_json_file(path, default=[])
+        if name == "recipes.json" and isinstance(before, list):
+            stats["recipes"] += len(before)
+        elif name == "reports.json" and isinstance(before, list):
+            stats["reports"] += len(before)
+        elif name == "members.json" and isinstance(before, list):
+            stats["members"] += len(before)
+        _save_json_file(path, empty)
+    for name in _FACTORY_RESET_DELETE_FILES:
+        path = storage_dir / name
+        if path.is_file():
             try:
-                extra_path.unlink()
-                n_storage_files += 1
+                path.unlink()
+                stats["storageFiles"] += 1
             except Exception:
                 pass
+    if preserved_settings:
+        _save_json_file(storage_dir / "factorySettings.json", preserved_settings)
+
+
+def _wipe_reports_tree(reports_dir: pathlib.Path, stats: Dict[str, int]) -> None:
+    if not reports_dir.is_dir():
+        return
+    for f in list(reports_dir.iterdir()):
+        if f.is_file():
+            try:
+                f.unlink()
+                stats["reportFiles"] += 1
+            except Exception:
+                pass
+
+
+def factory_reset() -> Dict[str, Any]:
+    """Delete all operational data on every known storage tree. Preserves factorySettings.json only."""
+    preserved_settings = _collect_factory_settings_to_preserve()
+    stats = {
+        "recipes": 0,
+        "reports": 0,
+        "members": 0,
+        "reportFiles": 0,
+        "storageFiles": 0,
+        "storageRoots": 0,
+        "reportRoots": 0,
+    }
+    clear_report_export_schedule = globals().get("clear_report_export_schedule")
+    if callable(clear_report_export_schedule):
+        clear_report_export_schedule()
+    for storage_dir in all_known_storage_dirs():
+        _wipe_storage_tree(storage_dir, preserved_settings, stats)
+        stats["storageRoots"] += 1
+    app_root = _app_root_path()
+    mirror_checkpoint = app_root / "storage" / "test_run.json"
+    if mirror_checkpoint.is_file():
+        try:
+            mirror_checkpoint.unlink()
+            stats["storageFiles"] += 1
+        except Exception:
+            pass
+    for reports_dir in all_known_reports_dirs():
+        _wipe_reports_tree(reports_dir, stats)
+        stats["reportRoots"] += 1
     clear_current_user()
     delete_session_power_audit_pending()
-    clean_flag = _get_storage_path(_APP_CLEAN_STOP_FLAG)
-    if clean_flag.exists():
-        try:
-            clean_flag.unlink()
-        except Exception:
-            pass
-    if test_run_path.exists():
-        try:
-            test_run_path.unlink()
-            n_storage_files += 1
-        except Exception:
-            pass
+    if preserved_settings:
+        save_factory_settings(preserved_settings)
     return {
-        "deleted": {
-            "recipes": n_recipes,
-            "reports": n_reports,
-            "members": n_members,
-            "reportFiles": n_report_files,
-            "storageFiles": n_storage_files,
-        }
+        "deleted": stats,
+        "preservedFactorySettings": bool(preserved_settings),
+        "auditDbDirs": [str(p) for p in all_known_audit_db_dirs()],
     }
 
 
@@ -1276,6 +1161,10 @@ def get_factory_settings() -> Dict[str, Any]:
         settings["passwordResetPeriodDays"] = 30
     if "autoLogoutMinutes" not in settings:
         settings["autoLogoutMinutes"] = 0
+    if not isinstance(settings.get("recipeVacuumPresets"), list) or len(settings["recipeVacuumPresets"]) != 3:
+        settings["recipeVacuumPresets"] = [200, 400, 600]
+    if not isinstance(settings.get("recipeTimePresetsSec"), list) or len(settings["recipeTimePresetsSec"]) != 3:
+        settings["recipeTimePresetsSec"] = [30, 60, 90]
     return settings
 
 
@@ -1305,7 +1194,6 @@ def save_factory_settings(settings: Dict[str, Any]):
         ("maxUsers", 10, 1, 999),
         ("maxAdmins", 2, 1, 99),
         ("maxSupervisors", 3, 1, 99),
-        ("maxQa", 3, 1, 99),
         ("passwordResetPeriodDays", 30, 1, 3650),
         ("autoLogoutMinutes", 0, 0, 10080),
     ]:
@@ -1316,6 +1204,35 @@ def save_factory_settings(settings: Dict[str, Any]):
             except (ValueError, TypeError):
                 val = default
             merged[key] = val
+    try:
+        max_vacuum = max(1, min(650, int(merged.get("maxVacuumMmHg", 650))))
+    except (ValueError, TypeError):
+        max_vacuum = 650
+    merged["maxVacuumMmHg"] = max_vacuum
+
+    vacuum_defaults = [200, 400, 600]
+    vacuum_presets = merged.get("recipeVacuumPresets")
+    if not isinstance(vacuum_presets, list) or len(vacuum_presets) != 3:
+        vacuum_presets = vacuum_defaults
+    normalized_vacuum_presets = []
+    for index, value in enumerate(vacuum_presets):
+        try:
+            normalized_vacuum_presets.append(max(1, min(max_vacuum, int(value))))
+        except (ValueError, TypeError):
+            normalized_vacuum_presets.append(min(max_vacuum, vacuum_defaults[index]))
+    merged["recipeVacuumPresets"] = normalized_vacuum_presets
+
+    time_defaults = [30, 60, 90]
+    time_presets = merged.get("recipeTimePresetsSec")
+    if not isinstance(time_presets, list) or len(time_presets) != 3:
+        time_presets = time_defaults
+    normalized_time_presets = []
+    for index, value in enumerate(time_presets):
+        try:
+            normalized_time_presets.append(max(1, min(5999, int(value))))
+        except (ValueError, TypeError):
+            normalized_time_presets.append(time_defaults[index])
+    merged["recipeTimePresetsSec"] = normalized_time_presets
     settings_path = _get_storage_path("factorySettings.json")
     _save_json_file(settings_path, merged)
 
@@ -1328,12 +1245,7 @@ def save_current_user(user: Dict[str, Any]):
     global _current_user
     _current_user = dict(user)
     session_path = _get_storage_path("current_user.json")
-    try:
-        _save_json_file(session_path, _current_user)
-    except OSError:
-        # Keep the in-memory session usable even if removable storage is
-        # temporarily read-only; callers such as permission checks must not 500.
-        return
+    _save_json_file(session_path, _current_user)
 
 
 def get_current_user() -> Optional[Dict[str, Any]]:
@@ -1365,10 +1277,7 @@ def refresh_current_user_from_member() -> Optional[Dict[str, Any]]:
     updated["role"] = member.get("role", cur.get("role"))
     updated["featureOverrides"] = member.get("featureOverrides")
     updated["permissionsVersion"] = member.get("permissionsVersion")
-    if updated != cur:
-        save_current_user(updated)
-    else:
-        globals()["_current_user"] = updated
+    save_current_user(updated)
     return updated
 
 

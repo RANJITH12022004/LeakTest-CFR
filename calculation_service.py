@@ -1,81 +1,100 @@
 #!/usr/bin/env python3
 """
-calculation_service.py - Tap Density recipe validation and form processing.
+calculation_service.py - Leak Test recipe validation and calculations.
 """
 
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
+
+CHAMBER_VOLUMES_ML = {"SMALL": 50, "MEDIUM": 100, "LARGE": 250}
+VALID_METHODS = {"VACUUM_DECAY", "PRESSURE_DECAY", "CUSTOM"}
+VALID_EVACUATION_RATES = {"FAST", "STANDARD"}
 
 
 def init():
     pass
 
 
+def _normalize_chamber(val: Any) -> Optional[str]:
+    if val is None:
+        return None
+    s = str(val).strip().upper()
+    if s in ("SMALL", "S", "50"):
+        return "SMALL"
+    if s in ("MEDIUM", "M", "100"):
+        return "MEDIUM"
+    if s in ("LARGE", "L", "250"):
+        return "LARGE"
+    return s if s in CHAMBER_VOLUMES_ML else None
+
+
 def validate_recipe(recipe_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Validate tap-density recipe. Required: productName or name; steps (array) with speed, dropHeight, tapCount; cylinder.
-    Returns { "valid": bool, "error": str }.
-    """
-    errors = []
+    errors: List[str] = []
     name = (recipe_data.get("productName") or recipe_data.get("name") or "").strip()
     if not name:
         errors.append("Product name is required")
+    product_type = str(recipe_data.get("productType") or "").strip()
+    if not product_type:
+        errors.append("Product type is required")
+    try:
+        samples = int(recipe_data.get("noOfSamples"))
+        if samples < 1 or samples > 999:
+            errors.append("No. of samples must be between 1 and 999")
+    except (TypeError, ValueError):
+        errors.append("No. of samples is required")
+    try:
+        batch_size = int(recipe_data.get("batchSize"))
+        if batch_size < 1 or batch_size > 999:
+            errors.append("Batch size must be between 1 and 999")
+    except (TypeError, ValueError):
+        errors.append("Batch size is required")
 
-    steps = recipe_data.get("steps")
-    if steps is not None and not isinstance(steps, list):
-        errors.append("Steps must be an array")
-    elif isinstance(steps, list):
-        for i, s in enumerate(steps):
-            if not isinstance(s, dict):
-                errors.append(f"Step {i + 1}: invalid format")
+    method = str(recipe_data.get("method") or recipe_data.get("testMethod") or "").strip().upper()
+    if method and method not in VALID_METHODS:
+        errors.append("Method must be VACUUM_DECAY, PRESSURE_DECAY, or CUSTOM")
+
+    try:
+        tv = recipe_data.get("targetVacuumMbar")
+        if tv is not None:
+            v = float(tv)
+            if v > 0 or v < -1000:
+                errors.append("Target vacuum must be between -1000 and 0 mbar")
+    except (TypeError, ValueError):
+        errors.append("Invalid target vacuum")
+
+    evac = str(recipe_data.get("evacuationRate") or "").strip().upper()
+    if evac and evac not in VALID_EVACUATION_RATES:
+        errors.append("Evacuation rate must be FAST or STANDARD")
+
+    chamber = _normalize_chamber(recipe_data.get("chamberSize") or recipe_data.get("chamber"))
+    if recipe_data.get("chamberSize") is not None and not chamber:
+        errors.append("Chamber size must be SMALL, MEDIUM, or LARGE")
+
+    cycles = recipe_data.get("cycles")
+    if cycles is not None and not isinstance(cycles, list):
+        errors.append("Cycles must be an array")
+    elif isinstance(cycles, list):
+        if not cycles:
+            errors.append("At least one test cycle is required")
+        for i, c in enumerate(cycles):
+            if not isinstance(c, dict):
+                errors.append(f"Cycle {i + 1}: invalid format")
                 continue
             try:
-                sp = s.get("speed") if s.get("speed") is not None else s.get("tapsPerMin")
-                if sp is not None and (int(sp) < 1 or int(sp) > 500):
-                    errors.append(f"Step {i + 1}: speed/taps per min must be 1-500")
+                hs = int(c.get("holdSeconds", 0))
+                if hs < 1 or hs > 3600:
+                    errors.append(f"Cycle {i + 1}: hold time must be 1-3600 seconds")
             except (TypeError, ValueError):
-                pass
-            try:
-                dh = s.get("dropHeight") or s.get("heightMm")
-                if dh is not None and (float(dh) < 0 or float(dh) > 50):
-                    errors.append(f"Step {i + 1}: drop height must be 0-50 mm")
-            except (TypeError, ValueError):
-                pass
-            try:
-                tc = s.get("tapCount") or s.get("taps")
-                if tc is not None and (int(tc) < 0 or int(tc) > 10000):
-                    errors.append(f"Step {i + 1}: tap count must be 0-10000")
-            except (TypeError, ValueError):
-                pass        
+                errors.append(f"Cycle {i + 1}: invalid hold time")
 
-    cylinder = recipe_data.get("cylinder") or recipe_data.get("cylinderSize")
-    if cylinder is not None and isinstance(cylinder, dict):
-        vol = cylinder.get("volume") or cylinder.get("volumeMl")
-        if vol is not None:
-            try:
-                v = float(vol)
-                if v <= 0 or v > 1000:
-                    errors.append("Cylinder volume must be 0-1000 ml")
-            except (TypeError, ValueError):
-                errors.append("Invalid cylinder volume")
-
-    mode = str(recipe_data.get("uspMode") or "").strip().upper()
-    if mode == "CUSTOM":
-        try:
-            ct = recipe_data.get("customTotalTaps")
-            if ct is None:
-                errors.append("Custom total taps is required when uspMode is Custom")
-            else:
-                n = int(ct)
-                sc = recipe_data.get("stepCount")
-                steps_len = len(recipe_data.get("steps") or []) if isinstance(recipe_data.get("steps"), list) else 0
-                n_steps = int(sc) if sc is not None else (steps_len or 0)
-                if n < 1:
-                    errors.append("Custom total taps must be at least 1")
-                elif n_steps >= 1 and n < n_steps:
-                    errors.append("Custom total taps must be at least the number of steps")
-        except (TypeError, ValueError):
-            errors.append("Invalid customTotalTaps")
+    try:
+        mlr = recipe_data.get("maxLeakRate")
+        if mlr is not None:
+            r = float(mlr)
+            if r < 0 or r > 100:
+                errors.append("Max leak rate must be 0-100")
+    except (TypeError, ValueError):
+        errors.append("Invalid max leak rate")
 
     if errors:
         return {"valid": False, "error": "; ".join(errors)}
@@ -83,10 +102,49 @@ def validate_recipe(recipe_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def process_recipe_form_data(form_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize recipe form data for storage."""
     recipe = dict(form_data)
+    try:
+        recipe["noOfSamples"] = int(recipe.get("noOfSamples"))
+    except (TypeError, ValueError):
+        pass
+    try:
+        recipe["batchSize"] = int(recipe.get("batchSize"))
+    except (TypeError, ValueError):
+        pass
     if "createdAt" not in recipe:
         recipe["createdAt"] = datetime.utcnow().isoformat() + "Z"
     if "lastUsed" not in recipe:
         recipe["lastUsed"] = recipe.get("createdAt", "")
+    chamber = _normalize_chamber(recipe.get("chamberSize") or recipe.get("chamber"))
+    if chamber:
+        recipe["chamberSize"] = chamber
+        recipe["chamberVolumeMl"] = CHAMBER_VOLUMES_ML.get(chamber)
+    method = str(recipe.get("method") or recipe.get("testMethod") or "CUSTOM").strip().upper()
+    recipe["method"] = method
+    if method == "VACUUM_DECAY":
+        recipe.setdefault("targetVacuumMbar", -50)
+        recipe.setdefault("evacuationRate", "FAST")
+    elif method == "PRESSURE_DECAY":
+        recipe.setdefault("targetVacuumMbar", -100)
+        recipe.setdefault("evacuationRate", "STANDARD")
     return recipe
+
+
+def compute_leak_rate(
+    pressure_start_mbar: float,
+    pressure_end_mbar: float,
+    hold_seconds: float,
+    chamber_volume_ml: float = 100.0,
+) -> float:
+    if hold_seconds <= 0:
+        return 0.0
+    delta = abs(pressure_end_mbar - pressure_start_mbar)
+    factor = max(chamber_volume_ml, 1.0) / 100.0
+    return round((delta / hold_seconds) * factor, 4)
+
+
+def evaluate_pass_fail(leak_rate: float, max_leak_rate: float) -> str:
+    try:
+        return "PASS" if float(leak_rate) <= float(max_leak_rate) else "FAIL"
+    except (TypeError, ValueError):
+        return "FAIL"

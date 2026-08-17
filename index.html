@@ -6,8 +6,8 @@
     <!-- Fixed for 1024x600 7-inch display -->
     <meta name="viewport"
         content="width=1024, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Tap Density Apparatus</title>
-    <link rel="stylesheet" href="styles.css?v=21">
+    <title>Leak Test Apparatus</title>
+    <link rel="stylesheet" href="styles.css?v=37">
 </head>
 
 <body>
@@ -15,7 +15,7 @@
     <div class="screen active" id="page-login">
         <div class="centered-content">
             <img alt="RAISE Logo" class="login-logo" src="./assets/rle_logo.png" />
-            <h2 class="welcome-text">Tap Density Apparatus</h2>
+            <h2 class="welcome-text">Leak Test Apparatus</h2>
             <div class="login-form-box">
                 <input class="login-input" placeholder="User/Employee ID:" type="text" id="login-uid"
                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)" />
@@ -73,6 +73,35 @@
             </div>
         </div>
     </div>
+
+    <!-- Batch Number Modal (Quick Test + Load Recipe) — must be outside page containers -->
+    <div id="batch-number-modal" class="modal-overlay param-config-modal" style="display: none;">
+        <div class="role-modal" style="max-width: 480px; max-height: 90vh; overflow-y: auto;">
+            <h3 class="param-config-modal-title">Start Test</h3>
+            <div class="form-group">
+                <label for="load-recipe-batch-input">Batch Number <span class="required">*</span></label>
+                <input type="text" id="load-recipe-batch-input" class="input-field"
+                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+            </div>
+            <div class="form-group">
+                <label for="load-recipe-samples-input">No. of Samples <span class="required">*</span></label>
+                <input type="number" id="load-recipe-samples-input" class="input-field" min="1" max="999"
+                    inputmode="numeric" value="1"
+                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+            </div>
+            <div class="form-group">
+                <label for="load-recipe-analysis-no">Analysis Report No. <span class="required">*</span></label>
+                <input type="text" id="load-recipe-analysis-no" class="input-field"
+                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+            </div>
+            <p id="load-recipe-batch-error" class="approval-verify-error" style="display:none;"></p>
+            <div class="role-modal-buttons">
+                <button type="button" class="btn-role-select btn-role-cancel" onclick="closeBatchNumberModal()">Cancel</button>
+                <button type="button" class="btn-role-select btn-role-user" onclick="confirmBatchNumberAndLoad()">Continue</button>
+            </div>
+        </div>
+    </div>
+
     <div id="biometric-progress-overlay" class="modal-overlay" style="display: none;">
         <div class="role-modal biometric-progress-modal">
             <div class="bio-enroll-steps" id="bio-enroll-steps" style="display: none;">
@@ -205,7 +234,7 @@
                         </svg>
                     </div>
                 </div>
-                <h1 class="page-title" id="header-title">Tap Density Apparatus</h1>
+                <h1 class="page-title" id="header-title">Leak Test Apparatus</h1>
                 <div class="header-right">
                     <div class="datetime">
                         <span id="current-time">--:--:--</span>
@@ -226,7 +255,7 @@
                                 </svg>
                             </div>
                             <h2>Quick Test</h2>
-                            <p>Perform a quick tap density test without recipe</p>
+                            <p>Perform a quick leak test without recipe</p>
                         </div>
 
                         <div class="test-card" data-rbac-nav="recipe-test" onclick="startRecipeTest()" style="cursor: pointer;">
@@ -238,7 +267,7 @@
                                 </svg>
                             </div>
                             <h2>Load Recipe</h2>
-                            <p>Run a tap density test using a saved recipe</p>
+                            <p>Run a leak test using a saved recipe</p>
                         </div>
 
                         <div class="test-card" data-rbac-nav="recipe-manage" onclick="manageRecipes()" style="cursor: pointer;">
@@ -250,7 +279,7 @@
                                 </svg>
                             </div>
                             <h2>Manage Recipe</h2>
-                            <p>Create, edit, or disable tap density recipes</p>
+                            <p>Create, edit, or disable leak test recipes</p>
                         </div>
                     </div>
                 </div>
@@ -280,128 +309,64 @@
                     </div>
                 </div>
 
-                <!-- Quick Test -->
+                <!-- Quick Test — Electrolab-style instrument console -->
                 <div class="page" id="page-quick-test">
-                    <div class="validation-type-page create-recipe-step1-page quick-test-page">
-                        <div class="quick-test-form form-grid create-recipe-form-grid">
-                            <div class="form-group full-width">
-                                <label>Product Name</label>
-                                <input type="text" id="quick-product-name" class="input-field" placeholder="Enter product name"
-                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                            </div>
-                            <div class="form-group full-width">
-                                <label>Batch Number</label>
-                                <input type="text" id="quick-batch-number" class="input-field" placeholder="Enter batch number"
-                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                            </div>
-                            <div class="create-recipe-section">
-                                <h3 class="create-recipe-section-title">Procedure</h3>
-                                <div class="validation-type-grid create-recipe-grid procedure-cards-grid">
-                                    <label class="validation-type-settings-card create-recipe-card" data-procedure="usp1">
-                                        <input type="radio" name="quick-usp-mode" value="USP1" checked onchange="applyQuickUspModeToSpeedHeight()">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">USP 1</span></h3>
-                                        <p class="step1-card-sublabel">300 / 14 mm</p>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-procedure="usp2">
-                                        <input type="radio" name="quick-usp-mode" value="USP2" onchange="applyQuickUspModeToSpeedHeight()">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">USP 2</span></h3>
-                                        <p class="step1-card-sublabel">250 / 3 mm</p>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-procedure="custom">
-                                        <input type="radio" name="quick-usp-mode" value="CUSTOM" onchange="applyQuickUspModeToSpeedHeight()">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">Custom</span></h3>
-                                        <p class="step1-card-sublabel">Speed, height &amp; steps</p>
-                                    </label>
-                                </div>
-                            </div>
-                            <div id="quick-custom-speed-height-wrap" style="display: none;">
-                            <div class="create-recipe-section">
-                                <h3 class="create-recipe-section-title">Tap Speed</h3>
-                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--pair">
-                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="speed" data-value="300">
-                                        <input type="radio" name="quick-speed" value="300">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">300</span></h3>
-                                        <p class="step1-card-sublabel">Taps/Min</p>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="speed" data-value="250">
-                                        <input type="radio" name="quick-speed" value="250">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">250</span></h3>
-                                        <p class="step1-card-sublabel">Taps/Min</p>
-                                    </label>
-                                </div>
-                            </div>
-                            <div class="create-recipe-section">
-                                <h3 class="create-recipe-section-title">Drop Height</h3>
-                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--pair">
-                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="height" data-value="14">
-                                        <input type="radio" name="quick-height" value="14">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">14</span><span class="cylinder-unit">mm</span></h3>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="height" data-value="3">
-                                        <input type="radio" name="quick-height" value="3">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">3</span><span class="cylinder-unit">mm</span></h3>
-                                    </label>
-                                </div>
-                            </div>
-                            </div>
-                            <div id="quick-recipe-steps-section" class="create-recipe-section" style="display: none;">
-                                <h3 class="create-recipe-section-title">Number of steps</h3>
-                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--single">
-                                    <button type="button" class="validation-type-settings-card create-recipe-card quick-step-select-card"
-                                        onclick="goToQuickTestStepsPage()">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num" id="quick-step-count-summary">10</span></h3>
-                                        <p class="step1-card-sublabel" id="quick-step-count-summary-sub">Tap to select steps</p>
-                                    </button>
-                                </div>
-                            </div>
-                            <div class="create-recipe-section">
-                                <h3 class="create-recipe-section-title">Cylinder (Sample volume)</h3>
-                                <div class="validation-type-grid create-recipe-grid procedure-cards-grid">
-                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="50">
-                                        <input type="radio" name="quick-cylinder" value="50">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">50</span><span class="cylinder-unit">ml</span></h3>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="100">
-                                        <input type="radio" name="quick-cylinder" value="100" checked>
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">100</span><span class="cylinder-unit">ml</span></h3>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="250">
-                                        <input type="radio" name="quick-cylinder" value="250">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">250</span><span class="cylinder-unit">ml</span></h3>
-                                    </label>
-                                </div>
-                            </div>
+                    <div class="qt-console">
+                        <div class="qt-console-bar">
+                            <span class="qt-console-mode">QUICK TEST</span>
+                            <span class="qt-console-hint">Set product and hold parameters, then start</span>
                         </div>
-                        <div class="quick-test-actions">
-                            <button type="button" class="btn btn-secondary" onclick="goToPage('home')">Back to Home</button>
-                            <button type="button" class="btn btn-primary" onclick="startQuickTestRun()">Start Test</button>
-                        </div>
-                    </div>
-                </div>
 
-                <div class="page" id="page-quick-test-steps">
-                    <div class="validation-type-page create-recipe-step1-page quick-test-page tap-steps-picker-page">
-                        <h2 class="section-title">Number of steps</h2>
-                        <div class="validation-type-grid create-recipe-grid" id="quick-step-cards-grid">
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="1"><input type="radio" name="quick-step-card" value="1"><h3>1</h3><p>step</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="2"><input type="radio" name="quick-step-card" value="2"><h3>2</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="3"><input type="radio" name="quick-step-card" value="3"><h3>3</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="4"><input type="radio" name="quick-step-card" value="4"><h3>4</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="5"><input type="radio" name="quick-step-card" value="5"><h3>5</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="6"><input type="radio" name="quick-step-card" value="6"><h3>6</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="7"><input type="radio" name="quick-step-card" value="7"><h3>7</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="8"><input type="radio" name="quick-step-card" value="8"><h3>8</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="9"><input type="radio" name="quick-step-card" value="9"><h3>9</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="10"><input type="radio" name="quick-step-card" value="10"><h3>10</h3><p>steps</p></label>
+                        <div class="qt-console-body">
+                            <div class="qt-zone qt-zone-product">
+                                <div class="qt-zone-label">Product</div>
+                                <label class="qt-field-label" for="quick-product-name">Product Name</label>
+                                <input type="text" id="quick-product-name" class="input-field qt-input-lg"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                            </div>
+
+                            <div class="qt-zone qt-zone-params">
+                                <div class="qt-zone-label">Test parameters</div>
+                                <div class="qt-param-grid">
+                                    <div class="qt-param-block">
+                                        <label class="qt-field-label" for="quick-vacuum-mmhg">Vacuum (mmHg)</label>
+                                        <input type="number" id="quick-vacuum-mmhg" class="input-field qt-input-metric"
+                                            min="1" max="650" inputmode="numeric"
+                                            oninput="if(typeof syncQuickVacuumPreset==='function') syncQuickVacuumPreset();"
+                                            onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                        <div class="qt-preset-row" role="group" aria-label="Vacuum presets">
+                                            <button type="button" class="qt-preset-btn" data-vacuum="200"
+                                                onclick="applyQuickVacuumPreset(this.getAttribute('data-vacuum'))">200</button>
+                                            <button type="button" class="qt-preset-btn" data-vacuum="400"
+                                                onclick="applyQuickVacuumPreset(this.getAttribute('data-vacuum'))">400</button>
+                                            <button type="button" class="qt-preset-btn" data-vacuum="600"
+                                                onclick="applyQuickVacuumPreset(this.getAttribute('data-vacuum'))">600</button>
+                                        </div>
+                                    </div>
+                                    <div class="qt-param-block">
+                                        <label class="qt-field-label" for="quick-duration">Time (mm:ss)</label>
+                                        <input type="text" id="quick-duration" class="input-field qt-input-metric"
+                                            inputmode="numeric" data-mmss-input="true" placeholder="MM:SS" maxlength="5"
+                                            oninput="if(typeof applyMmSsAutoColon==='function') applyMmSsAutoColon(this); if(typeof syncQuickTimePreset==='function') syncQuickTimePreset();"
+                                            onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                        <div class="qt-preset-row" role="group" aria-label="Time presets">
+                                            <button type="button" class="qt-preset-btn" data-time="00:30"
+                                                onclick="applyQuickTimePreset(this.getAttribute('data-time'))">00:30</button>
+                                            <button type="button" class="qt-preset-btn" data-time="01:00"
+                                                onclick="applyQuickTimePreset(this.getAttribute('data-time'))">01:00</button>
+                                            <button type="button" class="qt-preset-btn" data-time="01:30"
+                                                onclick="applyQuickTimePreset(this.getAttribute('data-time'))">01:30</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
-                        <p id="quick-usp-taps-readonly" class="section-subtitle usp-taps-readonly" style="display: none;"></p>
-                        <div class="form-group full-width" id="quick-steps-taps-wrap">
-                            <label>Taps per step (Custom only)</label>
-                            <div id="quick-step-tap-inputs" class="form-grid"></div>
-                        </div>
-                        <div class="quick-test-actions">
-                            <button type="button" class="btn btn-secondary" onclick="goToPage('quick-test')">Back</button>
-                            <button type="button" class="btn btn-primary" onclick="confirmQuickTestStepSetup()">Continue</button>
+
+                        <p id="quick-test-input-error" class="approval-verify-error qt-error" style="display:none;"></p>
+
+                        <div class="qt-console-footer">
+                            <button type="button" class="btn btn-secondary qt-btn-back" onclick="goToPage('home')">Back</button>
+                            <button type="button" class="btn btn-primary qt-btn-start" onclick="startQuickTestRun()">START TEST</button>
                         </div>
                     </div>
                 </div>
@@ -411,18 +376,18 @@
                     <div class="add-member-container">
                         <h2 class="section-title" id="password-reset-page-title">Reset Expired Password</h2>
                         <p class="section-subtitle" id="password-reset-page-subtitle">Your password has expired. Set a new password to continue.</p>
-                        <div class="add-member-form form-grid">
+                        <div class="add-member-form form-grid password-reset-form-grid">
                             <div class="form-group full-width">
                                 <label>User ID</label>
                                 <input type="text" id="expired-reset-username" class="input-field" readonly>
                             </div>
-                            <div class="form-group full-width">
+                            <div class="form-group">
                                 <label>Current Password</label>
                                 <input type="password" id="expired-reset-old-password" class="input-field"
                                     placeholder="Enter current password"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
-                            <div class="form-group full-width">
+                            <div class="form-group">
                                 <label>New Password</label>
                                 <input type="password" id="expired-reset-new-password" class="input-field"
                                     placeholder="Enter new password"
@@ -443,103 +408,95 @@
 
                 <!-- Test Run Page -->
                 <div class="page" id="page-test-run">
-                    <div class="test-run-container validation-type-page">
-                        <div class="test-run-header">
-                            <div class="test-run-info-row">
-                                <span class="info-label">Product:</span>
-                                <span class="info-value" id="run-product-name">--</span>
-                                <span class="info-separator">|</span>
-                                <span class="info-label">Batch No:</span>
-                                <span class="info-value" id="run-batch-no">--</span>
-                                <span class="info-separator">|</span>
-                                <span class="info-label">USP:</span>
-                                <span class="info-value" id="run-usp">--</span>
-                                <span class="info-separator">|</span>
-                                <span class="info-label">Initial Volume:</span>
-                                <span class="info-value" id="run-sample-volume">--</span>
-                                <span class="info-value"> ml</span>
-                                <span class="info-separator">|</span>
-                                <span class="info-label">Initial Weight:</span>
-                                <span class="info-value" id="run-initial-weight">--</span>
-                                <span class="info-value"> gm</span>
+                    <div class="validation-run-page leak-test-run-page">
+                        <div class="val-run-params" id="test-run-params-bar" aria-label="Test parameters">
+                            <div class="val-run-param">
+                                <span class="val-run-param-label">Product</span>
+                                <span class="val-run-param-value" id="run-product-name">--</span>
                             </div>
-                            <div class="test-run-step-progress">
+                            <span class="val-run-param-dot" aria-hidden="true"></span>
+                            <div class="val-run-param">
+                                <span class="val-run-param-label">Batch No</span>
+                                <span class="val-run-param-value" id="run-batch-no">--</span>
                             </div>
-                            <div class="test-run-tap-row">
+                            <span class="val-run-param-dot" aria-hidden="true"></span>
+                            <div class="val-run-param">
+                                <span class="val-run-param-label">Product Type</span>
+                                <span class="val-run-param-value" id="run-product-type">--</span>
                             </div>
-                            <div class="test-run-controls">
-                                <button type="button" id="btn-test-start-abort" class="btn-ctrl start" onclick="toggleTestRunState()">
-                                    <span class="ctrl-icon">&#9654;</span>
-                                    <span>START</span>
-                                </button>
+                            <span class="val-run-param-dot" aria-hidden="true"></span>
+                            <div class="val-run-param">
+                                <span class="val-run-param-label">Samples</span>
+                                <span class="val-run-param-value" id="run-no-of-samples">--</span>
+                            </div>
+                            <span class="val-run-param-dot" aria-hidden="true" id="run-analysis-no-dot"></span>
+                            <div class="val-run-param" id="run-analysis-no-wrap" style="display: none;">
+                                <span class="val-run-param-label">A.R. No</span>
+                                <span class="val-run-param-value" id="run-analysis-no">--</span>
+                            </div>
+                            <span class="val-run-param-dot" aria-hidden="true"></span>
+                            <div class="val-run-param">
+                                <span class="val-run-param-label">Set Vacuum</span>
+                                <span class="val-run-param-value"><span id="run-set-vacuum">--</span> mmHg</span>
+                            </div>
+                            <span class="val-run-param-dot" aria-hidden="true"></span>
+                            <div class="val-run-param">
+                                <span class="val-run-param-label">Set Duration</span>
+                                <span class="val-run-param-value" id="run-set-time">--</span>
                             </div>
                         </div>
-                        <div class="test-run-body">
-                            <div class="test-run-summary-row">
-                                <div class="test-run-card card-step">
-                                    <div class="card-label">Current Step</div>
-                                    <div class="card-value">
-                                        <span id="run-current-step-card">1</span>
-                                        <span class="card-sub">of <span id="run-total-steps-card">10</span></span>
-                                    </div>
-                                </div>
-                                <div class="test-run-card card-taps">
-                                    <div class="card-label">Tap Count</div>
-                                    <div class="card-value">
-                                        <span id="run-tap-count-card">0</span>
-                                        <span class="card-sub" id="run-tap-count-of-card">of --</span>
-                                    </div>
-                                </div>
-                                <div class="test-run-card card-status">
-                                    <div class="card-label">Status</div>
-                                    <div class="card-value">
-                                        <span id="run-status-text">Ready</span>
-                                        <span class="card-sub" id="run-status-subtext">Waiting to start</span>
-                                    </div>
-                                </div>
-                            </div>
 
-                            <div class="test-run-metrics-row">
-                                    <div class="test-run-metric">
-                                    <div class="metric-label">Bulk Density</div>
-                                    <div class="metric-value">
-                                        <span id="run-bulk-density">--</span>
-                                        <span class="metric-unit">g/ml</span>
+                        <div class="val-run-panel">
+                            <div class="val-run-panel-inner val-run-vacuum-metrics">
+                                <div class="val-run-metric-card">
+                                    <div class="val-run-metric-title">Vacuum (mmHg)</div>
+                                    <div class="val-run-metric-row">
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Current</span>
+                                            <span class="val-run-metric-value" id="run-current-vacuum">--</span>
+                                        </div>
+                                        <div class="val-run-metric-sep">/</div>
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Set</span>
+                                            <span class="val-run-metric-value" id="run-set-vacuum-live">--</span>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="test-run-metric">
-                                    <div class="metric-label">Tap Density</div>
-                                    <div class="metric-value">
-                                        <span id="run-tap-density">--</span>
-                                        <span class="metric-unit">g/ml</span>
-                                    </div>
-                                </div>
-                                <div class="test-run-metric">
-                                    <div class="metric-label">Result</div>
-                                    <div class="metric-value">
-                                        <span id="run-result">--</span>
+                                <div class="val-run-metric-card">
+                                    <div class="val-run-metric-title">Duration (mm:ss)</div>
+                                    <div class="val-run-metric-row">
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Elapsed</span>
+                                            <span class="val-run-metric-value" id="run-elapsed-time">00:00</span>
+                                        </div>
+                                        <div class="val-run-metric-sep">/</div>
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Set</span>
+                                            <span class="val-run-metric-value" id="run-set-time-live">--</span>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
+                        </div>
 
-                            <div class="test-run-results-table-container">
-                                <h4 class="test-run-results-title">Step Results</h4>
-                                <table class="member-table test-run-results-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Step</th>
-                                            <th>Volume (ml)</th>
-                                            <th>Δ Vol (ml)</th>
-                                            <th>Bulk Density (g/ml)</th>
-                                            <th>Tap Density (g/ml)</th>
-                                            <th>Result</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="test-run-results-body">
-                                        <!-- Populated by script.js as each step completes -->
-                                    </tbody>
-                                </table>
+                        <div class="val-run-shared-status">
+                            <div class="val-run-stat">
+                                <span class="val-run-stat-label">Status</span>
+                                <span class="val-run-stat-value val-run-status-text" id="run-status-text">Ready</span>
+                                <span class="val-run-stat-hint" id="run-status-subtext">Press Start to begin</span>
                             </div>
+                            <div class="val-run-result-strip" id="test-run-result-card" hidden>
+                                <span class="val-run-stat-label">Result</span>
+                                <span class="val-run-result-badge" id="run-result">--</span>
+                                <p class="val-run-result-detail" id="run-result-detail">--</p>
+                            </div>
+                        </div>
+
+                        <div class="val-run-cta">
+                            <button type="button" id="btn-test-start-abort" class="btn btn-primary val-run-start-btn" onclick="toggleTestRunState()">
+                                <span class="ctrl-icon" aria-hidden="true">&#9654;</span>
+                                <span id="btn-test-run-label">Start</span>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -590,157 +547,131 @@
                     </div>
                 </div>
 
-                <!-- Test Run Volume Entry modal -->
-                <div id="test-run-volume-overlay" class="modal-overlay" style="display: none;">
-                    <div class="role-modal">
-                        <h3 id="test-run-volume-title">VOLUME IN ML - STEP</h3>
-                        <p id="test-run-volume-message">Enter volume in ml for this step:</p>
-                        <input type="text" id="test-run-volume-input" class="input-field" placeholder="Volume in ml"
-                            inputmode="decimal" data-decimal-input="true" autocomplete="off"
-                            style="width: 180px; margin: 10px auto 0; text-align: center;"
-                            onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                        <div class="role-modal-buttons" style="margin-top: 14px;">
-                            <button type="button" class="btn-role-select btn-role-user" onclick="confirmTestRunVolume()">OK</button>
-                        </div>
-                    </div>
-                </div>
-                <!-- Test Run Initial Weight Entry modal -->
-                <div id="test-run-initial-weight-overlay" class="modal-overlay" style="display: none;">
-                    <div class="role-modal">
-                        <h3>Initial Weight (gm)</h3>
-                        <p>Enter initial weight (gm) before starting the test:</p>
-                        <input type="text" id="test-run-initial-weight-input" class="input-field" placeholder="Initial weight in gm"
-                            inputmode="decimal" data-decimal-input="true" autocomplete="off"
-                            style="width: 220px; margin: 10px auto 0; text-align: center;"
-                            onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                        <div class="role-modal-buttons" style="margin-top: 14px;">
-                            <button type="button" class="btn-role-select btn-role-user" onclick="confirmTestRunInitialWeight()">OK</button>
-                            <button type="button" class="btn-role-select btn-role-cancel" onclick="cancelTestRunInitialWeight()">Cancel</button>
-                        </div>
-                    </div>
-                </div>
-
-                                <!-- Create Recipe Step 1 (layout matches Quick Test) -->
+                <!-- Create Recipe — Electrolab-style instrument console -->
                 <div class="page" id="page-create-recipe-step1">
-                    <div class="validation-type-page create-recipe-step1-page quick-test-page">
-                        <div class="quick-test-form form-grid create-recipe-form-grid">
-                            <div class="form-group full-width">
-                                <label for="recipe-product-name">Recipe Name</label>
-                                <input type="text" id="recipe-product-name" class="input-field" placeholder="Enter recipe name"
-                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                            </div>
-                            <div class="create-recipe-section">
-                                <h3 class="create-recipe-section-title">Procedure</h3>
-                                <div class="validation-type-grid create-recipe-grid procedure-cards-grid">
-                                    <label class="validation-type-settings-card create-recipe-card" data-procedure="usp1">
-                                        <input type="radio" name="create-usp-mode" value="USP1" checked onchange="applyCreateUspModeToSpeedHeight()">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">USP 1</span></h3>
-                                        <p class="step1-card-sublabel">300 / 14 mm</p>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-procedure="usp2">
-                                        <input type="radio" name="create-usp-mode" value="USP2" onchange="applyCreateUspModeToSpeedHeight()">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">USP 2</span></h3>
-                                        <p class="step1-card-sublabel">250 / 3 mm</p>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-procedure="custom">
-                                        <input type="radio" name="create-usp-mode" value="CUSTOM" onchange="applyCreateUspModeToSpeedHeight()">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">Custom</span></h3>
-                                        <p class="step1-card-sublabel">Speed, height &amp; steps</p>
-                                    </label>
-                                </div>
-                            </div>
-                            <div id="create-custom-speed-height-wrap" style="display: none;">
-                            <div class="create-recipe-section">
-                                <h3 class="create-recipe-section-title">Tap Speed</h3>
-                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--pair">
-                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="speed" data-value="300">
-                                        <input type="radio" name="create-speed" value="300">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">300</span></h3>
-                                        <p class="step1-card-sublabel">Taps/Min</p>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="speed" data-value="250">
-                                        <input type="radio" name="create-speed" value="250">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">250</span></h3>
-                                        <p class="step1-card-sublabel">Taps/Min</p>
-                                    </label>
-                                </div>
-                            </div>
-                            <div class="create-recipe-section">
-                                <h3 class="create-recipe-section-title">Drop Height</h3>
-                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--pair">
-                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="height" data-value="14">
-                                        <input type="radio" name="create-height" value="14">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">14</span><span class="cylinder-unit">mm</span></h3>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-create-option="height" data-value="3">
-                                        <input type="radio" name="create-height" value="3">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">3</span><span class="cylinder-unit">mm</span></h3>
-                                    </label>
-                                </div>
-                            </div>
-                            </div>
-                            <div id="create-recipe-steps-section" class="create-recipe-section" style="display: none;">
-                                <h3 class="create-recipe-section-title">Number of steps</h3>
-                                <div class="validation-type-grid create-recipe-grid create-recipe-grid--single">
-                                    <button type="button" class="validation-type-settings-card create-recipe-card quick-step-select-card"
-                                        onclick="openCreateRecipeStepsPage()">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num" id="create-step-count-summary">10</span></h3>
-                                        <p class="step1-card-sublabel" id="create-step-count-summary-sub">Tap to select steps</p>
-                                    </button>
-                                </div>
-                            </div>
-                            <div class="create-recipe-section">
-                                <h3 class="create-recipe-section-title">Cylinder (Sample volume)</h3>
-                                <div class="validation-type-grid create-recipe-grid procedure-cards-grid">
-                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="50">
-                                        <input type="radio" name="create-cylinder" value="50">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">50</span><span class="cylinder-unit">ml</span></h3>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="100">
-                                        <input type="radio" name="create-cylinder" value="100" checked>
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">100</span><span class="cylinder-unit">ml</span></h3>
-                                    </label>
-                                    <label class="validation-type-settings-card create-recipe-card" data-cylinder data-value="250">
-                                        <input type="radio" name="create-cylinder" value="250">
-                                        <h3 class="cylinder-volume-line"><span class="cylinder-num">250</span><span class="cylinder-unit">ml</span></h3>
-                                    </label>
-                                </div>
-                            </div>
+                    <div class="qt-console qt-console-recipe">
+                        <div class="qt-console-bar">
+                            <span class="qt-console-mode">CREATE RECIPE</span>
+                            <span class="qt-console-hint">Define product details and test parameters</span>
                         </div>
-                        <div class="quick-test-actions">
-                            <button type="button" class="btn btn-secondary" onclick="goToPage('manage-recipes')">Back</button>
-                            <button type="button" class="btn btn-primary" id="create-recipe-continue-btn" onclick="onCreateRecipeContinueClick()" disabled>Save Recipe</button>
-                        </div>
-                    </div>
-                </div>
-                <!-- Create Recipe Step 2 – Steps and taps (same layout as Quick Test) -->
-                <div class="page" id="page-create-recipe-step2">
-                    <div class="validation-type-page create-recipe-step1-page quick-test-page tap-steps-picker-page">
-                        <h2 class="section-title">Number of steps</h2>
-                        <div class="validation-type-grid create-recipe-grid" id="create-step-cards-grid">
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="1"><input type="radio" name="create-step-card" value="1"><h3>1</h3><p>step</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="2"><input type="radio" name="create-step-card" value="2"><h3>2</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="3"><input type="radio" name="create-step-card" value="3"><h3>3</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="4"><input type="radio" name="create-step-card" value="4"><h3>4</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="5"><input type="radio" name="create-step-card" value="5"><h3>5</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="6"><input type="radio" name="create-step-card" value="6"><h3>6</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="7"><input type="radio" name="create-step-card" value="7"><h3>7</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="8"><input type="radio" name="create-step-card" value="8"><h3>8</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="9"><input type="radio" name="create-step-card" value="9"><h3>9</h3><p>steps</p></label>
-                            <label class="validation-type-settings-card create-recipe-card" data-quick-step="10"><input type="radio" name="create-step-card" value="10"><h3>10</h3><p>steps</p></label>
-                        </div>
-                        <p id="create-usp-taps-readonly" class="section-subtitle usp-taps-readonly" style="display: none;"></p>
-                        <div class="form-group full-width" id="create-steps-taps-wrap">
-                            <label>Taps per step (Custom only)</label>
-                            <div id="create-step-tap-inputs" class="form-grid"></div>
-                        </div>
-                        <div class="quick-test-actions">
-                            <button type="button" class="btn btn-secondary" onclick="goToPage('create-recipe-step1')">Back</button>
-                            <button type="button" class="btn btn-primary" onclick="confirmCreateRecipeStepSetup()">Continue</button>
-                        </div>
-                    </div>
-                </div>
 
+                        <div class="qt-console-body">
+                            <div class="qt-zone qt-zone-product">
+                                <div class="qt-zone-label">Product</div>
+                                <label class="qt-field-label" for="recipe-product-name">Product Name</label>
+                                <input type="text" id="recipe-product-name" class="input-field qt-input-lg"
+                                    oninput="if(typeof updateCreateRecipeContinueButton==='function') updateCreateRecipeContinueButton();"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+
+                                <label class="qt-field-label qt-field-label-spaced">Product Type</label>
+                                <div class="qt-type-chip-row product-type-options" role="radiogroup" aria-label="Product Type">
+                                    <label class="product-type-chip qt-type-chip">
+                                        <input type="radio" name="recipe-product-type" value="Blister" checked
+                                            onchange="if(typeof onRecipeProductTypeChange==='function') onRecipeProductTypeChange();">
+                                        <span>Blister</span>
+                                    </label>
+                                    <label class="product-type-chip qt-type-chip">
+                                        <input type="radio" name="recipe-product-type" value="Bottle"
+                                            onchange="if(typeof onRecipeProductTypeChange==='function') onRecipeProductTypeChange();">
+                                        <span>Bottle</span>
+                                    </label>
+                                    <label class="product-type-chip qt-type-chip">
+                                        <input type="radio" name="recipe-product-type" value="Pouch"
+                                            onchange="if(typeof onRecipeProductTypeChange==='function') onRecipeProductTypeChange();">
+                                        <span>Pouch</span>
+                                    </label>
+                                    <label class="product-type-chip qt-type-chip">
+                                        <input type="radio" name="recipe-product-type" value="Vial"
+                                            onchange="if(typeof onRecipeProductTypeChange==='function') onRecipeProductTypeChange();">
+                                        <span>Vial</span>
+                                    </label>
+                                    <label class="product-type-chip qt-type-chip">
+                                        <input type="radio" name="recipe-product-type" value="Ampoule"
+                                            onchange="if(typeof onRecipeProductTypeChange==='function') onRecipeProductTypeChange();">
+                                        <span>Ampoule</span>
+                                    </label>
+                                    <label class="product-type-chip qt-type-chip">
+                                        <input type="radio" name="recipe-product-type" value="Sachet"
+                                            onchange="if(typeof onRecipeProductTypeChange==='function') onRecipeProductTypeChange();">
+                                        <span>Sachet</span>
+                                    </label>
+                                    <label class="product-type-chip qt-type-chip">
+                                        <input type="radio" name="recipe-product-type" value="Other"
+                                            onchange="if(typeof onRecipeProductTypeChange==='function') onRecipeProductTypeChange();">
+                                        <span>Other</span>
+                                    </label>
+                                </div>
+
+                                <div id="recipe-product-type-other-group" class="qt-other-type-group" style="display:none;">
+                                    <label class="qt-field-label qt-field-label-spaced" for="recipe-product-type-other">Specify type</label>
+                                    <input type="text" id="recipe-product-type-other" class="input-field qt-input-other"
+                                        oninput="if(typeof updateCreateRecipeContinueButton==='function') updateCreateRecipeContinueButton();"
+                                        onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                </div>
+                            </div>
+
+                            <div class="qt-zone qt-zone-params">
+                                <div class="qt-zone-label">Test parameters</div>
+                                <div class="qt-param-grid qt-meta-grid">
+                                    <div class="qt-param-block qt-meta-block">
+                                        <label class="qt-field-label" for="recipe-no-of-samples">No. of Samples</label>
+                                        <input type="number" id="recipe-no-of-samples" class="input-field qt-input-samples" min="1" max="999"
+                                            inputmode="numeric" value="1"
+                                            oninput="if(typeof updateCreateRecipeContinueButton==='function') updateCreateRecipeContinueButton();"
+                                            onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                    </div>
+                                    <div class="qt-param-block qt-meta-block">
+                                        <label class="qt-field-label" for="recipe-batch-size">Batch Size</label>
+                                        <input type="number" id="recipe-batch-size" class="input-field qt-input-samples" min="1" max="999"
+                                            inputmode="numeric" value="1"
+                                            oninput="if(typeof updateCreateRecipeContinueButton==='function') updateCreateRecipeContinueButton();"
+                                            onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                    </div>
+                                </div>
+                                <div class="qt-param-grid">
+                                    <div class="qt-param-block">
+                                        <label class="qt-field-label" for="recipe-vacuum-mmhg">Vacuum (mmHg)</label>
+                                        <input type="number" id="recipe-vacuum-mmhg" class="input-field qt-input-metric"
+                                            min="1" max="650" inputmode="numeric"
+                                            oninput="if(typeof syncRecipeVacuumPreset==='function') syncRecipeVacuumPreset(); if(typeof updateCreateRecipeContinueButton==='function') updateCreateRecipeContinueButton();"
+                                            onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                        <div class="qt-preset-row" role="group" aria-label="Vacuum presets">
+                                            <button type="button" class="qt-preset-btn" data-recipe-vacuum="200"
+                                                onclick="applyRecipeVacuumPreset(this.getAttribute('data-recipe-vacuum'))">200</button>
+                                            <button type="button" class="qt-preset-btn" data-recipe-vacuum="400"
+                                                onclick="applyRecipeVacuumPreset(this.getAttribute('data-recipe-vacuum'))">400</button>
+                                            <button type="button" class="qt-preset-btn" data-recipe-vacuum="600"
+                                                onclick="applyRecipeVacuumPreset(this.getAttribute('data-recipe-vacuum'))">600</button>
+                                        </div>
+                                    </div>
+                                    <div class="qt-param-block">
+                                        <label class="qt-field-label" for="recipe-duration">Time (mm:ss)</label>
+                                        <input type="text" id="recipe-duration" class="input-field qt-input-metric"
+                                            inputmode="numeric" data-mmss-input="true" placeholder="MM:SS" maxlength="5"
+                                            oninput="if(typeof applyMmSsAutoColon==='function') applyMmSsAutoColon(this); if(typeof syncRecipeTimePreset==='function') syncRecipeTimePreset(); if(typeof updateCreateRecipeContinueButton==='function') updateCreateRecipeContinueButton();"
+                                            onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                        <div class="qt-preset-row" role="group" aria-label="Time presets">
+                                            <button type="button" class="qt-preset-btn" data-recipe-time="00:30"
+                                                onclick="applyRecipeTimePreset(this.getAttribute('data-recipe-time'))">00:30</button>
+                                            <button type="button" class="qt-preset-btn" data-recipe-time="01:00"
+                                                onclick="applyRecipeTimePreset(this.getAttribute('data-recipe-time'))">01:00</button>
+                                            <button type="button" class="qt-preset-btn" data-recipe-time="01:30"
+                                                onclick="applyRecipeTimePreset(this.getAttribute('data-recipe-time'))">01:30</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <p id="create-recipe-input-error" class="approval-verify-error qt-error" style="display:none;"></p>
+
+                        <div class="qt-console-footer">
+                            <button type="button" class="btn btn-secondary qt-btn-back" onclick="goToPage('manage-recipes')">Back</button>
+                            <button type="button" class="btn btn-primary qt-btn-save" id="create-recipe-continue-btn"
+                                onclick="onCreateRecipeContinueClick()" disabled>SAVE</button>
+                        </div>
+                    </div>
+                </div>
                 <!-- Manage / Load Recipes -->
                 <div class="page" id="page-manage-recipes">
                     <div class="manage-recipes-container">
@@ -758,11 +689,11 @@
                                 <thead>
                                     <tr>
                                         <th>Product</th>
-                                        <th>Cylinder</th>
-                                        <th>Steps</th>
-                                        <th>Height (mm)</th>
-                                        <th>Tap speed</th>
-                                        <th>USP</th>
+                                        <th>Type</th>
+                                        <th>Samples</th>
+                                        <th>Batch Size</th>
+                                        <th>Vacuum</th>
+                                        <th>Time</th>
                                         <th>Approval</th>
                                         <th class="actions-col">Actions</th>
                                     </tr>
@@ -770,7 +701,7 @@
                                 <tbody id="manage-recipes-table-body"></tbody>
                             </table>
                         </div>
-                        <!-- Recipe Actions Modal (Edit / Disable / Approve) -->
+                        <!-- Recipe Actions Modal (Edit / Disable / Load) -->
                         <div id="recipe-actions-modal-overlay" class="modal-overlay" style="display: none;">
                             <div class="role-modal">
                                 <h3 id="recipe-actions-modal-title">Recipe</h3>
@@ -778,9 +709,6 @@
                                     <button type="button" class="btn-role-select btn-role-qa"
                                         id="recipe-action-approve-btn" style="display: none;"
                                         onclick="confirmRecipeAction('approve')">Approve</button>
-                                    <button type="button" class="btn-role-select btn-role-supervisor"
-                                        id="recipe-action-reject-btn" style="display: none;"
-                                        onclick="confirmRecipeAction('reject')">Reject</button>
                                     <button type="button" class="btn-role-select btn-role-admin"
                                         id="recipe-action-edit-btn" onclick="confirmRecipeAction('edit')">Edit</button>
                                     <button type="button" class="btn-role-select btn-role-supervisor"
@@ -795,28 +723,14 @@
                         </div>
                         <div id="recipe-approve-overlay" class="modal-overlay" style="display: none;">
                             <div class="role-modal">
-                                <h3 id="recipe-approve-modal-title">Approve recipe</h3>
+                                <h3>Approve recipe</h3>
                                 <div class="form-group full-width">
                                     <label for="recipe-approve-remarks">Remarks (optional)</label>
                                     <textarea id="recipe-approve-remarks" class="input-field" rows="3" placeholder="Approval remarks"></textarea>
                                 </div>
                                 <div class="role-modal-buttons">
-                                    <button type="button" class="btn-role-select btn-role-user" onclick="submitRecipeApproveOrReject()">Submit</button>
+                                    <button type="button" class="btn-role-select btn-role-user" onclick="submitRecipeApprove()">Submit</button>
                                     <button type="button" class="btn-role-select btn-role-cancel" onclick="closeRecipeApproveModal()">Cancel</button>
-                                </div>
-                            </div>
-                        </div>
-                        <!-- Batch Number Modal (for Load Recipe) -->
-                        <div id="batch-number-modal" class="modal-overlay param-config-modal" style="display: none;">
-                            <div class="role-modal">
-                                <h3 class="param-config-modal-title">Enter Batch Number</h3>
-                                <div class="form-group">
-                                    <label>Batch Number</label>
-                                    <input type="text" id="load-recipe-batch-input" class="input-field" placeholder="Enter batch number">
-                                </div>
-                                <div class="role-modal-buttons">
-                                    <button type="button" class="btn-role-select btn-role-cancel" onclick="closeBatchNumberModal()">Cancel</button>
-                                    <button type="button" class="btn-role-select btn-role-user" onclick="confirmBatchNumberAndLoad()">Load</button>
                                 </div>
                             </div>
                         </div>
@@ -826,8 +740,8 @@
                 <!-- Disable Recipes Page -->
                 <div class="page" id="page-disable-recipes">
                     <div class="manage-recipes-container">
-                        <h2 class="section-title">Disabled Recipes</h2>
-                        <p class="section-subtitle">View recipes that were disabled and re-enable them when needed.</p>
+                        <h2 class="section-title">Disable Recipes</h2>
+                        <p class="section-subtitle">View recipes that were disabled (removed from normal use).</p>
                         <div class="recipe-list-container">
                             <p class="empty-state-message" id="disable-recipes-message">No recipes available.</p>
                             <table class="manage-recipes-table disable-recipes-table" style="display: none;">
@@ -836,7 +750,6 @@
                                         <th>Product</th>
                                         <th>Cylinder</th>
                                         <th>Steps</th>
-                                        <th class="actions-col">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="disable-recipes-table-body"></tbody>
@@ -945,68 +858,197 @@
 
                 <!-- Report Preview Page -->
                 <div class="page" id="page-report-preview">
-                    <div class="reports-container">
+                    <div class="reports-container" style="overflow-y: auto;">
                         <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> A Reviewer or Admin must complete Pass/Fail and sign below. You cannot leave, log out, or open Profile until the report is approved.</div>
-                        <div class="report-a4-sheet" id="report-a4-sheet">
-                            <pre id="report-a4-pre" class="report-a4-pre" aria-label="Report preview"></pre>
-                        </div>
-                        <div id="report-approve-panel" class="report-approve-panel report-approve-outside-sheet" style="display: none;">
-                            <h3 id="report-approve-panel-title">Test report approval</h3>
-                            <p id="report-approve-operator-hint" class="report-approve-operator-hint" style="display: none;">You cannot approve your own report. Ask a Reviewer or Admin to sign below.</p>
-                            <div class="form-group report-approve-passfail-group">
-                                <span class="report-approve-passfail-label">Outcome</span>
-                                <div class="report-approve-passfail-cards" role="radiogroup" aria-label="Pass or Fail">
-                                    <label class="report-approve-card-wrap">
-                                        <input type="radio" name="report-approve-pass-fail" value="PASS" checked class="report-approve-pf-input">
-                                        <span class="report-approve-card">Pass</span>
-                                    </label>
-                                    <label class="report-approve-card-wrap">
-                                        <input type="radio" name="report-approve-pass-fail" value="FAIL" class="report-approve-pf-input">
-                                        <span class="report-approve-card">Fail</span>
-                                    </label>
+                        <div class="report-preview-container report-print-template" id="report-content">
+                            <pre id="report-a4-text-preview" class="report-a4-text-preview" style="display: none;" aria-label="Thermal report preview"></pre>
+                            <div id="report-legacy-preview">
+                            <h1>RAISE LAB EQUIPMENT</h1>
+                            <h2 id="report-main-title">LEAK TEST REPORT</h2>
+                            <h2 id="report-company-name">COMPANY NAME</h2>
+                            <table class="report-ident-table">
+                                <tr>
+                                    <th>Model No</th>
+                                    <td id="report-model-no"></td>
+                                    <th>Serial No</th>
+                                    <td id="report-serial-no"></td>
+                                </tr>
+                                <tr>
+                                    <th>Location</th>
+                                    <td id="report-location"></td>
+                                    <th>Instrument No</th>
+                                    <td id="report-instrument-no"></td>
+                                </tr>
+                                <tr>
+                                    <th>Last Validation Date</th>
+                                    <td id="report-previous-val"></td>
+                                    <th>Next Validation Due</th>
+                                    <td id="report-next-validation"></td>
+                                </tr>
+                            </table>
+                            <!-- Validation details (shown only for validation reports) -->
+                            <div id="report-validation-calibration-section" style="display: none;">
+                                <h3 id="report-validation-calibration-title">VALIDATION DETAILS</h3>
+                                <table class="report-ident-table" id="report-validation-calibration-table">
+                                    <tbody id="report-validation-calibration-body"></tbody>
+                                </table>
+                            </div>
+                            <div id="report-test-sections">
+                                <h3>TEST INFORMATION</h3>
+                                <table class="report-info-table">
+                                    <tr>
+                                        <th>PRINT DATE</th>
+                                        <td id="report-print-date"></td>
+                                        <th>PRINT TIME</th>
+                                        <td id="report-print-time"></td>
+                                    </tr>
+                                    <tr>
+                                        <th>TEST NUMBER</th>
+                                        <td id="report-test-number"></td>
+                                        <th>OPERATOR</th>
+                                        <td id="report-test-operator"></td>
+                                    </tr>
+                                    <tr>
+                                        <th>PRODUCT NAME</th>
+                                        <td id="report-product-name"></td>
+                                        <th>BATCH NO</th>
+                                        <td id="report-batch-no"></td>
+                                    </tr>
+                                    <tr>
+                                        <th>BATCH SIZE</th>
+                                        <td id="report-batch-size"></td>
+                                        <th>ANALYSIS REPORT NO.</th>
+                                        <td id="report-analysis-no"></td>
+                                    </tr>
+                                    <tr>
+                                        <th>REPORT/TEST START</th>
+                                        <td id="report-test-start"></td>
+                                        <th>TEST DURATION</th>
+                                        <td id="report-test-duration"></td>
+                                    </tr>
+                                    <tr>
+                                        <th>COMPLETED DATE</th>
+                                        <td id="report-completed-date"></td>
+                                        <th>COMPLETED TIME</th>
+                                        <td id="report-completed-time"></td>
+                                    </tr>
+                                    <tr>
+                                        <th>TEST STATUS</th>
+                                        <td id="report-test-status" colspan="3"></td>
+                                    </tr>
+                                </table>
+                                <h3>TEST RESULT</h3>
+                                <table class="report-info-table">
+                                    <tr>
+                                        <th>SET VACUUM (mmHg)</th>
+                                        <td id="report-set-vacuum"></td>
+                                        <th>ACTUAL VACUUM (mmHg)</th>
+                                        <td id="report-actual-vacuum"></td>
+                                    </tr>
+                                    <tr>
+                                        <th>SET DURATION (mm:ss)</th>
+                                        <td id="report-set-duration"></td>
+                                        <th>ACTUAL DURATION (mm:ss)</th>
+                                        <td id="report-actual-duration"></td>
+                                    </tr>
+                                    <tr>
+                                        <th>RESULT</th>
+                                        <td id="report-leak-result" colspan="3"></td>
+                                    </tr>
+                                </table>
+                                <div id="report-vacuum-samples-wrap" style="display: none;">
+                                    <h3>HOLD VACUUM SAMPLES</h3>
+                                    <table class="report-info-table report-vacuum-samples-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Time (% / mm:ss)</th>
+                                                <th>Vacuum (mmHg)</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="report-vacuum-samples-body"></tbody>
+                                    </table>
                                 </div>
                             </div>
-                            <div class="form-group full-width">
-                                <label for="report-approve-remarks-input">Approval remarks</label>
-                                <textarea id="report-approve-remarks-input" class="input-field" rows="3" placeholder="Approval remarks"
-                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)"></textarea>
+                            <h3>REMARKS</h3>
+                            <div class="report-remarks-box" id="report-remarks-box"></div>
+                            <table class="report-approval-table">
+                                <tr>
+                                    <th>Operated By</th>
+                                    <td id="report-operated-by"></td>
+                                    <th>Employee ID</th>
+                                    <td id="report-employee-id"></td>
+                                </tr>
+                                <tr>
+                                    <th>Approved By</th>
+                                    <td id="report-approved-by"></td>
+                                    <th>Pass / Fail</th>
+                                    <td id="report-approval-pass-fail"></td>
+                                </tr>
+                                <tr>
+                                    <th>Approval remarks</th>
+                                    <td id="report-approval-remarks" colspan="3"></td>
+                                </tr>
+                            </table>
                             </div>
-                            <h4 class="report-approve-signature-heading">Electronic signature (Reviewer / Admin)</h4>
-                            <div id="report-approve-credentials-block" class="report-approve-credentials-block">
-                                <div class="report-approve-signature-fields form-grid">
-                                    <div class="form-group full-width">
-                                        <label for="report-approve-verifier-username">Verifier User ID</label>
-                                        <input type="text" id="report-approve-verifier-username" class="input-field report-approve-verifier-field" placeholder="Reviewer or Admin User ID" autocomplete="off"
-                                            onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                                    </div>
-                                    <div class="form-group full-width">
-                                        <label for="report-approve-verifier-password">Verifier password</label>
-                                        <input type="password" id="report-approve-verifier-password" class="input-field report-approve-verifier-field" placeholder="Password" autocomplete="off"
-                                            onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                            <div id="report-approve-panel" class="report-approve-panel" style="display: none;">
+                                <h3 id="report-approve-panel-title">Test report approval</h3>
+                                <p id="report-approve-operator-hint" class="report-approve-operator-hint" style="display: none;">You cannot approve your own report. Ask a Reviewer or Admin to sign below.</p>
+                                <div class="form-group report-approve-passfail-group">
+                                    <span class="report-approve-passfail-label">Outcome</span>
+                                    <div class="report-approve-passfail-cards" role="radiogroup" aria-label="Pass or Fail">
+                                        <label class="report-approve-card-wrap">
+                                            <input type="radio" name="report-approve-pass-fail" value="PASS" checked class="report-approve-pf-input">
+                                            <span class="report-approve-card">Pass</span>
+                                        </label>
+                                        <label class="report-approve-card-wrap">
+                                            <input type="radio" name="report-approve-pass-fail" value="FAIL" class="report-approve-pf-input">
+                                            <span class="report-approve-card">Fail</span>
+                                        </label>
                                     </div>
                                 </div>
-                                <button type="button" id="btn-report-approve-submit" class="btn btn-primary report-approve-submit-credentials" onclick="submitReportApprove()">Submit approval</button>
-                            </div>
-                            <div id="report-approve-biometric-wrap" class="report-approve-biometric-wrap">
-                                <button type="button" id="btn-report-approve-biometric" class="report-approve-biometric-btn" onclick="submitReportApproveBiometric()">
-                                    <div class="biometric-icon report-approve-biometric-icon" aria-hidden="true">
-                                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                            stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                                            <path d="M18.9 7a8 8 0 0 0-5.3-3.8A8 8 0 0 0 4 12"></path>
-                                            <path d="M12 20a8 8 0 0 0 8-8 4.5 4.5 0 0 0-1-2.8"></path>
-                                            <path d="M9.1 4.6A8 8 0 0 0 4.5 9.4"></path>
-                                            <path d="M12 12a4 4 0 0 0-4 4"></path>
-                                            <path d="M16 12a4 4 0 0 1-4 4"></path>
-                                            <path d="M12 16v4"></path>
-                                            <path d="M12 8a4 4 0 0 1 4 4"></path>
-                                            <path d="M8 12a4 4 0 0 1 4-4"></path>
-                                        </svg>
+                                <div class="form-group full-width">
+                                    <label for="report-approve-remarks-input">Approval remarks</label>
+                                    <textarea id="report-approve-remarks-input" class="input-field" rows="3" placeholder="Approval remarks"
+                                        onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)"></textarea>
+                                </div>
+                                <h4 class="report-approve-signature-heading">Electronic signature (Reviewer / Admin)</h4>
+                                <div id="report-approve-credentials-block" class="report-approve-credentials-block">
+                                    <div class="report-approve-signature-fields form-grid">
+                                        <div class="form-group full-width">
+                                            <label for="report-approve-verifier-username">Verifier User ID</label>
+                                            <input type="text" id="report-approve-verifier-username" class="input-field report-approve-verifier-field" placeholder="Reviewer or Admin User ID" autocomplete="off"
+                                                onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                        </div>
+                                        <div class="form-group full-width">
+                                            <label for="report-approve-verifier-password">Verifier password</label>
+                                            <input type="password" id="report-approve-verifier-password" class="input-field report-approve-verifier-field" placeholder="Password" autocomplete="off"
+                                                onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                        </div>
                                     </div>
-                                    <span>Use fingerprint</span>
-                                </button>
+                                    <button type="button" id="btn-report-approve-submit" class="btn btn-primary report-approve-submit-credentials" onclick="submitReportApprove()">Submit approval</button>
+                                </div>
+                                <div id="report-approve-biometric-wrap" class="report-approve-biometric-wrap">
+                                    <button type="button" id="btn-report-approve-biometric" class="report-approve-biometric-btn" onclick="submitReportApproveBiometric()">
+                                        <div class="biometric-icon report-approve-biometric-icon" aria-hidden="true">
+                                            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                                stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M18.9 7a8 8 0 0 0-5.3-3.8A8 8 0 0 0 4 12"></path>
+                                                <path d="M12 20a8 8 0 0 0 8-8 4.5 4.5 0 0 0-1-2.8"></path>
+                                                <path d="M9.1 4.6A8 8 0 0 0 4.5 9.4"></path>
+                                                <path d="M12 12a4 4 0 0 0-4 4"></path>
+                                                <path d="M16 12a4 4 0 0 1-4 4"></path>
+                                                <path d="M12 16v4"></path>
+                                                <path d="M12 8a4 4 0 0 1 4 4"></path>
+                                                <path d="M8 12a4 4 0 0 1 4-4"></path>
+                                            </svg>
+                                        </div>
+                                        <span>Use fingerprint</span>
+                                    </button>
+                                </div>
+                                <p id="report-approve-verify-error" class="report-approve-verify-error" style="display: none;"></p>
+                                <button type="button" id="btn-report-approve-biometric-retry" class="btn btn-secondary report-approve-biometric-retry" style="display: none;" onclick="submitReportApproveBiometric()">Try again</button>
+                                </div>
                             </div>
-                            <p id="report-approve-verify-error" class="report-approve-verify-error" style="display: none;"></p>
-                            <button type="button" id="btn-report-approve-biometric-retry" class="btn btn-secondary report-approve-biometric-retry" style="display: none;" onclick="submitReportApproveBiometric()">Try again</button>
                         </div>
                         <div class="report-preview-actions" id="report-preview-actions">
                             <div class="report-preview-print-export-group" id="report-preview-print-export-group">
@@ -1041,7 +1083,7 @@
                     <div class="reports-container" style="overflow-y: auto;">
                         <div class="report-preview-container recipe-print-container" id="recipe-print-content">
                             <h1>RAISE LAB EQUIPMENT</h1>
-                            <h2>Tap Density Apparatus - Recipe</h2>
+                            <h2>Leak Test Apparatus - Recipe</h2>
                             <h2 id="recipe-print-company-name">COMPANY NAME</h2>
                             <table class="report-ident-table">
                                 <tr>
@@ -1070,7 +1112,7 @@
                                     <td id="recipe-print-usp"></td>
                                 </tr>
                                 <tr>
-                                    <th>Tap Speed</th>
+                                    <th>Evacuation Rate</th>
                                     <td id="recipe-print-speed"></td>
                                 </tr>
                             </table>
@@ -1104,66 +1146,37 @@
                             <button class="settings-card settings-validate" onclick="selectOperation('validate')">
                                 <div class="settings-icon">
                                     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                        stroke-width="2">
-                                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
-                                        <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M12 3l7 3v6c0 5-3.5 8-7 9-3.5-1-7-4-7-9V6l7-3z"></path>
+                                        <path d="M9 12l2 2 4-4"></path>
                                     </svg>
                                 </div>
                                 <h3>Validate</h3>
-                                <p>Standard apparatus validation</p>
+                                <p>Vacuum apparatus validation</p>
                             </button>
                         </div>
                     </div>
                 </div>
 
 
-                <!-- Validation type select -->
+                <!-- Validation type select (vacuum only) -->
                 <div class="page" id="page-validate-type-select">
                     <div class="validation-type-page">
-                        <h2 class="section-title">Select Validation Type</h2>
-                        <p class="section-subtitle">Choose the validation procedure to run</p>
-                        <div class="validation-type-grid">
+                        <h2 class="section-title">Vacuum Validation</h2>
+                        <p class="section-subtitle">Standard vacuum apparatus validation</p>
+                        <div class="validation-type-grid validation-type-grid-single">
                             <label class="validation-type-settings-card val-usp">
                                 <input type="radio" name="val-type" value="distance" checked>
                                 <div class="settings-icon">
                                     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                         stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                        <!-- Cap (wider than tube) -->
-                                        <rect x="6" y="0.5" width="12" height="2.5" rx="0.5"></rect>
-                                        <!-- Tube body: cylindrical with conical bottom -->
-                                        <path d="M9 3v16.5l-1.5 3h9l-1.5-3V3z"></path>
-                                        <!-- Measurement marks -->
-                                        <line x1="14.5" y1="6" x2="16" y2="6"></line>
-                                        <line x1="14.5" y1="8.5" x2="16" y2="8.5"></line>
-                                        <line x1="14.5" y1="11" x2="16" y2="11"></line>
-                                        <line x1="14.5" y1="13.5" x2="16" y2="13.5"></line>
-                                        <line x1="14.5" y1="16" x2="16" y2="16"></line>
-                                        <line x1="14.5" y1="18.5" x2="16" y2="18.5"></line>
+                                        <path d="M10 3v5l-4 7a4 4 0 0 0 3.5 6h5a4 4 0 0 0 3.5-6l-4-7V3"></path>
+                                        <path d="M8 10h8"></path>
+                                        <path d="M9.5 15.5l1.8 1.8 3.2-3.2"></path>
                                     </svg>
                                 </div>
-                                <h3>USP 1</h3>
-                                <p>USP 1 procedure</p>
-                            </label>
-                            <label class="validation-type-settings-card val-usp">
-                                <input type="radio" name="val-type" value="load">
-                                <div class="settings-icon">
-                                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                        stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                                        <!-- Cap (wider than tube) -->
-                                        <rect x="6" y="0.5" width="12" height="2.5" rx="0.5"></rect>
-                                        <!-- Tube body: cylindrical with conical bottom -->
-                                        <path d="M9 3v16.5l-1.5 3h9l-1.5-3V3z"></path>
-                                        <!-- Measurement marks -->
-                                        <line x1="14.5" y1="6" x2="16" y2="6"></line>
-                                        <line x1="14.5" y1="8.5" x2="16" y2="8.5"></line>
-                                        <line x1="14.5" y1="11" x2="16" y2="11"></line>
-                                        <line x1="14.5" y1="13.5" x2="16" y2="13.5"></line>
-                                        <line x1="14.5" y1="16" x2="16" y2="16"></line>
-                                        <line x1="14.5" y1="18.5" x2="16" y2="18.5"></line>
-                                    </svg>
-                                </div>
-                                <h3>USP 2</h3>
-                                <p>USP 2 procedure</p>
+                                <h3>Vacuum</h3>
+                                <p>Vacuum validation procedure</p>
                             </label>
                         </div>
                         <button class="btn btn-primary validation-start-btn" onclick="startValidationFromType()">Start
@@ -1171,11 +1184,39 @@
                     </div>
                 </div>
 
-                <!-- USP 1 Detail Page -->
+                <!-- Vacuum validation parameter input -->
+                <div class="page" id="page-vd-validation-input">
+                    <div class="validation-type-page vd-validation-input-page">
+                        <h2 class="section-title">Vacuum Validation</h2>
+                        <p class="section-subtitle">Enter target vacuum and hold time</p>
+                        <div class="quick-test-form form-grid create-recipe-form-grid">
+                            <div class="form-group full-width">
+                                <label for="vd-val-vacuum-mmhg">Vacuum (mmHg)</label>
+                                <input type="number" id="vd-val-vacuum-mmhg" class="input-field" min="1" max="650"
+                                    placeholder="Enter vacuum in mmHg"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                            </div>
+                            <div class="form-group full-width">
+                                <label for="vd-val-time">Time (mm:ss)</label>
+                                <input type="text" id="vd-val-time" class="input-field" placeholder="e.g. 01:30"
+                                    inputmode="numeric" data-mmss-input="true" maxlength="5"
+                                    oninput="if(typeof applyMmSsAutoColon==='function') applyMmSsAutoColon(this);"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                            </div>
+                            <p id="vd-val-input-error" class="approval-verify-error" style="display:none;"></p>
+                        </div>
+                        <div class="quick-test-actions">
+                            <button type="button" class="btn btn-secondary" onclick="goToPage('validate')">Back</button>
+                            <button type="button" class="btn btn-primary" onclick="confirmVdValidationInput()">Next</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Vacuum Decay Detail Page -->
                 <div class="page" id="page-usp1-detail">
                     <div class="validation-type-page">
-                        <h2 class="section-title">USP 1 — Validation</h2>
-                        <p class="section-subtitle">Standard validation parameters for USP 1</p>
+                        <h2 class="section-title">Vacuum Decay — Validation</h2>
+                        <p class="section-subtitle">Standard validation parameters for Vacuum Decay</p>
                         <div class="usp-detail-cards">
                             <div class="usp-detail-card">
                                 <div class="usp-detail-icon">
@@ -1197,7 +1238,7 @@
                                     </svg>
                                 </div>
                                 <div class="usp-detail-value">14 mm</div>
-                                <div class="usp-detail-label">Drop Height</div>
+                                <div class="usp-detail-label">Target Vacuum</div>
                             </div>
                         </div>
                         <button class="btn btn-primary validation-start-btn" onclick="startUspValidation('usp1')">Start
@@ -1205,11 +1246,11 @@
                     </div>
                 </div>
 
-                <!-- USP 2 Detail Page -->
+                <!-- Pressure Decay Detail Page -->
                 <div class="page" id="page-usp2-detail">
                     <div class="validation-type-page">
-                        <h2 class="section-title">USP 2 — Validation</h2>
-                        <p class="section-subtitle">Standard validation parameters for USP 2</p>
+                        <h2 class="section-title">Pressure Decay — Validation</h2>
+                        <p class="section-subtitle">Standard validation parameters for Pressure Decay</p>
                         <div class="usp-detail-cards">
                             <div class="usp-detail-card">
                                 <div class="usp-detail-icon">
@@ -1231,7 +1272,7 @@
                                     </svg>
                                 </div>
                                 <div class="usp-detail-value">3 mm</div>
-                                <div class="usp-detail-label">Drop Height</div>
+                                <div class="usp-detail-label">Target Vacuum</div>
                             </div>
                         </div>
                         <button class="btn btn-primary validation-start-btn" onclick="startUspValidation('usp2')">Start
@@ -1242,24 +1283,80 @@
                 <!-- Validation Test Run Page -->
                 <div class="page" id="page-validation-run">
                     <div class="validation-run-page">
-                        <div class="val-run-params" aria-label="Validation parameters">
+                        <div class="val-run-params" id="val-run-params-bar" aria-label="Validation parameters">
                             <div class="val-run-param">
-                                <span class="val-run-param-label">USP</span>
+                                <span class="val-run-param-label">Method</span>
                                 <span class="val-run-param-value" id="val-run-usp">--</span>
                             </div>
-                            <span class="val-run-param-dot" aria-hidden="true"></span>
-                            <div class="val-run-param">
+                            <span class="val-run-param-dot val-run-vd-only" aria-hidden="true"></span>
+                            <div class="val-run-param val-run-vd-only">
+                                <span class="val-run-param-label">Set Vacuum</span>
+                                <span class="val-run-param-value"><span id="val-run-set-vacuum">--</span> mmHg</span>
+                            </div>
+                            <span class="val-run-param-dot val-run-vd-only" aria-hidden="true"></span>
+                            <div class="val-run-param val-run-vd-only">
+                                <span class="val-run-param-label">Set Time</span>
+                                <span class="val-run-param-value" id="val-run-set-time">--</span>
+                            </div>
+                            <span class="val-run-param-dot val-run-pd-only" aria-hidden="true"></span>
+                            <div class="val-run-param val-run-pd-only">
                                 <span class="val-run-param-label">Taps / min</span>
                                 <span class="val-run-param-value" id="val-run-taps-min">--</span>
                             </div>
-                            <span class="val-run-param-dot" aria-hidden="true"></span>
-                            <div class="val-run-param">
+                            <span class="val-run-param-dot val-run-pd-only" aria-hidden="true"></span>
+                            <div class="val-run-param val-run-pd-only">
                                 <span class="val-run-param-label">Drop height</span>
                                 <span class="val-run-param-value"><span id="val-run-height">--</span> mm</span>
                             </div>
                         </div>
 
-                        <div class="val-run-panel">
+                        <div class="val-run-panel" id="val-run-vd-panel">
+                            <div class="val-run-panel-inner val-run-vacuum-metrics">
+                                <div class="val-run-metric-card">
+                                    <div class="val-run-metric-title">Vacuum (mmHg)</div>
+                                    <div class="val-run-metric-row">
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Current</span>
+                                            <span class="val-run-metric-value" id="val-run-current-vacuum">--</span>
+                                        </div>
+                                        <div class="val-run-metric-sep">/</div>
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Set</span>
+                                            <span class="val-run-metric-value" id="val-run-set-vacuum-live">--</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="val-run-metric-card">
+                                    <div class="val-run-metric-title">Time</div>
+                                    <div class="val-run-metric-row">
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Elapsed</span>
+                                            <span class="val-run-metric-value" id="val-run-elapsed-time">00:00</span>
+                                        </div>
+                                        <div class="val-run-metric-sep">/</div>
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Set</span>
+                                            <span class="val-run-metric-value" id="val-run-set-time-live">--</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="val-run-shared-status">
+                            <div class="val-run-stat">
+                                <span class="val-run-stat-label">Status</span>
+                                <span class="val-run-stat-value val-run-status-text" id="val-run-status">Ready</span>
+                                <span class="val-run-stat-hint" id="val-run-status-sub">Press Start to begin</span>
+                            </div>
+                            <div class="val-run-result-strip" id="val-result-card" hidden>
+                                <span class="val-run-stat-label">Result</span>
+                                <span class="val-run-result-badge" id="val-run-result">--</span>
+                                <p class="val-run-result-detail" id="val-run-result-detail">--</p>
+                            </div>
+                        </div>
+
+                        <div class="val-run-panel" id="val-run-pd-panel" style="display:none;">
                             <div class="val-run-panel-inner">
                                 <div class="val-run-timer-zone">
                                     <div id="val-run-timer-dial" class="val-run-timer-dial" aria-label="Validation countdown">
@@ -1278,16 +1375,6 @@
                                         <span class="val-run-stat-value" id="val-run-tap-count">0</span>
                                         <span class="val-run-stat-hint">Target <span id="val-run-expected">--</span></span>
                                     </div>
-                                    <div class="val-run-stat">
-                                        <span class="val-run-stat-label">Status</span>
-                                        <span class="val-run-stat-value val-run-status-text" id="val-run-status">Ready</span>
-                                        <span class="val-run-stat-hint" id="val-run-status-sub">Press Start to begin</span>
-                                    </div>
-                                    <div class="val-run-result-strip" id="val-result-card" hidden>
-                                        <span class="val-run-stat-label">Result</span>
-                                        <span class="val-run-result-badge" id="val-run-result">--</span>
-                                        <p class="val-run-result-detail" id="val-run-result-detail">--</p>
-                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1297,6 +1384,49 @@
                                 <span class="ctrl-icon" aria-hidden="true">&#9654;</span>
                                 <span id="btn-validation-label">Start Validation</span>
                             </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Vacuum calibration (after validation Fail) — no report generation -->
+                <div class="page" id="page-vacuum-calibration">
+                    <div class="validation-type-page vacuum-calibration-page">
+                        <h2 class="section-title">Calibration</h2>
+                        <p class="section-subtitle">Set vacuum is from validation — enter the measured actual vacuum</p>
+                        <div class="val-run-panel-inner val-run-vacuum-metrics">
+                            <div class="val-run-metric-card">
+                                <div class="val-run-metric-title">Vacuum (mmHg)</div>
+                                <div class="val-run-metric-row">
+                                    <div class="val-run-metric-block">
+                                        <span class="val-run-metric-label">Set</span>
+                                        <span class="val-run-metric-value" id="cal-set-vacuum">--</span>
+                                    </div>
+                                    <div class="val-run-metric-sep">/</div>
+                                    <div class="val-run-metric-block">
+                                        <span class="val-run-metric-label">Actual</span>
+                                        <input type="number" id="cal-actual-vacuum" class="input-field cal-actual-vacuum-input"
+                                            min="1" max="650" step="0.1" placeholder="Enter actual" inputmode="decimal">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="val-run-metric-card">
+                                <div class="val-run-metric-title">Time</div>
+                                <div class="val-run-metric-row">
+                                    <div class="val-run-metric-block">
+                                        <span class="val-run-metric-label">Set</span>
+                                        <span class="val-run-metric-value" id="cal-set-time">--</span>
+                                    </div>
+                                    <div class="val-run-metric-sep">/</div>
+                                    <div class="val-run-metric-block">
+                                        <span class="val-run-metric-label">Actual</span>
+                                        <span class="val-run-metric-value" id="cal-actual-time">--</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="quick-test-actions" style="margin-top:24px;">
+                            <button type="button" class="btn btn-secondary" onclick="goToPage('validate')">Back</button>
+                            <button type="button" class="btn btn-primary" onclick="confirmVacuumCalibration()">Confirm</button>
                         </div>
                     </div>
                 </div>
@@ -1394,6 +1524,18 @@
                             </div>
                             <h3>Edit Date and Time</h3>
                         </button>
+                        <button class="settings-card settings-ip-configure" onclick="goToPage('ip-configure')">
+                            <div class="settings-icon">
+                                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                                    <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                                    <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                                    <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                                </svg>
+                            </div>
+                            <h3>IP Configure</h3>
+                        </button>
                         <button class="settings-card settings-recipes" onclick="manageRecipes()">
                             <div class="settings-icon">
                                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1423,18 +1565,6 @@
                             </div>
                             <h3>Validation</h3>
                         </button>
-                        <button class="settings-card settings-ip-configure" onclick="goToPage('ip-configure')">
-                            <div class="settings-icon">
-                                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                    stroke-width="2">
-                                    <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
-                                    <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
-                                    <line x1="6" y1="6" x2="6.01" y2="6"></line>
-                                    <line x1="6" y1="18" x2="6.01" y2="18"></line>
-                                </svg>
-                            </div>
-                            <h3>IP Configure</h3>
-                        </button>
                         <button class="settings-card settings-factory" onclick="goToPage('factory-settings')">
                             <div class="settings-icon">
                                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1462,10 +1592,10 @@
                     </div>
                 </div>
 
-                <!-- IP Configure (CFR from Friability shell) -->
+                <!-- IP Configure (WLAN / LAN, same placement as DT-Bath-CFR21) -->
                 <div class="page" id="page-ip-configure">
                     <div class="ip-configure-container">
-                        <p class="ip-configure-hint">WLAN and LAN IPv4 addresses.</p>
+                        <p class="ip-configure-hint">WLAN and LAN IPv4 addresses (Tailscale addresses are hidden).</p>
                         <div id="ip-configure-list" class="ip-configure-list" aria-live="polite">
                             <div class="ip-configure-loading">Loading addresses…</div>
                         </div>
@@ -1492,21 +1622,8 @@
                                     <span id="profile-role-display" class="role-badge">Factory</span>
                                 </div>
                             </div>
-                            <div class="profile-edit-form">
-                                <div class="form-group full-width">
-                                    <label>Edit Full Name</label>
-                                    <input type="text" id="profile-fullname" class="input-field"
-                                        placeholder="Full name">
-                                </div>
-                                <div class="form-group full-width">
-                                    <label>Edit Password</label>
-                                    <input type="password" id="profile-password" class="input-field"
-                                        placeholder="Enter new password">
-                                </div>
-                            </div>
                         </div>
                         <div class="profile-actions">
-                            <button class="btn btn-blue btn-block" onclick="saveUserProfile()">Save</button>
                             <button class="btn btn-orange btn-block" onclick="goToPage('manage-members')">Manage Profiles</button>
                             <button class="btn btn-blue btn-block" onclick="openAddMember()">Add Members</button>
                         </div>
@@ -1822,6 +1939,56 @@
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
                             <div class="form-group">
+                                <label>Maximum Vacuum (mmHg)</label>
+                                <input type="number" id="factory-max-vacuum-mmhg" class="input-field" min="1" max="650"
+                                    placeholder="650" value="650"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                <p class="section-subtitle" style="margin-top:6px;font-size:13px;">Maximum settable vacuum for validation. Cannot exceed 650 mmHg.</p>
+                            </div>
+                            <div class="form-group factory-preset-field">
+                                <label>Vacuum Preset 1 (mmHg)</label>
+                                <input type="number" id="factory-recipe-vacuum-preset-1" class="input-field"
+                                    min="1" max="650" value="200"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                            </div>
+                            <div class="form-group factory-preset-field">
+                                <label>Vacuum Preset 2 (mmHg)</label>
+                                <input type="number" id="factory-recipe-vacuum-preset-2" class="input-field"
+                                    min="1" max="650" value="400"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                            </div>
+                            <div class="form-group factory-preset-field">
+                                <label>Vacuum Preset 3 (mmHg)</label>
+                                <input type="number" id="factory-recipe-vacuum-preset-3" class="input-field"
+                                    min="1" max="650" value="600"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                            </div>
+                            <div class="form-group factory-preset-field">
+                                <label>Time Preset 1 (mm:ss)</label>
+                                <input type="text" id="factory-recipe-time-preset-1" class="input-field"
+                                    value="00:30" placeholder="00:30"
+                                    inputmode="numeric" data-mmss-input="true" maxlength="5"
+                                    oninput="if(typeof applyMmSsAutoColon==='function') applyMmSsAutoColon(this);"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                            </div>
+                            <div class="form-group factory-preset-field">
+                                <label>Time Preset 2 (mm:ss)</label>
+                                <input type="text" id="factory-recipe-time-preset-2" class="input-field"
+                                    value="01:00" placeholder="01:00"
+                                    inputmode="numeric" data-mmss-input="true" maxlength="5"
+                                    oninput="if(typeof applyMmSsAutoColon==='function') applyMmSsAutoColon(this);"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                            </div>
+                            <div class="form-group factory-preset-field">
+                                <label>Time Preset 3 (mm:ss)</label>
+                                <input type="text" id="factory-recipe-time-preset-3" class="input-field"
+                                    value="01:30" placeholder="01:30"
+                                    inputmode="numeric" data-mmss-input="true" maxlength="5"
+                                    oninput="if(typeof applyMmSsAutoColon==='function') applyMmSsAutoColon(this);"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                <p class="section-subtitle" style="margin-top:6px;font-size:13px;">These presets appear on Create Recipe and Quick Test.</p>
+                            </div>
+                            <div class="form-group">
                                 <label>Instrument ID</label>
                                 <input type="text" id="factory-instrument-id" class="input-field"
                                     placeholder="Internal unique ID"
@@ -1843,7 +2010,7 @@
                             </div>
                             <div class="form-group">
                                 <label>Firmware Version</label>
-                                <input type="text" id="factory-firmware" class="input-field" value="RD-TDT v1.0.0" readonly>
+                                <input type="text" id="factory-firmware" class="input-field" value="RDA -LT v1.0.0" readonly>
                             </div>
                             <div class="form-group">
                                 <label>Installed By</label>
@@ -1866,10 +2033,6 @@
                             <div class="form-group">
                                 <label>Max Reviewers</label>
                                 <input type="number" id="factory-max-supervisors" class="input-field" min="1" max="99" placeholder="3" value="3">
-                            </div>
-                            <div class="form-group">
-                                <label>Max QA</label>
-                                <input type="number" id="factory-max-qa" class="input-field" min="1" max="99" placeholder="3" value="3">
                             </div>
                             <div class="form-group">
                                 <label>Password Reset Period (Days)</label>
@@ -1902,23 +2065,11 @@
         </main>
     </div>
     <div id="keyboard-root"></div>
-
-    <!-- Validation Due Date Modal -->
-    <div id="calibration-due-modal" class="modal-overlay" style="display: none;">
-        <div class="role-modal">
-            <h2 id="calibration-due-modal-title">Set Next Validation Due Date</h2>
-            <p id="calibration-due-modal-text" class="section-subtitle" style="margin-bottom: 20px;">Select when the next validation is due:</p>
-            <div class="role-modal-buttons">
-                <button type="button" class="btn-role-select btn-role-user" onclick="confirmCalibrationDue(3)">3 Months</button>
-                <button type="button" class="btn-role-select btn-role-user" onclick="confirmCalibrationDue(6)">6 Months</button>
-                <button type="button" class="btn-role-select btn-role-user" onclick="confirmCalibrationDue(12)">12 Months</button>
-            </div>
-        </div>
-    </div>
-
-    <script src="keyboard.js?v=2"></script>
-    <script src="rbac.js?v=3"></script>
-    <script src="script.js?v=43"></script>
+    <script src="keyboard.js?v=3"></script>
+    <script src="rbac.js?v=6"></script>
+    <script src="script.js?v=65"></script>
+    <script src="leaktest_patch.js?v=2"></script>
+    <script src="validation_vd.js?v=7"></script>
 </body>
 
 </html>

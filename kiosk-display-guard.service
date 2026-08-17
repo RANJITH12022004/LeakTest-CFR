@@ -1,0 +1,14 @@
+[Unit]
+Description=Tap Density kiosk display guard (mask getty, sync units at boot)
+DefaultDependencies=no
+After=local-fs.target
+Before=kiosk-display.service getty@tty1.service getty@tty2.service
+Conflicts=getty@tty2.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /opt/kiosk/scripts/kiosk_harden_display.sh --boot --quiet
+
+[Install]
+WantedBy=multi-user.target

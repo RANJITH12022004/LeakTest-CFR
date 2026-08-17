@@ -23,8 +23,8 @@ if ! api_ok; then
 fi
 
 if ! display_ok; then
-  log "Display down — restarting kiosk-display.service"
-  systemctl restart kiosk-display.service || true
+  log "Display down — re-hardening getty/display then restarting"
+  /bin/bash /opt/kiosk/scripts/kiosk_harden_display.sh --quick --repair --quiet || true
 fi
 
 exit 0
