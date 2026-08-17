@@ -76,6 +76,18 @@ def _esp_mmhg_value(value) -> int:
     return v
 
 
+def _esp_calib_diff_token(diff) -> str:
+    """Signed 3-digit calib offset for #CALIBVALUE:+NNN* / #CALIBVALUE:-NNN*."""
+    try:
+        d = int(round(float(diff)))
+    except (TypeError, ValueError):
+        raise ValueError("Invalid calibration difference")
+    if abs(d) > 999:
+        raise ValueError("Calibration difference must be between -999 and +999 mmHg")
+    sign = "+" if d >= 0 else "-"
+    return f"{sign}{abs(d):03d}"
+
+
 def _esp_sec_value(value) -> int:
     try:
         v = int(round(float(value)))
@@ -106,6 +118,8 @@ def classify_line(line: str) -> str:
     if "start_ack" in s or s.startswith("start_ack"):
         return "ok"
     if "start_calib_ack" in s or s.startswith("start_calib_ack"):
+        return "ok"
+    if "stop_calib_ack" in s or s.startswith("stop_calib_ack"):
         return "ok"
     if "calibvalue_ack" in s or s.startswith("calibvalue_ack"):
         return "ok"
@@ -154,6 +168,8 @@ def _ack_matches(cmd: str, line: str) -> bool:
         return True
     if c.startswith("start_calib"):
         return "start_calib_ack" in s
+    if c.startswith("stop_calib"):
+        return "stop_calib_ack" in s
     if c.startswith("start:"):
         return s.startswith("start_ack")
     if c.startswith("stop"):
@@ -761,7 +777,7 @@ def cmd_start_calibration(target_mmhg: float = 400.0):
 
 
 def cmd_esp_start_calib():
-    """After TARGET_REACHED: enter ESP calibration mode (#START_CALIB*)."""
+    """After operator enters gauge reading: enter ESP calibration mode (#START_CALIB*)."""
     if _simulate_enabled():
         _broadcast_line("#START_CALIB_ACK*")
         return {"ok": True, "simulated": True, "response": "#START_CALIB_ACK*"}
@@ -773,26 +789,53 @@ def cmd_esp_start_calib():
     return result
 
 
-def cmd_apply_calibration(calib_value: float, release_time_sec: int):
-    """Send measured gauge pressure (K) and release time (RL_TM) to ESP."""
+def cmd_esp_stop_calib():
+    """End ESP calibration mode (#STOP_CALIB*) and wait for #STOP_CALIB_ACK*."""
+    stop_pressure_poll()
+    if _simulate_enabled():
+        global _sim_active
+        with _sim_lock:
+            _sim_active = False
+        _broadcast_line("#STOP_CALIB_ACK*")
+        return {"ok": True, "simulated": True, "response": "#STOP_CALIB_ACK*"}
+    result = send_command("#STOP_CALIB*", timeout=COMMAND_TIMEOUT)
+    if result.get("ok"):
+        norm = str(result.get("normalized") or "").lower()
+        if "stop_calib_ack" not in norm and "error" not in norm:
+            result["ack"] = norm or "STOP_CALIB_ACK"
+    return result
+
+
+def cmd_apply_calibration(calib_diff: float, release_time_sec: int = None, gauge_value: float = None, set_vacuum_mmhg: float = None):
+    """Send signed gauge−set difference as #CALIBVALUE:+NNN* / #CALIBVALUE:-NNN*."""
     try:
-        k = _esp_mmhg_value(calib_value)
-        rl = _esp_sec_value(release_time_sec)
+        token = _esp_calib_diff_token(calib_diff)
+        d = int(round(float(calib_diff)))
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     if _simulate_enabled():
-        _broadcast_line(f"#CALIBVALUE_ACK:{k:03d}*")
-        _broadcast_line(f"#RL_TM_ACK:{rl:03d}*")
-        return {"ok": True, "simulated": True, "calibValue": k, "releaseTimeSec": rl}
-    r1 = send_command(f"#CALIBVALUE:{k:03d}*", timeout=COMMAND_TIMEOUT)
+        _broadcast_line(f"#CALIBVALUE_ACK:{token}*")
+        return {
+            "ok": True,
+            "simulated": True,
+            "calibDiff": d,
+            "calibValueToken": token,
+            "gaugeValue": gauge_value,
+            "setVacuumMmHg": set_vacuum_mmhg,
+            "releaseTimeSec": release_time_sec,
+        }
+    r1 = send_command(f"#CALIBVALUE:{token}*", timeout=COMMAND_TIMEOUT)
     if not r1.get("ok"):
         return r1
-    r2 = send_command(f"#RL_TM:{rl:03d}*", timeout=COMMAND_TIMEOUT)
-    if r2.get("ok"):
-        r2["calibValue"] = k
-        r2["releaseTimeSec"] = rl
-        r2["calibAck"] = r1.get("normalized")
-    return r2
+    r1["calibDiff"] = d
+    r1["calibValueToken"] = token
+    if gauge_value is not None:
+        r1["gaugeValue"] = gauge_value
+    if set_vacuum_mmhg is not None:
+        r1["setVacuumMmHg"] = set_vacuum_mmhg
+    if release_time_sec is not None:
+        r1["releaseTimeSec"] = release_time_sec
+    return r1
 
 
 def _append_uart_log(direction: str, payload: str):

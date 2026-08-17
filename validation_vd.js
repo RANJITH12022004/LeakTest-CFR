@@ -613,28 +613,22 @@
 
     function _startCalibrationHoldAfterTarget(run) {
         if (!run || run.phase !== 'evacuating') return;
-        // After TARGET_REACHED: send #START_CALIB*, then collect gauge value for #CALIBVALUE.
-        run.phase = 'esp_calib';
+        // Holding starts at TARGET_REACHED: ask for gauge first, then START_CALIB.
+        run.phase = 'holding';
         _clearVacuumCalTimers();
-        _setCalRunEl('cal-run-status', 'Target reached — starting ESP calibration…');
+        run.holdSec = 0;
+        _setCalRunEl('cal-run-status', 'Target reached — enter external gauge reading');
         _setCalRunEl('cal-hold-elapsed', '00:00');
-        apiRequest(API_BASE + '/api/hardware/calibration/esp-start', { method: 'POST' })
-            .then(function (res) {
-                if (!res || res.ok !== true) {
-                    return Promise.reject(new Error((res && res.error) ? String(res.error) : 'ESP did not acknowledge START_CALIB'));
-                }
-                if (!window._vacuumCalRun || window._vacuumCalRun !== run) return;
-                run.phase = 'prompt';
-                _setCalRunEl('cal-run-status', 'Enter external gauge reading');
-                showCalibrationGaugeModal(run);
-            })
-            .catch(function (err) {
-                run.phase = 'idle';
-                _setCalRunEl('cal-run-status', 'ESP calibration start failed');
-                var startBtn = document.getElementById('btn-calibration-start');
-                if (startBtn) startBtn.disabled = false;
-                showAppModal('Failed to start ESP calibration: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
-            });
+        window._vacuumCalHoldTimer = setInterval(function () {
+            if (!window._vacuumCalRun || window._vacuumCalRun !== run) return;
+            run.holdSec = (run.holdSec || 0) + 1;
+            _setCalRunEl(
+                'cal-hold-elapsed',
+                (typeof formatMmSs === 'function') ? formatMmSs(run.holdSec) : String(run.holdSec)
+            );
+        }, 1000);
+        run.phase = 'prompt';
+        showCalibrationGaugeModal(run);
     }
 
     function _clearVacuumCalTimers() {
@@ -655,7 +649,8 @@
         _stopCalPressurePoll();
         window._calPressurePollId = setInterval(function () {
             var run = window._vacuumCalRun;
-            if (!run || run.phase === 'done' || run.phase === 'idle' || run.phase === 'prompt' || run.phase === 'esp_calib') return;
+            if (!run || run.phase === 'done' || run.phase === 'idle' || run.phase === 'prompt'
+                || run.phase === 'esp_calib' || run.phase === 'holding' || run.phase === 'applying') return;
             if (typeof apiRequest !== 'function') return;
             apiRequest(API_BASE + '/api/hardware/status', { method: 'GET' }).then(function (res) {
                 if (!res || res.ok === false) return;
@@ -691,7 +686,8 @@
 
     function vacuumCalibrationHardwareMessage(ev) {
         var run = window._vacuumCalRun;
-        if (!run || run.phase === 'done' || run.phase === 'prompt' || run.phase === 'esp_calib') return;
+        if (!run || run.phase === 'done' || run.phase === 'prompt' || run.phase === 'esp_calib'
+            || run.phase === 'holding' || run.phase === 'applying') return;
         try {
             var raw = ev.data;
             if (raw == null || raw === '') return;
@@ -783,14 +779,18 @@
         });
     }
 
-    function buildCalibrationReportPayload(actualPressure, run) {
+    function buildCalibrationReportPayload(actualPressure, run, calibDiff) {
         var user = window.currentUser || {};
         var now = new Date().toISOString();
+        var diff = (calibDiff != null && !isNaN(calibDiff))
+            ? Math.round(Number(calibDiff))
+            : Math.round(Number(actualPressure) - Number(run.targetVacuumMmHg));
         var td = {
             calibrationSubtype: 'vacuum',
             setVacuumMmHg: run.targetVacuumMmHg,
             actualVacuumMmHg: actualPressure,
             calibValue: actualPressure,
+            calibDiff: diff,
             releaseTimeSec: run.releaseTimeSec,
             holdAfterTargetSec: run.holdAfterTargetSec,
             liveVacuumAtPrompt: run.liveVacuumMmHg,
@@ -811,6 +811,7 @@
             setVacuumMmHg: run.targetVacuumMmHg,
             actualVacuumMmHg: actualPressure,
             calibValue: actualPressure,
+            calibDiff: diff,
             releaseTimeSec: run.releaseTimeSec,
             createdAt: now,
             completedAt: now,
@@ -846,44 +847,75 @@
     function finishVacuumCalibration(actualPressure) {
         var run = window._vacuumCalRun;
         if (!run) return;
-        _setCalRunEl('cal-run-status', 'Applying calibration value…');
-        apiRequest(API_BASE + '/api/hardware/calibration/apply', {
-            method: 'POST',
-            body: {
-                calibValue: actualPressure,
-                releaseTimeSec: run.releaseTimeSec
-            }
-        }).then(function (res) {
-            if (!res || res.ok !== true) {
-                return Promise.reject(new Error((res && res.error) ? String(res.error) : 'ESP did not acknowledge calibration'));
-            }
-            logAuditEvent('Calibration completed', 'Vacuum calibration K=' + actualPressure + ' RL_TM=' + run.releaseTimeSec, {
-                eventType: 'lifecycle',
-                entityType: 'calibration',
-                extra: {
-                    setVacuumMmHg: run.targetVacuumMmHg,
-                    calibValue: actualPressure,
-                    releaseTimeSec: run.releaseTimeSec
+        var setVac = run.targetVacuumMmHg;
+        var calibDiff = Math.round(Number(actualPressure) - Number(setVac));
+        var startBtn = document.getElementById('btn-calibration-start');
+        run.phase = 'applying';
+        _setCalRunEl('cal-run-status', 'Starting ESP calibration…');
+        apiRequest(API_BASE + '/api/hardware/calibration/esp-start', { method: 'POST' })
+            .then(function (res) {
+                if (!res || res.ok !== true) {
+                    return Promise.reject(new Error((res && res.error) ? String(res.error) : 'ESP did not acknowledge START_CALIB'));
                 }
+                _setCalRunEl('cal-run-status', 'Sending calibration difference (' + (calibDiff >= 0 ? '+' : '') + calibDiff + ')…');
+                return apiRequest(API_BASE + '/api/hardware/calibration/apply', {
+                    method: 'POST',
+                    body: {
+                        gaugeValue: actualPressure,
+                        setVacuumMmHg: setVac,
+                        calibDiff: calibDiff,
+                        releaseTimeSec: run.releaseTimeSec
+                    }
+                });
+            })
+            .then(function (res) {
+                if (!res || res.ok !== true) {
+                    return Promise.reject(new Error((res && res.error) ? String(res.error) : 'ESP did not acknowledge CALIBVALUE'));
+                }
+                _setCalRunEl('cal-run-status', 'Stopping ESP calibration…');
+                return apiRequest(API_BASE + '/api/hardware/calibration/stop-calib', { method: 'POST' });
+            })
+            .then(function (res) {
+                if (!res || res.ok !== true) {
+                    return Promise.reject(new Error((res && res.error) ? String(res.error) : 'ESP did not acknowledge STOP_CALIB'));
+                }
+                logAuditEvent(
+                    'Calibration completed',
+                    'Vacuum calibration gauge=' + actualPressure + ' set=' + setVac + ' diff=' + calibDiff,
+                    {
+                        eventType: 'lifecycle',
+                        entityType: 'calibration',
+                        extra: {
+                            setVacuumMmHg: setVac,
+                            gaugeValue: actualPressure,
+                            calibDiff: calibDiff,
+                            releaseTimeSec: run.releaseTimeSec
+                        }
+                    }
+                );
+                run.phase = 'done';
+                _clearVacuumCalTimers();
+                _closeVacuumCalEs();
+                _setCalRunEl('cal-run-status', 'Releasing pressure…');
+                var releaseSec = run.releaseTimeSec
+                    || ((typeof getReleasePressureLockSec === 'function') ? getReleasePressureLockSec() : 80);
+                var lockFn = (typeof showReleasePressureLock === 'function')
+                    ? showReleasePressureLock
+                    : function () { return Promise.resolve(); };
+                return lockFn(releaseSec).then(function () {
+                    var payload = buildCalibrationReportPayload(actualPressure, run, calibDiff);
+                    window._lastFailedValidation = null;
+                    return saveCalibrationReport(payload);
+                });
+            })
+            .catch(function (err) {
+                run.phase = 'idle';
+                _clearVacuumCalTimers();
+                if (startBtn) startBtn.disabled = false;
+                _setCalRunEl('cal-run-status', 'Calibration failed');
+                showAppModal('Failed to apply calibration: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
+                apiRequest(API_BASE + '/api/hardware/calibration/stop', { method: 'POST' }).catch(function () {});
             });
-            run.phase = 'done';
-            _clearVacuumCalTimers();
-            _closeVacuumCalEs();
-            apiRequest(API_BASE + '/api/hardware/calibration/stop', { method: 'POST' }).catch(function () {});
-            _setCalRunEl('cal-run-status', 'Releasing pressure…');
-            var releaseSec = run.releaseTimeSec || ((typeof getReleasePressureLockSec === 'function') ? getReleasePressureLockSec() : 80);
-            var lockFn = (typeof showReleasePressureLock === 'function')
-                ? showReleasePressureLock
-                : function () { return Promise.resolve(); };
-            return lockFn(releaseSec).then(function () {
-                var payload = buildCalibrationReportPayload(actualPressure, run);
-                window._lastFailedValidation = null;
-                return saveCalibrationReport(payload);
-            });
-        }).catch(function (err) {
-            _setCalRunEl('cal-run-status', 'Calibration failed');
-            showAppModal('Failed to apply calibration: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
-        });
     }
 
     function startVacuumCalibrationRun() {
