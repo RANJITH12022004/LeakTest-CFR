@@ -63,8 +63,10 @@ THERMAL_CANDIDATES = ["/dev/ttyAMA3", "/dev/ttyUSB0", "/dev/ttyUSB1", "COM3", "C
 THERMAL_WIDTH = 32
 THERMAL_LINE_CHUNK = 32
 A4_TEXT_WIDTH = 80
-# Blank lines after content so date/time and footer clear the cutter (avoid half-cut).
-THERMAL_POST_PRINT_FEED_LINES = 10
+# Blank lines after content so the last lines clear the tear bar (single feed at send only).
+THERMAL_POST_PRINT_FEED_LINES = 3
+THERMAL_LOGO_PATH = pathlib.Path(__file__).resolve().parent / "assets" / "apple-touch-icon.png"
+THERMAL_LOGO_WIDTH_PX = 384
 
 _PRINTER_INIT_SEQ = b"\x1b\x40"
 _log = logging.getLogger(__name__)
@@ -271,6 +273,86 @@ def _split_ts_date_and_time(ts: Any) -> tuple:
     if len(parts) == 2:
         return parts[0], parts[1]
     return full, "--"
+
+
+def _normalize_display_date_slash(value: Any) -> str:
+    """Normalize report display dates to dd/mm/yyyy."""
+    s = str(value or "").strip()
+    if not s or s.upper() in ("N/A", "--"):
+        return s or "N/A"
+    for sep in ("-", "/"):
+        parts = s[:10].split(sep)
+        if len(parts) == 3 and all(parts):
+            try:
+                d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+                if y < 100:
+                    y += 2000
+                return f"{d:02d}/{m:02d}/{y:04d}"
+            except (TypeError, ValueError):
+                pass
+    return s
+
+
+def _thermal_logo_raster_bytes() -> Optional[bytes]:
+    """Build ESC/POS raster for the thermal header logo (full paper width)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        _log.warning("Pillow not installed; thermal logo skipped")
+        return None
+    path = THERMAL_LOGO_PATH
+    if not path.is_file():
+        _log.warning("Thermal logo missing: %s", path)
+        return None
+    try:
+        img = Image.open(path).convert("L")
+        w, h = img.size
+        width_pixels = THERMAL_LOGO_WIDTH_PX
+        if w != width_pixels:
+            new_h = max(1, int(h * (width_pixels / float(w))))
+            img = img.resize((width_pixels, new_h), Image.LANCZOS)
+            w, h = img.size
+        # Width must be multiple of 8 for ESC/POS bit image.
+        if w % 8:
+            pad = 8 - (w % 8)
+            from PIL import ImageOps
+
+            img = ImageOps.expand(img, border=(0, 0, pad, 0), fill=255)
+            w, h = img.size
+        bw = img.point(lambda p: 0 if p > 127 else 1, "1")
+        m = 0
+        xL = (w // 8) & 0xFF
+        xH = ((w // 8) >> 8) & 0xFF
+        yL = h & 0xFF
+        yH = (h >> 8) & 0xFF
+        header = bytes([0x1D, 0x76, 0x30, m, xL, xH, yL, yH])
+        row_bytes = w // 8
+        raw = bw.tobytes()
+        out = bytearray(header)
+        for row in range(h):
+            start = row * row_bytes
+            out.extend(raw[start : start + row_bytes])
+        return bytes(out)
+    except Exception as e:
+        _log.warning("Thermal logo raster failed: %s", e)
+        return None
+
+
+def _send_thermal_logo(ser, baud: int) -> bool:
+    raster = _thermal_logo_raster_bytes()
+    if not raster:
+        return False
+    chunk_size = 512 if baud <= 9600 else 1024
+    pause = 0.08 if baud <= 9600 else 0.05
+    for i in range(0, len(raster), chunk_size):
+        ser.write(raster[i : i + chunk_size])
+        ser.flush()
+        if i + chunk_size < len(raster):
+            time.sleep(pause)
+    ser.write(b"\n")
+    ser.flush()
+    time.sleep(0.05)
+    return True
 
 
 def _wrap_lines(lines: list, width: int) -> list:
@@ -548,6 +630,14 @@ def _append_test_statistics_block(
     lines.extend(["", star, ""])
 
 
+def _fmt_mmss(sec: Any) -> str:
+    try:
+        t = max(0, int(round(float(sec))))
+    except (TypeError, ValueError):
+        return "--"
+    return f"{t // 60:02d}:{t % 60:02d}"
+
+
 def _normalize_validation_runs(td: Dict[str, Any], report_data: Dict[str, Any]) -> list:
     if not isinstance(td, dict):
         td = {}
@@ -558,11 +648,11 @@ def _normalize_validation_runs(td: Dict[str, Any], report_data: Dict[str, Any]) 
         {
             "usp": td.get("usp") or report_data.get("usp"),
             "validationSubtype": td.get("validationSubtype") or report_data.get("validationSubtype"),
-            "tapsMin": td.get("tapsMin", report_data.get("tapsMin")),
-            "dropHeight": td.get("dropHeight", report_data.get("dropHeight")),
-            "expectedTapCount": td.get("expectedTapCount", report_data.get("expectedTapCount")),
-            "expectedTolerance": td.get("expectedTolerance", report_data.get("expectedTolerance")),
-            "actualTapCount": td.get("actualTapCount", report_data.get("actualTapCount")),
+            "setVacuumMmHg": td.get("setVacuumMmHg", report_data.get("setVacuumMmHg")),
+            "actualVacuumMmHg": td.get("actualVacuumMmHg", report_data.get("actualVacuumMmHg")),
+            "setDurationSec": td.get("setDurationSec", report_data.get("setDurationSec")),
+            "setDurationDisplay": td.get("setDurationDisplay", report_data.get("setDurationDisplay")),
+            "actualDurationSec": td.get("actualDurationSec", report_data.get("actualDurationSec")),
             "validationDurationSec": td.get("validationDurationSec", report_data.get("validationDurationSec")),
             "status": td.get("status", report_data.get("status")),
             "completedAt": td.get("completedAt", report_data.get("completedAt")),
@@ -577,15 +667,16 @@ def _validation_usp_label(run: Dict[str, Any]) -> str:
     return "Pressure Decay" if run.get("validationSubtype") == "load" else "Vacuum Decay"
 
 
-def _validation_expected_display(run: Dict[str, Any]) -> str:
-    expected = run.get("expectedTapCount", "--")
-    tol = run.get("expectedTolerance")
-    if tol is not None and expected not in (None, "--", ""):
-        try:
-            return f"{expected} (+/-{tol})"
-        except (TypeError, ValueError):
-            pass
-    return _cell_str(expected)
+def _validation_set_time_display(run: Dict[str, Any]) -> str:
+    disp = run.get("setDurationDisplay")
+    if disp not in (None, ""):
+        return str(disp)
+    sec = run.get("setDurationSec")
+    if sec is None:
+        sec = run.get("validationDurationSec")
+    if sec is None:
+        return "--"
+    return _fmt_mmss(sec)
 
 
 def _validation_overall_status_label(td: Dict[str, Any], report_data: Dict[str, Any]) -> str:
@@ -606,16 +697,11 @@ def _format_thermal_validation_runs_block(runs: list, width: int = THERMAL_WIDTH
         if idx > 0:
             lines.append("")
         lines.append(_validation_usp_label(run))
-        lines.append(f"mbar/s: {_cell_str(run.get('tapsMin'))}")
-        lines.append(f"Drop(mm): {_cell_str(run.get('dropHeight'))}")
-        lines.append(f"Expected: {_validation_expected_display(run)}")
-        lines.append(f"Actual: {_cell_str(run.get('actualTapCount'))}")
-        dur = run.get("validationDurationSec")
-        if dur is not None:
-            try:
-                lines.append(f"Duration: {int(dur)} s")
-            except (TypeError, ValueError):
-                pass
+        lines.append(f"Set Vacuum (mmHg): {_cell_str(run.get('setVacuumMmHg'))}")
+        lines.append(f"Actual Vacuum (mmHg): {_cell_str(run.get('actualVacuumMmHg'))}")
+        lines.append(f"Set Time: {_validation_set_time_display(run)}")
+        act_sec = run.get("actualDurationSec")
+        lines.append(f"Actual Time: {_fmt_mmss(act_sec) if act_sec is not None else '--'}")
         lines.append(f"Status: {_cell_str(run.get('status'))}")
     lines.extend(["", _thermal_sep("-", w), ""])
     return lines
@@ -760,19 +846,14 @@ def _append_validation_report_details(
             if idx > 0:
                 lines.append("")
             lines.append(_validation_usp_label(run))
+            act_sec = run.get("actualDurationSec")
             run_pairs = [
-                ("mbar/s", _cell_str(run.get("tapsMin"))),
-                ("Drop (mm)", _cell_str(run.get("dropHeight"))),
-                ("Expected", _validation_expected_display(run)),
-                ("Actual", _cell_str(run.get("actualTapCount"))),
+                ("Set Vacuum (mmHg)", _cell_str(run.get("setVacuumMmHg"))),
+                ("Actual Vacuum (mmHg)", _cell_str(run.get("actualVacuumMmHg"))),
+                ("Set Time", _validation_set_time_display(run)),
+                ("Actual Time", _fmt_mmss(act_sec) if act_sec is not None else "--"),
+                ("Status", _cell_str(run.get("status"))),
             ]
-            dur = run.get("validationDurationSec")
-            if dur is not None:
-                try:
-                    run_pairs.append(("Duration", f"{int(dur)} s"))
-                except (TypeError, ValueError):
-                    pass
-            run_pairs.append(("Status", _cell_str(run.get("status"))))
             _append_two_column_pairs(lines, run_pairs, width)
         lines.append("")
 
@@ -974,19 +1055,22 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         except Exception:
             now = datetime.now()
             if print_date in (None, "", "--"):
-                print_date = now.strftime("%d-%m-%Y")
+                print_date = now.strftime("%d/%m/%Y")
             if print_time in (None, "", "--"):
                 print_time = now.strftime("%H:%M:%S")
+    print_date = _normalize_display_date_slash(print_date)
+    last_val = _normalize_display_date_slash(fs.get("lastValidationDate", "N/A"))
+    next_val = _normalize_display_date_slash(fs.get("nextValidationDate", "N/A"))
     if thermal:
         lines.extend(
             [
-                f"Company: {fs.get('companyName', 'N/A')}",
+                "[LOGO]",
                 f"Model No: {fs.get('modelNo', 'N/A')}",
                 f"Serial No: {fs.get('serialNo', 'N/A')}",
                 f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
                 f"Instrument ID: {fs.get('instrumentId', 'N/A')}",
-                f"Last Val: {fs.get('lastValidationDate', 'N/A')}",
-                f"Next Val Due: {fs.get('nextValidationDate', 'N/A')}",
+                f"Last Val: {last_val}",
+                f"Next Val Due: {next_val}",
             ]
         )
     else:
@@ -998,8 +1082,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 ("Serial No", fs.get("serialNo", "N/A")),
                 ("Location", fs.get("companyLocation", fs.get("location", "N/A"))),
                 ("Instrument ID", fs.get("instrumentId", "N/A")),
-                ("Last Val", fs.get("lastValidationDate", "N/A")),
-                ("Next Val Due", fs.get("nextValidationDate", "N/A")),
+                ("Last Val", last_val),
+                ("Next Val Due", next_val),
             ],
             width,
         )
@@ -1078,6 +1162,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                     dest.append((left + vac_s)[:width])
 
         if thermal:
+            start_date, start_time = _split_ts_date_and_time(ts_start)
+            end_date, end_time = _split_ts_date_and_time(ts_end)
             info_lines = [
                 "TEST INFORMATION",
                 f"Product: {recipe.get('productName', td.get('productName', 'N/A'))}",
@@ -1085,15 +1171,16 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 f"Batch Size: {batch_size if batch_size not in (None, '') else 'N/A'}",
                 f"A.R. No: {ar_no if ar_no not in (None, '') else 'N/A'}",
                 f"Operator: {operator}",
-                f"Test Start: {_format_ts_readable(ts_start)}",
-                f"Completed: {_format_ts_readable(ts_end)}",
+                f"Start Date: {start_date}",
+                f"Start Time: {start_time}",
+                f"Test Completed Date: {end_date}",
+                f"Test Completed Time: {end_time}",
                 f"Test Status: {status_label}",
                 "",
                 "TEST RESULT",
                 f"Set Vacuum (mmHg): {set_vac_disp}",
                 f"Total Duration (mm:ss): {dur_fields['total']}",
                 f"Hold Duration (mm:ss): {dur_fields['hold']}",
-                f"Release Duration (mm:ss): {dur_fields['release']}",
                 f"Result: {result_val}",
             ]
             _append_hold_vacuum_samples(info_lines, True)
@@ -1102,6 +1189,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             info_lines.append("")
             lines.extend(info_lines)
         else:
+            start_date, start_time = _split_ts_date_and_time(ts_start)
+            end_date, end_time = _split_ts_date_and_time(ts_end)
             lines.extend(["", "TEST INFORMATION", sep_dash])
             _append_two_column_pairs(
                 lines,
@@ -1111,8 +1200,10 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                     ("Batch Size", batch_size if batch_size not in (None, "") else "N/A"),
                     ("A.R. No", ar_no if ar_no not in (None, "") else "N/A"),
                     ("Operator", operator),
-                    ("Test Start", _format_ts_readable(ts_start)),
-                    ("Completed", _format_ts_readable(ts_end)),
+                    ("Start Date", start_date),
+                    ("Start Time", start_time),
+                    ("Test Completed Date", end_date),
+                    ("Test Completed Time", end_time),
                     ("Test Status", status_label),
                 ],
                 width,
@@ -1124,7 +1215,6 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                     ("Set Vacuum (mmHg)", set_vac_disp),
                     ("Total Duration (mm:ss)", dur_fields["total"]),
                     ("Hold Duration (mm:ss)", dur_fields["hold"]),
-                    ("Release Duration (mm:ss)", dur_fields["release"]),
                     ("Result", result_val),
                 ],
                 width,
@@ -1206,19 +1296,15 @@ def _thermal_printed_timestamp_lines() -> list:
         ptime = payload.get("time") or "--"
     except Exception:
         now = datetime.now()
-        pdate = now.strftime("%d-%m-%Y")
+        pdate = now.strftime("%d/%m/%Y")
         ptime = now.strftime("%H:%M:%S")
-    return ["", f"Print Date: {pdate}", f"Print Time: {ptime}"]
-
-
-def _thermal_trailing_feed() -> str:
-    return "\n" * THERMAL_POST_PRINT_FEED_LINES
+    return ["", f"Print Date: {_normalize_display_date_slash(pdate)}", f"Print Time: {ptime}"]
 
 
 def format_for_thermal_printer(report_data: Dict[str, Any]) -> str:
     # Footer Print Date/Time is included by _format_report_text.
-    text = _format_report_text(report_data, width=THERMAL_WIDTH).rstrip("\n")
-    return text + _thermal_trailing_feed()
+    # Trailing paper feed is applied only in _send_text_to_thermal (not here).
+    return _format_report_text(report_data, width=THERMAL_WIDTH).rstrip("\n")
 
 
 def save_report_text_files(report_data: Dict[str, Any], report_id: int, reports_dir: pathlib.Path) -> None:
@@ -1308,11 +1394,17 @@ def print_thermal_report(report_data: Dict[str, Any], printer_port: Optional[str
         return {"success": False, "error": f"Thermal printer port not found: {e.filename or port}", "port": port}
     try:
         text = format_for_thermal_printer(report_data)
+        # On-screen / file preview uses [LOGO] marker; physical print sends raster instead.
+        text_body = "\n".join(
+            ln for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            if str(ln).strip() != "[LOGO]"
+        )
         ser = serial.Serial(port=port, baudrate=baud, timeout=2.0)
         try:
             _send_printer_init(ser)
             time.sleep(0.2)
-            _send_text_to_thermal(ser, text, baud)
+            _send_thermal_logo(ser, baud)
+            _send_text_to_thermal(ser, text_body, baud)
             time.sleep(0.5)
             return {"success": True, "port": port}
         finally:
@@ -1335,8 +1427,8 @@ def _format_recipe_text(recipe_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         f"Serial No: {fs.get('serialNo', 'N/A')}",
         f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
         f"Instrument ID: {fs.get('instrumentId', 'N/A')}",
-        f"Last Val: {fs.get('lastValidationDate', 'N/A')}",
-        f"Next Val Due: {fs.get('nextValidationDate', 'N/A')}",
+        f"Last Val: {_normalize_display_date_slash(fs.get('lastValidationDate', 'N/A'))}",
+        f"Next Val Due: {_normalize_display_date_slash(fs.get('nextValidationDate', 'N/A'))}",
         sep_dash if thermal else "",
         f"Product: {recipe_data.get('productName', recipe_data.get('name', 'N/A'))}",
         f"Batch: {recipe_data.get('batchNumber', 'N/A')}",
@@ -1384,7 +1476,7 @@ def print_recipe_thermal(recipe_data: Dict[str, Any], printer_port: Optional[str
     except FileNotFoundError as e:
         return {"success": False, "error": f"Thermal printer port not found: {e.filename or port}", "port": port}
     try:
-        text = _format_recipe_text(recipe_data, width=THERMAL_WIDTH).rstrip("\n") + _thermal_trailing_feed()
+        text = _format_recipe_text(recipe_data, width=THERMAL_WIDTH).rstrip("\n")
         ser = serial.Serial(port=port, baudrate=baud, timeout=2.0)
         try:
             _send_printer_init(ser)

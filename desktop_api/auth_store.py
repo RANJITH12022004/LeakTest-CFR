@@ -143,18 +143,24 @@ def _verifier_payload_has_internal(payload: dict, internal_key: str) -> bool:
     return rbac_service.member_has_internal(vm, internal_key)
 
 
-def issue_approval_verify_token(verifier_user: dict, purpose: str) -> tuple[str, dict]:
+def issue_approval_verify_token(verifier_user: dict, purpose: str, report_type: str | None = None) -> tuple[str, dict]:
     _cleanup_approval_verify_tokens()
     now = _now()
     token = secrets.token_urlsafe(24)
+    purpose_norm = str(purpose or "recipe").strip().lower()
     payload = {
         "username": verifier_user.get("username") or "",
         "name": verifier_user.get("name") or verifier_user.get("username") or "",
         "role": str(verifier_user.get("role") or "").strip().lower(),
-        "purpose": str(purpose or "recipe").strip().lower(),
+        "purpose": purpose_norm,
         "issuedAt": now,
         "expiresAt": now + APPROVAL_VERIFY_TTL_SECONDS,
     }
+    if purpose_norm == "report":
+        t = str(report_type or "test").strip().lower()
+        if t not in ("test", "validation", "calibration"):
+            t = "test"
+        payload["reportType"] = t
     _approval_verify_tokens[token] = payload
     return token, payload
 
@@ -175,8 +181,24 @@ def consume_approval_verify_token(expected_purpose: str):
         return None, "Verifier does not have recipe approval permission."
     if exp == "user_admin" and not _verifier_payload_has_internal(payload, "user-manage"):
         return None, "Verifier does not have profile management permission."
-    if exp == "report" and not _verifier_payload_has_internal(payload, "test-report-approve"):
-        return None, "Verifier does not have test report approval permission."
+    if exp == "report":
+        rtype = str(payload.get("reportType") or "test").strip().lower()
+        if rtype not in ("test", "validation", "calibration"):
+            rtype = "test"
+        if rtype == "calibration":
+            ok = _verifier_payload_has_internal(payload, "calibration-report-approve")
+            if not ok:
+                return None, "Verifier does not have calibration report approval permission."
+        elif rtype == "validation":
+            ok = (
+                _verifier_payload_has_internal(payload, "test-report-approve")
+                or _verifier_payload_has_internal(payload, "validation-report-approve")
+            )
+            if not ok:
+                return None, "Verifier does not have report approval permission for this report type."
+        else:
+            if not _verifier_payload_has_internal(payload, "test-report-approve"):
+                return None, "Verifier does not have test report approval permission."
     if exp == "export" and not _verifier_payload_has_internal(payload, "export-approve"):
         return None, "Verifier does not have export approval permission."
     return payload, None

@@ -169,6 +169,86 @@ def _audit(user, role, action, details=""):
     )
 
 
+def _recipe_audit_field_map(recipe):
+    """Extract comparable recipe fields for audit details."""
+    if not isinstance(recipe, dict):
+        return {}
+    duration = recipe.get("durationSec")
+    if duration in (None, "") and recipe.get("durationDisplay"):
+        duration = recipe.get("durationDisplay")
+    steps = recipe.get("steps")
+    step_n = len(steps) if isinstance(steps, list) else None
+    return {
+        "product": recipe.get("productName") or recipe.get("name") or "",
+        "type": recipe.get("productType") or recipe.get("uspMode") or "",
+        "batchSize": recipe.get("batchSize"),
+        "samples": recipe.get("noOfSamples"),
+        "vacuumMmHg": recipe.get("vacuumMmHg"),
+        "duration": duration,
+        "analysisReportNo": recipe.get("analysisReportNo") or "",
+        "steps": step_n,
+    }
+
+
+def format_recipe_audit_details(recipe, recipe_id=None):
+    fields = _recipe_audit_field_map(recipe)
+    parts = []
+    if recipe_id is not None:
+        parts.append("id {}".format(recipe_id))
+    if fields.get("product"):
+        parts.append("product: {}".format(fields["product"]))
+    if fields.get("type"):
+        parts.append("type: {}".format(fields["type"]))
+    if fields.get("batchSize") not in (None, ""):
+        parts.append("batchSize: {}".format(fields["batchSize"]))
+    if fields.get("samples") not in (None, ""):
+        parts.append("samples: {}".format(fields["samples"]))
+    if fields.get("vacuumMmHg") not in (None, ""):
+        parts.append("vacuum: {} mmHg".format(fields["vacuumMmHg"]))
+    if fields.get("duration") not in (None, ""):
+        parts.append("duration: {}".format(fields["duration"]))
+    if fields.get("analysisReportNo"):
+        parts.append("A.R.: {}".format(fields["analysisReportNo"]))
+    if fields.get("steps") not in (None, ""):
+        parts.append("steps: {}".format(fields["steps"]))
+    return " | ".join(parts) if parts else "recipe"
+
+
+def diff_recipe_audit_details(before, after, recipe_id=None):
+    b = _recipe_audit_field_map(before)
+    a = _recipe_audit_field_map(after)
+    keys = ["product", "type", "batchSize", "samples", "vacuumMmHg", "duration", "analysisReportNo", "steps"]
+    changes = []
+    for k in keys:
+        bv = b.get(k)
+        av = a.get(k)
+        if str(bv if bv is not None else "") == str(av if av is not None else ""):
+            continue
+        label = {
+            "product": "product",
+            "type": "type",
+            "batchSize": "batchSize",
+            "samples": "samples",
+            "vacuumMmHg": "vacuum",
+            "duration": "duration",
+            "analysisReportNo": "A.R.",
+            "steps": "steps",
+        }.get(k, k)
+        if k == "vacuumMmHg":
+            changes.append("{} {}→{} mmHg".format(label, bv if bv not in (None, "") else "—", av if av not in (None, "") else "—"))
+        else:
+            changes.append("{} {}→{}".format(label, bv if bv not in (None, "") else "—", av if av not in (None, "") else "—"))
+    prefix = []
+    if recipe_id is not None:
+        prefix.append("id {}".format(recipe_id))
+    name = a.get("product") or b.get("product") or ""
+    if name:
+        prefix.append("product: {}".format(name))
+    if changes:
+        return " | ".join(prefix + changes) if prefix else " | ".join(changes)
+    return format_recipe_audit_details(after, recipe_id=recipe_id)
+
+
 def _audit_time_fields():
     payload = rtc_service.get_device_wall_datetime_payload()
     dt_raw = (payload.get("datetime") or "").strip()
@@ -241,8 +321,16 @@ def _audit_event(
     signature=None,
     event_type="compliance",
     extra=None,
+    actor_user=None,
+    actor_role=None,
 ):
     actor = _audit_actor()
+    if actor_user is not None:
+        actor = dict(actor)
+        actor["user"] = str(actor_user or "").strip() or "--"
+    if actor_role is not None:
+        actor = dict(actor)
+        actor["role"] = str(actor_role or "").strip() or "--"
     audit_time = _audit_time_fields()
     signature = signature or {}
     before_clean = _sanitize_audit_payload(before)
@@ -488,13 +576,36 @@ def _approval_verifier_eligible_for_recipe(verifier: dict) -> bool:
     return rbac_service.member_has_internal(vm, "recipe-approve")
 
 
-def _approval_verifier_eligible_for_report(verifier: dict) -> bool:
-    """Test report approval: verifier must have test-report-approve permission (Factory bypass)."""
+def _normalize_report_approval_type(report_type) -> str:
+    t = str(report_type or "test").strip().lower()
+    if t in ("test", "validation", "calibration"):
+        return t
+    return "test"
+
+
+def _report_approval_internal_keys(report_type) -> list:
+    """
+    Internal permission keys that may approve a report of this type.
+    Test report approval covers test + validation; calibration needs its own card.
+    """
+    t = _normalize_report_approval_type(report_type)
+    if t == "calibration":
+        return ["calibration-report-approve"]
+    if t == "validation":
+        return ["test-report-approve", "validation-report-approve"]
+    return ["test-report-approve"]
+
+
+def _approval_verifier_eligible_for_report(verifier: dict, report_type: str = "test") -> bool:
+    """Report approval eligibility by report type (Factory bypass)."""
     vm = _approval_verifier_member(verifier)
     role = str(vm.get("role") or "").strip().lower()
     if role == "factory":
         return True
-    return rbac_service.member_has_internal(vm, "test-report-approve")
+    for key in _report_approval_internal_keys(report_type):
+        if rbac_service.member_has_internal(vm, key):
+            return True
+    return False
 
 
 def _approval_verifier_eligible_for_user_admin(verifier: dict) -> bool:
@@ -820,34 +931,15 @@ def _payload_has_protected_feature_overrides(member_data):
 
 
 def _apply_recipe_approval_for_session_creator(processed):
-    """Factory saves: approve immediately (no QA/Admin verification). Others: pending."""
-    if _effective_request_role() != "factory":
-        processed["recipeApprovalStatus"] = "pending"
-        for k in (
-            "recipeApprovedAt",
-            "recipeApprovedBy",
-            "recipeApprovalRemarks",
-            "recipeApprovedByUsername",
-        ):
-            processed.pop(k, None)
-        return
-    cur = data_service.get_current_user() or {}
-    display_name = (request.headers.get("X-User-Name") or "").strip() or (
-        request.headers.get("X-User-Username") or ""
-    ).strip() or (cur.get("name") or "").strip() or (cur.get("username") or "").strip() or "Factory"
-    username_raw = (
-        (request.headers.get("X-User-Username") or "").strip()
-        or (cur.get("username") or "").strip()
-        or (cur.get("name") or "").strip()
-        or display_name
-    )
-    username_key = _norm_username(username_raw)
-    by_line = "{} ({})".format(display_name, _display_role_label("factory"))
-    processed["recipeApprovalStatus"] = "approved"
-    processed["recipeApprovedAt"] = _utc_now_iso()
-    processed["recipeApprovedBy"] = by_line
-    processed["recipeApprovedByUsername"] = username_key
-    processed["recipeApprovalRemarks"] = ""
+    """All creators start pending; approval only via X-Approval-Verify-Token."""
+    processed["recipeApprovalStatus"] = "pending"
+    for k in (
+        "recipeApprovedAt",
+        "recipeApprovedBy",
+        "recipeApprovalRemarks",
+        "recipeApprovedByUsername",
+    ):
+        processed.pop(k, None)
 
 
 def _apply_recipe_approval_verify_token(processed, remarks=""):
@@ -887,18 +979,21 @@ def _cleanup_approval_verify_tokens():
         _approval_verify_tokens.pop(token, None)
 
 
-def _issue_approval_verify_token(verifier_user, purpose):
+def _issue_approval_verify_token(verifier_user, purpose, report_type=None):
     _cleanup_approval_verify_tokens()
     now = int(time.time())
     token = secrets.token_urlsafe(24)
+    purpose_norm = str(purpose or "recipe").strip().lower()
     payload = {
         "username": verifier_user.get("username") or "",
         "name": verifier_user.get("name") or verifier_user.get("username") or "",
         "role": str(verifier_user.get("role") or "").strip().lower(),
-        "purpose": str(purpose or "recipe").strip().lower(),
+        "purpose": purpose_norm,
         "issuedAt": now,
         "expiresAt": now + APPROVAL_VERIFY_TTL_SECONDS,
     }
+    if purpose_norm == "report":
+        payload["reportType"] = _normalize_report_approval_type(report_type)
     _approval_verify_tokens[token] = payload
     return token, payload
 
@@ -916,8 +1011,12 @@ def _consume_approval_verify_token(expected_purpose):
     if got != exp:
         return None, "Approval verification was issued for a different action."
     if exp == "report":
-        if not _verifier_payload_has_internal(payload, "test-report-approve"):
-            return None, "Verifier does not have test report approval permission."
+        rtype = _normalize_report_approval_type(payload.get("reportType"))
+        ok_keys = _report_approval_internal_keys(rtype)
+        if not any(_verifier_payload_has_internal(payload, k) for k in ok_keys):
+            if rtype == "calibration":
+                return None, "Verifier does not have calibration report approval permission."
+            return None, "Verifier does not have report approval permission for this report type."
     elif exp == "recipe":
         if not _verifier_payload_has_internal(payload, "recipe-approve"):
             return None, "Verifier does not have recipe approval permission."
@@ -1039,19 +1138,12 @@ def create_recipe():
         if tok_err:
             return jsonify({"error": tok_err}), 401
         recipe_id = data_service.save_recipe(processed)
-        rlabel = processed.get("name") or processed.get("productName") or ""
-        rd = "Recipe created: {}".format(rlabel or ("id {}".format(recipe_id)))
-        if recipe_id:
-            rd = "{} (id {})".format(rd, recipe_id)
-        _audit(None, None, "Recipe created", rd)
-        if processed.get("recipeApprovalStatus") == "approved":
-            if via_token:
-                v_user = processed.get("recipeApprovedByUsername") or "--"
-                v_role = (request.headers.get("X-User-Role") or "").strip() or "--"
-                _audit(v_user, v_role, "Recipe approved", rd)
-            elif _effective_request_role() == "factory":
-                au = (request.headers.get("X-User-Username") or "").strip() or "--"
-                _audit(au, "factory", "Recipe approved", rd)
+        rd = format_recipe_audit_details(processed, recipe_id=recipe_id)
+        _audit(None, None, "Recipe created", "Recipe created: {}".format(rd))
+        if processed.get("recipeApprovalStatus") == "approved" and via_token:
+            v_user = processed.get("recipeApprovedByUsername") or "--"
+            v_role = (request.headers.get("X-User-Role") or "").strip() or "--"
+            _audit(v_user, v_role, "Recipe approved", rd)
         return jsonify({"id": recipe_id, "recipe": processed}), 201
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -1098,20 +1190,14 @@ def update_recipe(recipe_id):
         tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
         if tok_err:
             return jsonify({"error": tok_err}), 401
+        existing = data_service.get_recipe(recipe_id)
         data_service.save_recipe(processed)
-        rlabel = processed.get("name") or processed.get("productName") or ""
-        rd = "Recipe id {}".format(recipe_id)
-        if rlabel:
-            rd = "{}: {}".format(rd, rlabel)
-        _audit(None, None, "Recipe edited", rd)
-        if processed.get("recipeApprovalStatus") == "approved":
-            if via_token:
-                v_user = processed.get("recipeApprovedByUsername") or "--"
-                v_role = (request.headers.get("X-User-Role") or "").strip() or "--"
-                _audit(v_user, v_role, "Recipe approved", rd)
-            elif _effective_request_role() == "factory":
-                au = (request.headers.get("X-User-Username") or "").strip() or "--"
-                _audit(au, "factory", "Recipe approved", rd)
+        rd = diff_recipe_audit_details(existing, processed, recipe_id=recipe_id)
+        _audit(None, None, "Recipe edited", "Recipe edited: {}".format(rd))
+        if processed.get("recipeApprovalStatus") == "approved" and via_token:
+            v_user = processed.get("recipeApprovedByUsername") or "--"
+            v_role = (request.headers.get("X-User-Role") or "").strip() or "--"
+            _audit(v_user, v_role, "Recipe approved", rd)
         return jsonify({"id": recipe_id, "recipe": processed}), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -1411,6 +1497,25 @@ def approve_report(report_id):
         op_username = _report_operated_by_username(report)
         if op_username and verified_username == op_username and _effective_request_role() != "factory":
             return jsonify({"ok": False, "error": "Operator cannot approve their own report."}), 403
+        report_type = _normalize_report_approval_type(report.get("type"))
+        token_report_type = verified.get("reportType")
+        if token_report_type is not None and str(token_report_type).strip() != "":
+            if _normalize_report_approval_type(token_report_type) != report_type:
+                return jsonify({
+                    "ok": False,
+                    "error": "Approval verification was issued for a different report type.",
+                }), 403
+        if _effective_request_role() != "factory":
+            if not _approval_verifier_eligible_for_report(verified, report_type):
+                if report_type == "calibration":
+                    return jsonify({
+                        "ok": False,
+                        "error": "Verifier does not have calibration report approval permission.",
+                    }), 403
+                return jsonify({
+                    "ok": False,
+                    "error": "Verifier does not have report approval permission for this report type.",
+                }), 403
         verified_name = (verified.get("name") or verified.get("username") or approver_name or "—").strip()
         verified_role = (verified.get("role") or role_header or "").strip()
         by_line = verified_name
@@ -1662,13 +1767,32 @@ def update_member(member_id):
                 target_user=uname,
                 signature=sig,
             )
+        perm_audit = None
+        try:
+            perm_audit = rbac_service.build_permission_change_audit(before_member, updated, uname)
+        except Exception:
+            perm_audit = None
+        if perm_audit:
+            _audit_event(
+                action="User permissions updated",
+                outcome="success",
+                entity_type="member",
+                entity_id=member_id,
+                entity_name=uname,
+                details=perm_audit.get("details") or "User permissions updated",
+                target_user=uname,
+                before=perm_audit.get("before"),
+                after=perm_audit.get("after"),
+                signature=sig,
+                extra=perm_audit.get("extra") or {},
+            )
         _audit_event(
             action="User update",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
             entity_name=uname,
-            details="Member updated",
+            details="Member updated: {}".format(uname),
             target_user=uname,
             before=data_service.sanitize_member_for_client(before_member) if before_member else None,
             after=data_service.sanitize_member_for_client(updated) or updated,
@@ -1695,7 +1819,7 @@ def delete_member(member_id):
         verified, verify_err = _require_user_admin_verification()
         if not verified:
             _audit_event(
-                action="User disable",
+                action="User disabled",
                 outcome="denied",
                 entity_type="member",
                 entity_id=member_id,
@@ -1711,7 +1835,7 @@ def delete_member(member_id):
             deleted = biometric_service.delete_template(template_id)
             if not deleted.get("ok"):
                 _audit_event(
-                    action="User disable",
+                    action="User disabled",
                     outcome="failed",
                     entity_type="member",
                     entity_id=member_id,
@@ -1729,12 +1853,12 @@ def delete_member(member_id):
             data_service.clear_member_biometric(member_id)
         member = data_service.disable_member(member_id)
         _audit_event(
-            action="User disable",
+            action="User disabled",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
             entity_name=member.get("username") or member.get("name") or "",
-            details="Member disabled",
+            details="Member disabled: {}".format(member.get("username") or member.get("name") or ""),
             target_user=member.get("username") or "",
             before=before_member,
             after=member,
@@ -1763,12 +1887,12 @@ def unlock_member_route(member_id):
         }
         member = data_service.unlock_member(member_id)
         _audit_event(
-            action="User unlock",
+            action="User unlocked",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
             entity_name=member.get("username") or member.get("name") or "",
-            details="Member unlocked",
+            details="Member unlocked: {}".format(member.get("username") or member.get("name") or ""),
             target_user=member.get("username") or "",
             before=data_service.sanitize_member_for_client(before_member) if before_member else None,
             after=data_service.sanitize_member_for_client(member) or member,
@@ -1797,12 +1921,12 @@ def enable_member_route(member_id):
         }
         member = data_service.enable_member(member_id)
         _audit_event(
-            action="User enable",
+            action="User enabled",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
             entity_name=member.get("username") or member.get("name") or "",
-            details="Member enabled",
+            details="Member enabled: {}".format(member.get("username") or member.get("name") or ""),
             target_user=member.get("username") or "",
             before=data_service.sanitize_member_for_client(before_member) if before_member else None,
             after=data_service.sanitize_member_for_client(member) or member,
@@ -1950,10 +2074,26 @@ def login():
         if member:
             status = str(member.get("status") or "active").strip().lower()
             if status == "locked":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account locked", target_user=username)
+                _audit_event(
+                    action="Login",
+                    outcome="denied",
+                    entity_type="session",
+                    entity_name="password",
+                    details="{} tried to log in. Account is locked.".format(username),
+                    target_user=username,
+                    actor_user=username,
+                )
                 return jsonify({"error": "Account locked. Contact admin."}), 403
             if status == "disabled":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account disabled", target_user=username)
+                _audit_event(
+                    action="Login",
+                    outcome="denied",
+                    entity_type="session",
+                    entity_name="password",
+                    details="{} tried to log in. Account is disabled.".format(username),
+                    target_user=username,
+                    actor_user=username,
+                )
                 return jsonify({"error": "Account disabled by admin."}), 403
 
         # Try authenticate
@@ -2019,9 +2159,37 @@ def login():
             except (TypeError, ValueError):
                 fa = 0
             remaining = max(0, 3 - fa)
+            attempt_n = min(max(fa, 1), 3)
+            _audit_event(
+                action="Login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="password",
+                details="Invalid password for {}: attempt {}/3".format(username, attempt_n),
+                target_user=username,
+                actor_user=username,
+                extra={"failedAttempts": fa, "remainingAttempts": remaining, "attempt": attempt_n},
+            )
             # If this attempt caused the account to become locked, show lockout immediately
             if status == "locked":
-                _audit_event(action="Login", outcome="denied", entity_type="session", entity_name="password", details="Account locked after failed attempts", target_user=username)
+                _audit_event(
+                    action="Login",
+                    outcome="denied",
+                    entity_type="session",
+                    entity_name="password",
+                    details="{} tried to log in. Account is locked.".format(username),
+                    target_user=username,
+                    actor_user=username,
+                )
+                _audit_event(
+                    action="User locked",
+                    outcome="denied",
+                    entity_type="member",
+                    entity_name=username,
+                    details="Account locked for {} after failed password attempts (3/3)".format(username),
+                    target_user=username,
+                    after={"username": username, "status": "locked", "failedAttempts": fa},
+                )
                 return jsonify({
                     "error": "Account locked. Contact admin.",
                     "remainingAttempts": 0
@@ -2034,6 +2202,65 @@ def login():
     except Exception as e:
         app.logger.exception("Error during login")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/auth/change-password", methods=["POST"])
+def change_own_password():
+    """Logged-in member changes own password after verifying the current password."""
+    try:
+        err = _require_auth()
+        if err:
+            return err
+        payload = request.get_json(force=True, silent=True) or {}
+        old_password = str(payload.get("oldPassword") or "")
+        new_password = str(payload.get("newPassword") or "")
+        if not old_password or not new_password:
+            return jsonify({"ok": False, "error": "oldPassword and newPassword are required"}), 400
+        member, cur = _resolve_session_member_record()
+        if not member:
+            if cur and str((cur.get("username") or "")).strip().upper() == data_service.FACTORY_USERNAME.upper():
+                return jsonify({"ok": False, "error": "Factory password cannot be changed from Profile."}), 400
+            return jsonify({"ok": False, "error": "Member not found"}), 404
+        username = str(member.get("username") or "").strip()
+        if not username:
+            return jsonify({"ok": False, "error": "Member not found"}), 404
+        auth_user = data_service.authenticate_user(username, old_password)
+        if not auth_user:
+            return jsonify({"ok": False, "error": "Current password is incorrect"}), 401
+        pwd_err = _password_strength_error(new_password)
+        if pwd_err:
+            return jsonify({"ok": False, "error": pwd_err}), 400
+        if old_password == new_password:
+            return jsonify({"ok": False, "error": "New password must be different from your current password."}), 400
+        member_id = int(member.get("id"))
+        data_service.set_member_password(member_id, new_password)
+        data_service.clear_mandatory_password_reset_flags(member_id)
+        updated = data_service.get_member(member_id) or member
+        data_service.refresh_current_user_from_member()
+        cur_after = data_service.get_current_user() or {}
+        sig = {
+            "mode": "self",
+            "username": (cur_after.get("username") or cur_after.get("name") or "").strip() or "--",
+            "role": (cur_after.get("role") or "").strip() or "--",
+        }
+        uname = updated.get("username") or updated.get("name") or ""
+        _audit_event(
+            action="Password changed",
+            outcome="success",
+            entity_type="member",
+            entity_id=member_id,
+            entity_name=uname,
+            details="Password changed (self, verified current password) for user: {}".format(uname),
+            target_user=uname,
+            signature=sig,
+        )
+        safe = data_service.sanitize_member_for_client(updated) or dict(updated)
+        return jsonify({"ok": True, "member": safe}), 200
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error changing own password")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/data/auth/password-expired-reset", methods=["POST"])
@@ -2157,10 +2384,28 @@ def login_biometric():
         username = member.get("username") or ""
         status = str(member.get("status") or "active").strip().lower()
         if status == "locked":
-            _audit_event(action="Biometric login", outcome="denied", entity_type="session", entity_name="biometric", details="Account locked", target_user=username, extra={"templateId": template_id})
+            _audit_event(
+                action="Biometric login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="biometric",
+                details="{} tried to log in. Account is locked.".format(username),
+                target_user=username,
+                actor_user=username,
+                extra={"templateId": template_id},
+            )
             return jsonify({"error": "Account locked. Contact admin."}), 403
         if status == "disabled":
-            _audit_event(action="Biometric login", outcome="denied", entity_type="session", entity_name="biometric", details="Account disabled", target_user=username, extra={"templateId": template_id})
+            _audit_event(
+                action="Biometric login",
+                outcome="denied",
+                entity_type="session",
+                entity_name="biometric",
+                details="{} tried to log in. Account is disabled.".format(username),
+                target_user=username,
+                actor_user=username,
+                extra={"templateId": template_id},
+            )
             return jsonify({"error": "Account disabled by admin."}), 403
 
         if not bool(member.get("biometricEnabled", True)):
@@ -2368,10 +2613,15 @@ def approval_verify():
             return jsonify({"ok": False, "error": "Unsupported verification method"}), 400
 
         verifier_role = str(verifier.get("role") or "").strip().lower()
+        report_type = _normalize_report_approval_type(payload.get("reportType") or payload.get("report_type"))
         if purpose == "report":
-            eligible = _approval_verifier_eligible_for_report(verifier)
+            eligible = _approval_verifier_eligible_for_report(verifier, report_type)
         elif purpose == "recipe":
             eligible = _approval_verifier_eligible_for_recipe(verifier)
+        elif purpose == "export":
+            eligible = rbac_service.member_has_internal(
+                _approval_verifier_member(verifier), "export-approve"
+            )
         else:
             eligible = _approval_verifier_eligible_for_user_admin(verifier)
         if not eligible:
@@ -2382,9 +2632,17 @@ def approval_verify():
                 entity_name=purpose,
                 details="Verifier lacks required permission",
                 target_user=verifier.get("username") or username,
-                extra={"purpose": purpose, "verifierRole": verifier_role, "method": method},
+                extra={
+                    "purpose": purpose,
+                    "reportType": report_type if purpose == "report" else None,
+                    "verifierRole": verifier_role,
+                    "method": method,
+                },
             )
-            return jsonify({"ok": False, "error": "Verifier does not have permission for this approval"}), 403
+            err = "Verifier does not have permission for this approval"
+            if purpose == "report" and report_type == "calibration":
+                err = "Verifier does not have calibration report approval permission"
+            return jsonify({"ok": False, "error": err}), 403
 
         if verifier_role != "factory":
             member = data_service.get_member_by_username(verifier.get("username") or username)
@@ -2402,7 +2660,9 @@ def approval_verify():
                     )
                     return jsonify({"ok": False, "error": "Verifier account is not active"}), 403
 
-        token, token_payload = _issue_approval_verify_token(verifier, purpose)
+        token, token_payload = _issue_approval_verify_token(
+            verifier, purpose, report_type if purpose == "report" else None
+        )
         vname = verifier.get("username") or username
         _audit_event(
             action="Approval verification",

@@ -53,6 +53,7 @@ var PERMISSION_CARD_KEYS = [
   'perm_validation_test',
   'perm_validation_report_approve',
   'perm_calibration',
+  'perm_calibration_report_approve',
   'perm_datetime',
   'perm_reports_view',
   'perm_audit_view',
@@ -81,6 +82,7 @@ var PERM_CARD_EXPAND = {
   perm_validation_test: ['validation-test', 'settings'],
   perm_validation_report_approve: ['validation-report-approve'],
   perm_calibration: ['calibration-menu', 'settings'],
+  perm_calibration_report_approve: ['calibration-report-approve'],
   perm_datetime: ['edit-datetime', 'settings'],
   perm_reports_view: ['reports-view'],
   perm_audit_view: ['audit-view'],
@@ -90,13 +92,14 @@ var PERM_CARD_EXPAND = {
 
 var PERMISSION_CARD_CATALOG = [
   { key: 'perm_test_access', label: 'Test access', description: 'Quick test (including step setup), recipe-based test runs, and configuring recipe steps.', accent: 0 },
-  { key: 'perm_test_report_approve', label: 'Test report approval', description: 'Approve pending test reports.', accent: 1 },
+  { key: 'perm_test_report_approve', label: 'Test report approval', description: 'Approve pending test and validation reports.', accent: 1 },
   { key: 'perm_recipe_manage', label: 'Manage recipes', description: 'Create and edit recipes.', accent: 2 },
   { key: 'perm_recipe_approve', label: 'Recipe approval', description: 'Participate in recipe approval / verification.', accent: 3 },
   { key: 'perm_profile_admin', label: 'Profile management', description: 'Add, disable, edit, lock, unlock, and change roles for profiles.', accent: 4 },
   { key: 'perm_validation_test', label: 'Validation test access', description: 'Run validation tests (Vacuum).', accent: 5 },
-  { key: 'perm_validation_report_approve', label: 'Validation report approval', description: 'Approve pending validation reports.', accent: 6 },
+  { key: 'perm_validation_report_approve', label: 'Validation report approval', description: 'Approve pending validation reports (also covered by Test report approval).', accent: 6 },
   { key: 'perm_calibration', label: 'Calibration access', description: 'Access calibration pages and run calibration procedures.', accent: 12 },
+  { key: 'perm_calibration_report_approve', label: 'Calibration report approval', description: 'Approve pending calibration reports only.', accent: 13 },
   { key: 'perm_datetime', label: 'Edit date and time', description: 'Change system date, time, and RTC.', accent: 7 },
   { key: 'perm_reports_view', label: 'View and print reports', description: 'Open, preview, and print reports.', accent: 8 },
   { key: 'perm_audit_view', label: 'View and print audit trails', description: 'View audit log and print audit trails (does not include test/validation reports list).', accent: 9 },
@@ -250,6 +253,18 @@ function normalizeFeatureOverrides(overrides) {
 }
 
 function expandAllowListToInternalKeys(allowList) {
+  var knownInternal = [
+    'recipe-test',
+    'validation-test',
+    'calibration-menu',
+    'test-report-approve',
+    'recipe-approve',
+    'validation-report-approve',
+    'calibration-report-approve',
+    'audit-view',
+    'export-usb',
+    'export-approve'
+  ];
   var internal = [];
   (allowList || []).forEach(function (k) {
     var key = String(k || '').trim();
@@ -261,7 +276,9 @@ function expandAllowListToInternalKeys(allowList) {
       });
       return;
     }
-    if (LEGACY_INTERNAL_KEYS.indexOf(key) !== -1 && internal.indexOf(key) === -1) internal.push(key);
+    if ((LEGACY_INTERNAL_KEYS.indexOf(key) !== -1 || knownInternal.indexOf(key) !== -1) && internal.indexOf(key) === -1) {
+      internal.push(key);
+    }
   });
   return internal;
 }
@@ -312,8 +329,9 @@ function getEffectiveRestriction(roleOrUser, featureKey) {
   var expanded = getExpandedInternalKeysForUser(userObj);
   if (expanded.indexOf(featureKey) === -1) return 'no-access';
 
+  // Permission cards are the source of truth for non-Factory users.
+  // Role table may only tighten to view-only; it must not revoke a granted card.
   var roleCap = getRestriction(role, featureKey);
-  if (roleCap === 'no-access') return 'no-access';
   if (roleCap === 'view-only') return 'view-only';
   return 'full-access';
 }
@@ -346,5 +364,9 @@ function checkNavigationAccess(screenId) {
     var mode = (typeof window !== 'undefined' && window.recipeListMode) ? window.recipeListMode : 'manage';
     featureKey = mode === 'load' ? 'recipe-test' : 'recipe-manage';
   }
-  return canAccess(window.currentUser || role, featureKey);
+  var user = window.currentUser || role;
+  if (screenId === 'reports' || screenId === 'report-preview') {
+    return canAccess(user, 'reports-view') || canAccess(user, 'audit-view');
+  }
+  return canAccess(user, featureKey);
 }

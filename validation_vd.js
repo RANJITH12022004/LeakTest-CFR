@@ -616,8 +616,8 @@
         var input = document.getElementById('cal-page-gauge-input');
         var applyBtn = document.getElementById('btn-calibration-apply');
         if (panel) {
-            if (enabled) panel.removeAttribute('hidden');
-            else panel.setAttribute('hidden', '');
+            panel.classList.toggle('is-enabled', !!enabled);
+            panel.removeAttribute('hidden');
         }
         if (input) {
             input.disabled = !enabled;
@@ -941,6 +941,14 @@
                 if (!res || res.ok !== true) {
                     return Promise.reject(new Error((res && res.error) ? String(res.error) : 'ESP did not acknowledge CALIBVALUE'));
                 }
+                // Same rule as test/validation: every START must end with STOP.
+                _setCalRunEl('cal-run-status', 'Stopping…');
+                return apiRequest(API_BASE + '/api/hardware/calibration/stop', { method: 'POST' });
+            })
+            .then(function (res) {
+                if (!res || res.ok !== true) {
+                    return Promise.reject(new Error((res && res.error) ? String(res.error) : 'ESP did not acknowledge STOP'));
+                }
                 if (typeof logAuditEvent === 'function') {
                     logAuditEvent(
                         'Calibration completed',
@@ -958,6 +966,7 @@
                     );
                 }
                 run.phase = 'done';
+                run._stopSent = true;
                 _clearVacuumCalTimers();
                 _closeVacuumCalEs();
                 _setCalRunEl('cal-run-status', 'Releasing pressure…');
@@ -980,7 +989,9 @@
                 if (backBtn) backBtn.textContent = 'Back';
                 _setCalRunEl('cal-run-status', 'Calibration failed');
                 showAppModal('Failed to apply calibration: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
-                apiRequest(API_BASE + '/api/hardware/calibration/stop', { method: 'POST' }).catch(function () {});
+                if (!run._stopSent) {
+                    apiRequest(API_BASE + '/api/hardware/calibration/stop', { method: 'POST' }).catch(function () {});
+                }
             });
     }
 

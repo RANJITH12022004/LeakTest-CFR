@@ -39,6 +39,8 @@ ALL_CARDS = [
     "perm_profile_admin",
     "perm_validation_test",
     "perm_validation_report_approve",
+    "perm_calibration",
+    "perm_calibration_report_approve",
     "perm_datetime",
     "perm_reports_view",
     "perm_audit_view",
@@ -1367,7 +1369,16 @@ def _probe_card(cl: Client, card: str, username: str, password: str) -> tuple[bo
         ok = r.status_code != 403
         return ok, f"HTTP {r.status_code} {(r.json() or {}).get('error') or ''}"
     if card == "perm_validation_report_approve":
-        tok = cl.approval_token(username, password, "validation")
+        tok = cl.approval_token(username, password, "report", {"reportType": "validation"})
+        return bool(tok), "token" if tok else "no token"
+    if card == "perm_calibration":
+        r = cl._request("POST", "/api/hardware/calibration/start", {"targetMmHg": 400})
+        if r.status_code == 200:
+            cl._request("POST", "/api/hardware/calibration/stop", {})
+        ok = r.status_code != 403
+        return ok, f"HTTP {r.status_code} {(r.json() or {}).get('error') or ''}"
+    if card == "perm_calibration_report_approve":
+        tok = cl.approval_token(username, password, "report", {"reportType": "calibration"})
         return bool(tok), "token" if tok else "no token"
     if card == "perm_datetime":
         before = cl._request("GET", "/api/get_datetime")

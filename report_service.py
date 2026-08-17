@@ -194,7 +194,7 @@ def _report_print_timestamp() -> Dict[str, str]:
     except Exception:
         now = datetime.now()
         return {
-            "printDate": now.strftime("%d-%m-%Y"),
+            "printDate": now.strftime("%d/%m/%Y"),
             "printTime": now.strftime("%H:%M:%S"),
         }
 
@@ -493,8 +493,8 @@ def _validation_dates_from_last(dt: datetime) -> Dict[str, str]:
     """Last validation date and next due exactly one calendar year later."""
     next_dt = _add_years(dt, 1)
     return {
-        "lastValidationDate": dt.strftime("%d-%m-%Y"),
-        "nextValidationDate": next_dt.strftime("%d-%m-%Y"),
+        "lastValidationDate": dt.strftime("%d/%m/%Y"),
+        "nextValidationDate": next_dt.strftime("%d/%m/%Y"),
     }
 
 
@@ -592,15 +592,40 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
     if report.get("type") == "validation":
         preview["validationSubtype"] = report.get("validationSubtype")
         preview["usp"] = report.get("usp")
-        preview["tapsMin"] = report.get("tapsMin")
-        preview["dropHeight"] = report.get("dropHeight")
-        preview["expectedTapCount"] = report.get("expectedTapCount")
-        preview["actualTapCount"] = report.get("actualTapCount")
+        preview["setVacuumMmHg"] = report.get("setVacuumMmHg")
+        preview["actualVacuumMmHg"] = report.get("actualVacuumMmHg")
+        preview["setDurationSec"] = report.get("setDurationSec")
+        preview["setDurationDisplay"] = report.get("setDurationDisplay")
+        preview["actualDurationSec"] = report.get("actualDurationSec")
+        preview["validationDurationSec"] = report.get("validationDurationSec")
+        if isinstance(td, dict):
+            for key in (
+                "setVacuumMmHg",
+                "actualVacuumMmHg",
+                "setDurationSec",
+                "setDurationDisplay",
+                "actualDurationSec",
+                "validationDurationSec",
+            ):
+                if preview.get(key) is None and td.get(key) is not None:
+                    preview[key] = td.get(key)
         runs = report.get("validationRuns")
         if not runs and isinstance(td, dict):
             runs = td.get("validationRuns")
         if runs:
             preview["validationRuns"] = runs
+            first = runs[0] if isinstance(runs[0], dict) else {}
+            for key in (
+                "setVacuumMmHg",
+                "actualVacuumMmHg",
+                "setDurationSec",
+                "setDurationDisplay",
+                "actualDurationSec",
+                "validationDurationSec",
+                "usp",
+            ):
+                if preview.get(key) is None and first.get(key) is not None:
+                    preview[key] = first.get(key)
     # Friability-style monospace preview: thermal slip for screen; A4 text for wide print/PDF.
     try:
         import print_service
@@ -640,6 +665,33 @@ def _format_report_ts(value: Any) -> str:
         return s
 
 
+def _format_report_ts_parts(value: Any) -> Dict[str, str]:
+    full = _format_report_ts(value)
+    if full == "--":
+        return {"date": "--", "time": "--"}
+    parts = full.split(" ", 1)
+    if len(parts) == 2:
+        return {"date": parts[0], "time": parts[1]}
+    return {"date": full, "time": "--"}
+
+
+def _normalize_display_date_slash(value: Any) -> str:
+    s = str(value or "").strip()
+    if not s or s.upper() in ("N/A", "--"):
+        return s or "N/A"
+    for sep in ("-", "/"):
+        bits = s[:10].split(sep)
+        if len(bits) == 3 and all(bits):
+            try:
+                d, m, y = int(bits[0]), int(bits[1]), int(bits[2])
+                if y < 100:
+                    y += 2000
+                return f"{d:02d}/{m:02d}/{y:04d}"
+            except (TypeError, ValueError):
+                pass
+    return s
+
+
 def _report_step_row_count(td: Dict[str, Any]) -> int:
     if not isinstance(td, dict):
         return 0
@@ -674,11 +726,38 @@ def _statistics_table_html(preview: Dict[str, Any], td: Dict[str, Any]) -> str:
     return "".join(rows) if rows else '<tr><td colspan="2">N/A</td></tr>'
 
 
+def _fmt_mmss_html(sec: Any) -> str:
+    try:
+        t = max(0, int(round(float(sec))))
+    except (TypeError, ValueError):
+        return "--"
+    return f"{t // 60:02d}:{t % 60:02d}"
+
+
 def _validation_details_table_html(preview: Dict[str, Any]) -> str:
     td = preview.get("testData") if isinstance(preview.get("testData"), dict) else preview
     runs = preview.get("validationRuns")
     if not runs and isinstance(td, dict):
         runs = td.get("validationRuns")
+    if (not runs) and isinstance(td, dict) and (
+        td.get("setVacuumMmHg") is not None
+        or preview.get("setVacuumMmHg") is not None
+        or td.get("actualVacuumMmHg") is not None
+    ):
+        runs = [
+            {
+                "usp": td.get("usp") or preview.get("usp") or "Vacuum",
+                "validationSubtype": td.get("validationSubtype") or preview.get("validationSubtype") or "distance",
+                "setVacuumMmHg": td.get("setVacuumMmHg", preview.get("setVacuumMmHg")),
+                "actualVacuumMmHg": td.get("actualVacuumMmHg", preview.get("actualVacuumMmHg")),
+                "setDurationSec": td.get("setDurationSec", preview.get("setDurationSec")),
+                "setDurationDisplay": td.get("setDurationDisplay", preview.get("setDurationDisplay")),
+                "actualDurationSec": td.get("actualDurationSec", preview.get("actualDurationSec")),
+                "validationDurationSec": td.get("validationDurationSec", preview.get("validationDurationSec")),
+                "status": td.get("status") or preview.get("status"),
+                "completedAt": td.get("completedAt") or preview.get("completedAt") or preview.get("createdAt"),
+            }
+        ]
     rows = []
     if isinstance(runs, list) and runs:
         for run in runs:
@@ -686,64 +765,34 @@ def _validation_details_table_html(preview: Dict[str, Any]) -> str:
                 continue
             usp = run.get("usp") or ("Pressure Decay" if run.get("validationSubtype") == "load" else "Vacuum Decay")
             date_str = _format_report_ts(run.get("completedAt") or preview.get("completedAt") or preview.get("createdAt"))
-            taps_min = run.get("tapsMin", "--")
-            drop_h = run.get("dropHeight", "--")
-            expected = run.get("expectedTapCount", "--")
-            tol = run.get("expectedTolerance")
-            expected_disp = (
-                "{} (+/- {})".format(expected, tol)
-                if tol is not None and expected not in (None, "", "--")
-                else expected
-            )
-            actual = run.get("actualTapCount", "--")
+            set_vac = run.get("setVacuumMmHg", "--")
+            act_vac = run.get("actualVacuumMmHg", "--")
+            set_time = run.get("setDurationDisplay")
+            if set_time in (None, ""):
+                sec = run.get("setDurationSec")
+                if sec is None:
+                    sec = run.get("validationDurationSec")
+                set_time = _fmt_mmss_html(sec) if sec is not None else "--"
+            act_sec = run.get("actualDurationSec")
+            act_time = _fmt_mmss_html(act_sec) if act_sec is not None else "--"
             status = run.get("status", "--")
             rows.append('<tr><th colspan="4" class="usp-hdr">{} validation</th></tr>'.format(_html_esc(usp)))
             rows.append('<tr><th>Date / Time</th><td colspan="3">{}</td></tr>'.format(_html_esc(date_str)))
             rows.append(
-                "<tr><th>USP</th><td>{}</td><th>mbar/s</th><td>{}</td></tr>".format(
-                    _html_esc(usp), _html_esc(taps_min)
+                "<tr><th>Method</th><td>{}</td><th>Status</th><td>{}</td></tr>".format(
+                    _html_esc(usp), _html_esc(status)
                 )
             )
             rows.append(
-                "<tr><th>Target Vacuum (mm)</th><td>{}</td><th>Status</th><td>{}</td></tr>".format(
-                    _html_esc(drop_h), _html_esc(status)
+                "<tr><th>Set Vacuum (mmHg)</th><td>{}</td><th>Actual Vacuum (mmHg)</th><td>{}</td></tr>".format(
+                    _html_esc(set_vac), _html_esc(act_vac)
                 )
             )
             rows.append(
-                "<tr><th>Expected Hold Time</th><td>{}</td><th>Actual Hold Time</th><td>{}</td></tr>".format(
-                    _html_esc(expected_disp), _html_esc(actual)
+                "<tr><th>Set Time</th><td>{}</td><th>Actual Time</th><td>{}</td></tr>".format(
+                    _html_esc(set_time), _html_esc(act_time)
                 )
             )
-    elif isinstance(td, dict):
-        date_str = _format_report_ts(td.get("completedAt") or preview.get("completedAt") or preview.get("createdAt"))
-        usp = td.get("usp") or preview.get("usp") or "--"
-        taps_min = td.get("tapsMin", preview.get("tapsMin", "--"))
-        drop_h = td.get("dropHeight", preview.get("dropHeight", "--"))
-        expected = td.get("expectedTapCount", preview.get("expectedTapCount", "--"))
-        tol = td.get("expectedTolerance", preview.get("expectedTolerance"))
-        expected_disp = (
-            "{} (+/- {})".format(expected, tol)
-            if tol is not None and expected not in (None, "", "--")
-            else expected
-        )
-        actual = td.get("actualTapCount", preview.get("actualTapCount", "--"))
-        status = td.get("status") or preview.get("status") or "--"
-        rows.append('<tr><th>Date / Time</th><td colspan="3">{}</td></tr>'.format(_html_esc(date_str)))
-        rows.append(
-            "<tr><th>USP</th><td>{}</td><th>mbar/s</th><td>{}</td></tr>".format(
-                _html_esc(usp), _html_esc(taps_min)
-            )
-        )
-        rows.append(
-            "<tr><th>Target Vacuum (mm)</th><td>{}</td><th>Status</th><td>{}</td></tr>".format(
-                _html_esc(drop_h), _html_esc(status)
-            )
-        )
-        rows.append(
-            "<tr><th>Expected Hold Time</th><td>{}</td><th>Actual Hold Time</th><td>{}</td></tr>".format(
-                _html_esc(expected_disp), _html_esc(actual)
-            )
-        )
     return "".join(rows) if rows else '<tr><td colspan="4">No validation data</td></tr>'
 
 
@@ -803,6 +852,10 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
 
     status_raw = str(td.get("status") or "").strip().lower()
     status_label = "Aborted" if status_raw == "aborted" else "Completed"
+    start_parts = _format_report_ts_parts(td.get("testStartTime") or preview.get("createdAt"))
+    end_parts = _format_report_ts_parts(
+        td.get("testEndTime") or preview.get("completedAt") or preview.get("createdAt")
+    )
     start_ts = _format_report_ts(td.get("testStartTime") or preview.get("createdAt"))
     end_ts = _format_report_ts(td.get("testEndTime") or preview.get("completedAt") or preview.get("createdAt"))
 
@@ -835,7 +888,9 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         appr_id = "N/A"
 
     pts = _report_print_timestamp()
-    pdate = (preview.get("reportDerived") or {}).get("printDate") or pts.get("printDate")
+    pdate = _normalize_display_date_slash(
+        (preview.get("reportDerived") or {}).get("printDate") or pts.get("printDate")
+    )
     ptime = (preview.get("reportDerived") or {}).get("printTime") or pts.get("printTime")
 
     if rtype == "validation":
@@ -919,14 +974,15 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
                 '<table class="ident">'
                 '<tr><th>Product Name</th><td>{prod}</td><th>Batch No</th><td>{batch}</td></tr>'
                 '<tr><th>Batch Size</th><td>{bsize}</td><th>Analysis Report No.</th><td>{ar}</td></tr>'
-                '<tr><th>Operator</th><td>{op}</td><th>Test Start</th><td>{start}</td></tr>'
-                '<tr><th>Completed Date / Time</th><td>{end}</td><th>Test Status</th><td>{status}</td></tr>'
+                '<tr><th>Operator</th><td>{op}</td><th>Test Status</th><td>{status}</td></tr>'
+                '<tr><th>Start Date</th><td>{start_date}</td><th>Start Time</th><td>{start_time}</td></tr>'
+                '<tr><th>Test Completed Date</th><td>{end_date}</td><th>Test Completed Time</th><td>{end_time}</td></tr>'
                 '</table>'
                 '<h3>TEST RESULT</h3>'
                 '<table class="ident">'
                 '<tr><th>Set Vacuum (mmHg)</th><td colspan="3">{set_vac}</td></tr>'
                 '<tr><th>Total Duration (mm:ss)</th><td>{total}</td><th>Hold Duration (mm:ss)</th><td>{hold}</td></tr>'
-                '<tr><th>Release Duration (mm:ss)</th><td>{release}</td><th>Result</th><td>{result}</td></tr>'
+                '<tr><th>Result</th><td colspan="3">{result}</td></tr>'
                 '</table>'
                 '{samples}'
                 '<div class="remarks"><strong>{remarks_heading}:</strong> {remarks}</div>'
@@ -937,13 +993,14 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
                 batch=_html_esc(recipe.get("batchNumber") or td.get("batchNumber")),
                 bsize=_html_esc(batch_size if batch_size not in (None, "") else "--"),
                 ar=_html_esc(ar_disp or "--"),
-                start=_html_esc(start_ts),
-                end=_html_esc(end_ts),
+                start_date=_html_esc(start_parts.get("date") or "--"),
+                start_time=_html_esc(start_parts.get("time") or "--"),
+                end_date=_html_esc(end_parts.get("date") or "--"),
+                end_time=_html_esc(end_parts.get("time") or "--"),
                 status=_html_esc(status_label),
                 set_vac=_html_esc(set_vac if set_vac not in (None, "") else "--"),
                 total=_html_esc(dur_fields.get("total") or "--"),
                 hold=_html_esc(dur_fields.get("hold") or "--"),
-                release=_html_esc(dur_fields.get("release") or "--"),
                 result=_html_esc(result_val),
                 samples=samples_html,
                 remarks=_html_esc(remarks),
@@ -979,8 +1036,8 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         ptime=_html_esc(ptime),
         loc=_html_esc(fs.get("companyLocation") or fs.get("location")),
         inst=_html_esc(fs.get("instrumentId")),
-        lastv=_html_esc(fs.get("lastValidationDate")),
-        nextv=_html_esc(fs.get("nextValidationDate")),
+        lastv=_html_esc(_normalize_display_date_slash(fs.get("lastValidationDate"))),
+        nextv=_html_esc(_normalize_display_date_slash(fs.get("nextValidationDate"))),
         val=val_section,
         test=test_section,
         op=_html_esc(preview.get("operatorName") or td.get("operatorName")),
