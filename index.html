@@ -7,7 +7,7 @@
     <meta name="viewport"
         content="width=1024, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Leak Test Apparatus</title>
-    <link rel="stylesheet" href="styles.css?v=42">
+    <link rel="stylesheet" href="styles.css?v=47">
 </head>
 
 <body>
@@ -101,6 +101,12 @@
             <div class="form-group">
                 <label for="load-recipe-batch-input">Batch Number <span class="required">*</span></label>
                 <input type="text" id="load-recipe-batch-input" class="input-field"
+                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+            </div>
+            <div class="form-group">
+                <label for="load-recipe-batch-size-input">Batch Size <span class="required">*</span></label>
+                <input type="number" id="load-recipe-batch-size-input" class="input-field" min="1" max="999"
+                    inputmode="numeric" value="1"
                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
             </div>
             <div class="form-group">
@@ -401,7 +407,7 @@
                     </div>
                 </div>
 
-                <!-- Password Expired Reset -->
+                <!-- Password Expired / Mandatory / Profile Change Reset -->
                 <div class="page" id="page-password-expired-reset">
                     <div class="add-member-container">
                         <h2 class="section-title" id="password-reset-page-title">Reset Expired Password</h2>
@@ -431,7 +437,8 @@
                             </div>
                         </div>
                         <div class="add-member-actions members-actions-row">
-                            <button class="btn btn-primary" onclick="submitPasswordResetFromLoginPage()">Update Password</button>
+                            <button type="button" class="btn btn-secondary" id="password-reset-cancel-btn" style="display: none;" onclick="cancelProfilePasswordChange()">Cancel</button>
+                            <button type="button" class="btn btn-primary" onclick="submitPasswordResetFromLoginPage()">Update Password</button>
                         </div>
                     </div>
                 </div>
@@ -947,16 +954,20 @@
                                         <td id="report-analysis-no"></td>
                                     </tr>
                                     <tr>
-                                        <th>REPORT/TEST START</th>
-                                        <td id="report-test-start"></td>
-                                        <th>TEST STATUS</th>
-                                        <td id="report-test-status"></td>
+                                        <th>START DATE</th>
+                                        <td id="report-start-date"></td>
+                                        <th>START TIME</th>
+                                        <td id="report-start-time"></td>
                                     </tr>
                                     <tr>
-                                        <th>COMPLETED DATE</th>
+                                        <th>TEST COMPLETED DATE</th>
                                         <td id="report-completed-date"></td>
-                                        <th>COMPLETED TIME</th>
+                                        <th>TEST COMPLETED TIME</th>
                                         <td id="report-completed-time"></td>
+                                    </tr>
+                                    <tr>
+                                        <th>TEST STATUS</th>
+                                        <td id="report-test-status" colspan="3"></td>
                                     </tr>
                                 </table>
                                 <h3>TEST RESULT</h3>
@@ -972,10 +983,8 @@
                                         <td id="report-hold-duration"></td>
                                     </tr>
                                     <tr>
-                                        <th>RELEASE DURATION (mm:ss)</th>
-                                        <td id="report-release-duration"></td>
                                         <th>RESULT</th>
-                                        <td id="report-leak-result"></td>
+                                        <td id="report-leak-result" colspan="3"></td>
                                     </tr>
                                 </table>
                                 <div id="report-vacuum-samples-wrap" style="display: none;">
@@ -1438,58 +1447,62 @@
                     </div>
                 </div>
 
-                <!-- Vacuum pressure calibration (manual start after gauge setup, gauge entry, report) -->
+                <!-- Vacuum pressure calibration (single non-scroll screen) -->
                 <div class="page" id="page-vacuum-calibration">
                     <div class="validation-type-page vacuum-calibration-page">
-                        <h2 class="section-title">Vacuum Pressure Calibration</h2>
-                        <p class="section-subtitle">Connect the external pressure gauge as described in the instruction manual and switch the gauge ON before starting calibration.</p>
-                        <div class="val-run-panel-inner val-run-vacuum-metrics">
-                            <div class="val-run-metric-card">
-                                <div class="val-run-metric-title">Vacuum (mmHg)</div>
-                                <div class="val-run-metric-row">
-                                    <div class="val-run-metric-block">
-                                        <span class="val-run-metric-label">Target</span>
-                                        <span class="val-run-metric-value" id="cal-set-vacuum">--</span>
+                        <div class="cal-screen-stack">
+                            <header class="cal-screen-header">
+                                <h2 class="section-title">Vacuum Pressure Calibration</h2>
+                                <p class="section-subtitle">Connect and switch ON the external gauge, then start. After target hold, enter actual pressure and Calibrate.</p>
+                            </header>
+                            <div class="val-run-panel-inner val-run-vacuum-metrics cal-metrics-row">
+                                <div class="val-run-metric-card">
+                                    <div class="val-run-metric-title">Vacuum (mmHg)</div>
+                                    <div class="val-run-metric-row">
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Target</span>
+                                            <span class="val-run-metric-value" id="cal-set-vacuum">--</span>
+                                        </div>
+                                        <div class="val-run-metric-sep">/</div>
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Live</span>
+                                            <span class="val-run-metric-value" id="cal-live-vacuum">--</span>
+                                        </div>
                                     </div>
-                                    <div class="val-run-metric-sep">/</div>
-                                    <div class="val-run-metric-block">
-                                        <span class="val-run-metric-label">Live</span>
-                                        <span class="val-run-metric-value" id="cal-live-vacuum">--</span>
+                                </div>
+                                <div class="val-run-metric-card">
+                                    <div class="val-run-metric-title">Timing</div>
+                                    <div class="val-run-metric-row">
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Release (s)</span>
+                                            <span class="val-run-metric-value" id="cal-release-time">--</span>
+                                        </div>
+                                        <div class="val-run-metric-sep">&nbsp;</div>
+                                        <div class="val-run-metric-block">
+                                            <span class="val-run-metric-label">Hold</span>
+                                            <span class="val-run-metric-value" id="cal-hold-elapsed">00:00</span>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-                            <div class="val-run-metric-card">
-                                <div class="val-run-metric-title">Release Time (s)</div>
-                                <div class="val-run-metric-row">
-                                    <div class="val-run-metric-block">
-                                        <span class="val-run-metric-label">RL_TM</span>
-                                        <span class="val-run-metric-value" id="cal-release-time">--</span>
-                                    </div>
-                                    <div class="val-run-metric-sep">&nbsp;</div>
-                                    <div class="val-run-metric-block">
-                                        <span class="val-run-metric-label">Hold at target</span>
-                                        <span class="val-run-metric-value" id="cal-hold-elapsed">00:00</span>
-                                    </div>
+                            <div class="validation-card calibration-status-card">
+                                <div class="validation-card-label">Status</div>
+                                <span class="validation-card-value" id="cal-run-status">Ready to start</span>
+                            </div>
+                            <div id="cal-gauge-entry-panel" class="validation-card calibration-gauge-entry-card cal-gauge-slot">
+                                <div class="validation-card-label">Actual pressure (external gauge)</div>
+                                <div class="calibration-gauge-entry-row">
+                                    <input type="number" id="cal-page-gauge-input" class="input-field cal-actual-vacuum-input"
+                                        min="1" max="650" step="0.1" placeholder="mmHg" inputmode="decimal" disabled
+                                        onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                    <button type="button" class="btn btn-primary" id="btn-calibration-apply" disabled
+                                        onclick="submitVacuumCalibrationGauge()">Calibrate</button>
                                 </div>
                             </div>
-                        </div>
-                        <div class="validation-card calibration-status-card">
-                            <div class="validation-card-label">Status</div>
-                            <span class="validation-card-value" id="cal-run-status">Ready to start</span>
-                        </div>
-                        <div id="cal-gauge-entry-panel" class="validation-card calibration-gauge-entry-card" hidden>
-                            <div class="validation-card-label">Actual pressure (external gauge)</div>
-                            <div class="calibration-gauge-entry-row">
-                                <input type="number" id="cal-page-gauge-input" class="input-field cal-actual-vacuum-input"
-                                    min="1" max="650" step="0.1" placeholder="mmHg" inputmode="decimal" disabled
-                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                                <button type="button" class="btn btn-primary" id="btn-calibration-apply" disabled
-                                    onclick="submitVacuumCalibrationGauge()">Calibrate</button>
+                            <div class="quick-test-actions calibration-actions">
+                                <button type="button" class="btn btn-primary" id="btn-calibration-start" onclick="confirmVacuumCalibration()">Start Calibration</button>
+                                <button type="button" class="btn btn-secondary" id="btn-calibration-back" onclick="abortVacuumCalibration()">Back</button>
                             </div>
-                        </div>
-                        <div class="quick-test-actions calibration-actions">
-                            <button type="button" class="btn btn-primary" id="btn-calibration-start" onclick="confirmVacuumCalibration()">Start Calibration</button>
-                            <button type="button" class="btn btn-secondary" id="btn-calibration-back" onclick="abortVacuumCalibration()">Back</button>
                         </div>
                     </div>
                 </div>
@@ -1671,13 +1684,15 @@
                                 </div>
                                 <div class="user-info-text">
                                     <h2 id="profile-name-display">Factory</h2>
+                                    <p class="profile-username-line">User ID: <span id="profile-username-display">--</span></p>
                                     <span id="profile-role-display" class="role-badge">Factory</span>
                                 </div>
                             </div>
                         </div>
                         <div class="profile-actions">
-                            <button class="btn btn-orange btn-block" onclick="goToPage('manage-members')">Manage Profiles</button>
-                            <button class="btn btn-blue btn-block" onclick="openAddMember()">Add Members</button>
+                            <button type="button" class="btn btn-blue btn-block" id="btn-profile-change-password" onclick="openProfilePasswordChange()">Change Password</button>
+                            <button type="button" class="btn btn-orange btn-block" onclick="goToPage('manage-members')">Manage Profiles</button>
+                            <button type="button" class="btn btn-blue btn-block" onclick="openAddMember()">Add Members</button>
                         </div>
                     </div>
                 </div>
@@ -2136,10 +2151,10 @@
     </div>
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=3"></script>
-    <script src="rbac.js?v=6"></script>
-    <script src="script.js?v=77"></script>
+    <script src="rbac.js?v=8"></script>
+    <script src="script.js?v=85"></script>
     <script src="leaktest_patch.js?v=2"></script>
-    <script src="validation_vd.js?v=17"></script>
+    <script src="validation_vd.js?v=19"></script>
 </body>
 
 </html>

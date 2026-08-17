@@ -177,7 +177,7 @@ def register_members_routes(bp, kiosk):
                 audit_event(
                     kiosk,
                     user,
-                    action="User disable",
+                    action="User disabled",
                     outcome="denied",
                     entity_type="member",
                     entity_id=member_id,
@@ -198,7 +198,7 @@ def register_members_routes(bp, kiosk):
                         audit_event(
                             kiosk,
                             user,
-                            action="User disable",
+                            action="User disabled",
                             outcome="failed",
                             entity_type="member",
                             entity_id=member_id,
@@ -228,7 +228,7 @@ def register_members_routes(bp, kiosk):
             audit_event(
                 kiosk,
                 user,
-                action="User disable",
+                action="User disabled",
                 outcome="success",
                 entity_type="member",
                 entity_id=member_id,
@@ -260,7 +260,7 @@ def register_members_routes(bp, kiosk):
             audit_event(
                 kiosk,
                 user,
-                action="User unlock",
+                action="User unlocked",
                 outcome="success",
                 entity_type="member",
                 entity_id=member_id,
@@ -288,7 +288,7 @@ def register_members_routes(bp, kiosk):
             audit_event(
                 kiosk,
                 user,
-                action="User enable",
+                action="User enabled",
                 outcome="success",
                 entity_type="member",
                 entity_id=member_id,
@@ -428,6 +428,9 @@ def register_members_routes(bp, kiosk):
                 return jsonify({"ok": False, "error": "Unsupported verification method"}), 400
 
             verifier_role = str(verifier.get("role") or "").strip().lower()
+            report_type = str(payload.get("reportType") or payload.get("report_type") or "test").strip().lower()
+            if report_type not in ("test", "validation", "calibration"):
+                report_type = "test"
             eligible_fn = getattr(kiosk, "_approval_verifier_eligible_for_recipe", None)
             if purpose == "recipe":
                 if eligible_fn:
@@ -436,9 +439,23 @@ def register_members_routes(bp, kiosk):
                     eligible = auth_store._verifier_payload_has_internal(verifier, "recipe-approve")
             elif purpose == "report":
                 fn = getattr(kiosk, "_approval_verifier_eligible_for_report", None)
-                eligible = fn(verifier) if fn else auth_store._verifier_payload_has_internal(
-                    verifier, "test-report-approve"
-                )
+                if fn:
+                    eligible = fn(verifier, report_type)
+                else:
+                    if report_type == "calibration":
+                        eligible = auth_store._verifier_payload_has_internal(
+                            verifier, "calibration-report-approve"
+                        )
+                    elif report_type == "validation":
+                        eligible = auth_store._verifier_payload_has_internal(
+                            verifier, "test-report-approve"
+                        ) or auth_store._verifier_payload_has_internal(
+                            verifier, "validation-report-approve"
+                        )
+                    else:
+                        eligible = auth_store._verifier_payload_has_internal(
+                            verifier, "test-report-approve"
+                        )
             elif purpose == "export":
                 eligible = auth_store._verifier_payload_has_internal(verifier, "export-approve")
             else:
@@ -481,7 +498,9 @@ def register_members_routes(bp, kiosk):
                         )
                         return jsonify({"ok": False, "error": "Verifier account is not active"}), 403
 
-            token, token_payload = auth_store.issue_approval_verify_token(verifier, purpose)
+            token, token_payload = auth_store.issue_approval_verify_token(
+                verifier, purpose, report_type if purpose == "report" else None
+            )
             vname = verifier.get("username") or username
             audit_event(
                 kiosk,

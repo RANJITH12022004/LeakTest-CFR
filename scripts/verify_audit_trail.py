@@ -31,30 +31,34 @@ AUDIT_DB_DIR = Path(os.environ.get("AUDIT_DB_DIR", "/media/usb_internal/db"))
 # Actions exercised in this run (simulates UI button flows via audit-log/event + server routes)
 EXPECTED_ACTIONS = [
     "Login",
-    "Entered screen",
-    "Exited screen",
     "Opened Quick Test",
+    "Opened Load Recipe",
+    "Opened Validation",
+    "Opened Calibration",
+    "Opened Settings",
     "Quick test started",
     "Test started",
     "Test finished",
     "Test aborted",
     "Test auto-aborted",
+    "Loaded recipe",
     "holder error",
     "check adaptor and holder",
-    "Opened Load Recipe",
-    "Loaded recipe",
     "Validation started",
     "Validation finished",
     "Validation aborted",
-    "Entered USP 1 validation",
+    "User locked",
+    "User unlocked",
+    "User disabled",
+    "User enabled",
+    "User permissions updated",
+    "Recipe created",
+    "Recipe edited",
     "Logout",
     "Logout (inactivity timeout)",
     "Power interruption",
     "Power interruption logout",
     "Report aborted (power loss)",
-    "User disabled",
-    "User enabled",
-    "User unlocked",
     "Desktop login",
     "Test performed",
     "Adapter check error",
@@ -189,14 +193,10 @@ def actions_in(entries: list) -> set:
 
 def simulate_ui_flow(c: Client, res: RunResult) -> None:
     """Mirror script.js logAuditEvent calls for navigation + test/validation lifecycle."""
-    c.audit_event("Entered screen", "Home", eventType="navigation")
     c.audit_event("Opened Quick Test", "Quick Test screen opened", eventType="navigation")
-    c.audit_event("Entered screen", "Quick Test", eventType="navigation")
     c.audit_event("Quick test started", "Quick Test, USP 1, 10 step(s)", eventType="lifecycle", extra={"productName": "Quick Test"})
-    c.audit_event("Entered screen", "Test Run", eventType="navigation")
     c.audit_event("Test started", "Quick Test, USP 1, 10 step(s)", eventType="lifecycle")
     c.audit_event("Test finished", "Test run completed, 3 step(s) recorded", eventType="lifecycle", extra={"completedSteps": 3})
-    c.audit_event("Exited screen", "Test Run", eventType="navigation")
     c.audit_event("Opened Load Recipe", "Load Recipe list opened", eventType="navigation")
     c.audit_event(
         "Loaded recipe",
@@ -215,7 +215,9 @@ def simulate_ui_flow(c: Client, res: RunResult) -> None:
         entityName="adapter",
         extra={"expected": "usp1", "detected": "usp2"},
     )
-    c.audit_event("Entered USP 1 validation", "USP 1 validation screen", eventType="navigation")
+    c.audit_event("Opened Validation", "Validation menu opened", eventType="navigation")
+    c.audit_event("Opened Calibration", "Calibration menu opened", eventType="navigation")
+    c.audit_event("Opened Settings", "Settings opened", eventType="navigation")
     c.audit_event("Validation started", "USP 1 validation run started", entityType="validation")
     c.audit_event("Validation finished", "USP 1 validation: Pass", entityType="validation", extra={"status": "Pass"})
     c.audit_event("Validation aborted", "USP 1 validation aborted by user", entityType="validation")
@@ -440,6 +442,103 @@ def verify_user_disabled_audit(c: Client, res: RunResult, since_ms: int) -> None
     c.logout("user")
 
 
+def verify_disabled_locked_login_attempt_audit(c: Client, res: RunResult) -> None:
+    """Disabled/locked login denials must show attempted user ID in User + Details."""
+    import data_service
+
+    target = WRONG_PASS_USER
+    config = {
+        "STORAGE_DIR": str(STORAGE_DIR),
+        "REPORTS_DIR": str(REPORTS_DIR),
+        "AUDIT_DB_DIR": str(AUDIT_DB_DIR),
+    }
+    data_service.init(config)
+
+    try:
+        c.login(FACTORY_USER, FACTORY_PASS)
+        _unlock_member(c, target)
+        c.logout("user")
+    except Exception as exc:
+        res.note_warn(f"factory prep for denied-login audit: {exc}")
+
+    member = data_service.get_member_by_username(target)
+    if not member:
+        res.note_warn(f"{target} not found — skip disabled/locked login attempt audit")
+        return
+    mid = int(member["id"])
+
+    # --- Disabled account login attempt (status flip; avoid DELETE biometric side effects) ---
+    try:
+        data_service.unlock_member(mid)
+    except Exception:
+        pass
+    data_service.disable_member(mid)
+    since_disabled = ts_ms() - 60000
+    denied = c._request("POST", "/api/data/auth/login", {"username": target, "password": WRONG_PASS})
+    if denied.status_code != 403:
+        res.fail(f"disabled login expected 403, got HTTP {denied.status_code}")
+    time.sleep(0.5)
+    try:
+        c.login(FACTORY_USER, FACTORY_PASS)
+    except Exception as exc:
+        res.fail(f"factory login to read disabled-login audit: {exc}")
+        data_service.enable_member(mid)
+        return
+    rows = [
+        e for e in entries_since(c.audit_log(), since_disabled)
+        if e.get("action") == "Login" and "Account is disabled" in str(e.get("details") or "")
+    ]
+    if not rows:
+        res.fail("missing Login audit for disabled account attempt")
+    else:
+        row = rows[-1]
+        details = str(row.get("details") or "")
+        user_col = str(row.get("user") or "")
+        needle = "{} tried to log in. Account is disabled.".format(target)
+        if needle not in details:
+            res.fail(f"disabled login details expected '{needle}', got '{details}'")
+        elif user_col.upper() != target.upper():
+            res.fail(f"disabled login User column expected '{target}', got '{user_col}'")
+        else:
+            res.ok("disabled login attempt audit shows user ID + tried to log in")
+    data_service.enable_member(mid)
+    data_service.unlock_member(mid)
+    c.logout("user")
+
+    # --- Locked account login attempt (3 wrong passwords then login while locked) ---
+    since_locked = ts_ms() - 60000
+    for _ in range(3):
+        c._request("POST", "/api/data/auth/login", {"username": target, "password": WRONG_PASS})
+    locked_try = c._request("POST", "/api/data/auth/login", {"username": target, "password": WRONG_PASS})
+    if locked_try.status_code != 403:
+        res.note_warn(f"locked login expected 403 after lockout, got HTTP {locked_try.status_code}")
+    time.sleep(0.5)
+    try:
+        c.login(FACTORY_USER, FACTORY_PASS)
+    except Exception as exc:
+        res.fail(f"factory login to read locked-login audit: {exc}")
+        return
+    locked_rows = [
+        e for e in entries_since(c.audit_log(), since_locked)
+        if e.get("action") == "Login" and "Account is locked" in str(e.get("details") or "")
+    ]
+    if not locked_rows:
+        res.fail("missing Login audit for locked account attempt")
+    else:
+        row = locked_rows[-1]
+        details = str(row.get("details") or "")
+        user_col = str(row.get("user") or "")
+        needle = "{} tried to log in. Account is locked.".format(target)
+        if needle not in details:
+            res.fail(f"locked login details expected '{needle}', got '{details}'")
+        elif user_col.upper() != target.upper():
+            res.fail(f"locked login User column expected '{target}', got '{user_col}'")
+        else:
+            res.ok("locked login attempt audit shows user ID + tried to log in")
+    _unlock_member(c, target)
+    c.logout("user")
+
+
 def verify_hardware_routes(c: Client, res: RunResult, since_ms: int) -> None:
     c.login(TEST_USER, TEST_PASS)
     check = c.adapter_check()
@@ -548,6 +647,7 @@ def main() -> int:
 
     disable_since = ts_ms() - 1000
     verify_user_disabled_audit(c, res, disable_since)
+    verify_disabled_locked_login_attempt_audit(c, res)
 
     factory_since = ts_ms() - 1000
     verify_factory_suppression(c, res, factory_since)

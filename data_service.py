@@ -935,13 +935,14 @@ def record_successful_login(username: str) -> Optional[Dict[str, Any]]:
 
 
 def unlock_member(member_id: int) -> Dict[str, Any]:
-    """Set member status to active. Preserves failedAttempts."""
+    """Set member status to active and clear failed login attempts."""
     m = get_member(member_id)
     if not m:
         raise ValueError("Member not found")
     if str(m.get("username", "")).strip().upper() == FACTORY_USERNAME.upper():
         raise ValueError("The factory user cannot be modified.")
     m["status"] = "active"
+    m["failedAttempts"] = 0
     _save_member_record(m)
     return m
 
