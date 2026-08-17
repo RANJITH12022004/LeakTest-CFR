@@ -43,6 +43,15 @@ _sim_cycle_index = 0
 _sim_elapsed_in_cycle = 0.0
 _sim_pressure_mbar = 0.0
 
+# Pi owns run lifecycle + live pressure; ESP is on/off + pressure only.
+_cmd_lock = threading.Lock()
+_pressure_poll_lock = threading.Lock()
+_pressure_poll_active = False
+_pressure_poll_thread = None
+_pressure_poll_interval_sec = 1.0
+_last_pressure_mmhg: Optional[int] = None
+_run_active = False
+
 
 def _simulate_enabled() -> bool:
     # Production default is hardware. Set LEAK_TEST_SIMULATE=1 only for development.
@@ -87,8 +96,9 @@ def classify_line(line: str) -> str:
         return "completed"
     if s in ("stopped", "stop_ack"):
         return "stopped"
+    # ESP may emit IDLE on its own timer; Pi owns hold timing, so treat as info.
     if s in ("idle",):
-        return "completed"
+        return "info"
     if s in ("ready",):
         return "info"
     if s == "target_reached" or s.startswith("target_reached"):
@@ -118,6 +128,120 @@ def classify_line(line: str) -> str:
     if s.isdigit():
         return "progress"
     return "info"
+
+
+def _is_unsolicited_stream_line(line: str) -> bool:
+    """Auto ESP frames that must not be treated as command ACKs."""
+    s = normalize_line(line).lower().lstrip("#")
+    if not s:
+        return True
+    if s.startswith("su:") or s.startswith("vacuum:") or s.startswith("elapsed:"):
+        return True
+    if s in ("ready", "idle", "target_reached") or s.startswith("target_reached"):
+        return True
+    if s.startswith("target") and "reached" in s:
+        return True
+    return False
+
+
+def _ack_matches(cmd: str, line: str) -> bool:
+    """True when RX line is the expected ACK for the TX command."""
+    c = normalize_line(cmd).lower().lstrip("#")
+    s = normalize_line(line).lower().lstrip("#")
+    if not c or not s:
+        return False
+    if s == "error" or s.startswith("error:"):
+        return True
+    if c.startswith("start_calib"):
+        return "start_calib_ack" in s
+    if c.startswith("start:"):
+        return s.startswith("start_ack")
+    if c.startswith("stop"):
+        return s.startswith("stop_ack") or s == "stopped"
+    if c.startswith("get_pressure"):
+        return s.startswith("pressure:")
+    if c.startswith("calibvalue:"):
+        return "calibvalue_ack" in s
+    if c.startswith("rl_tm:"):
+        return "rl_tm_ack" in s
+    if c.startswith("calib_clear"):
+        return "calib_clear_ack" in s
+    return s == "ok"
+
+
+def _parse_pressure_mmhg(line: str) -> Optional[int]:
+    s = normalize_line(line).lower().lstrip("#")
+    for prefix in ("pressure:", "su:", "vacuum:"):
+        if s.startswith(prefix):
+            raw = s.split(":", 1)[1].strip().split(",")[0].strip()
+            try:
+                return int(round(abs(float(raw))))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _note_pressure_from_line(line: str) -> Optional[int]:
+    global _last_pressure_mmhg
+    val = _parse_pressure_mmhg(line)
+    if val is not None:
+        _last_pressure_mmhg = val
+    return val
+
+
+def _broadcast_pressure_mmhg(value: int):
+    global _last_pressure_mmhg
+    try:
+        v = int(round(abs(float(value))))
+    except (TypeError, ValueError):
+        return
+    _last_pressure_mmhg = v
+    _broadcast_line(f"#SU:{v:03d}*")
+
+
+def start_pressure_poll(interval_sec: float = 1.0):
+    """Pi-driven live pressure: poll #GET_PRESSURE ~1Hz and push #SU to SSE."""
+    global _pressure_poll_active, _pressure_poll_thread, _pressure_poll_interval_sec, _run_active
+    _run_active = True
+    _pressure_poll_interval_sec = max(0.5, float(interval_sec or 1.0))
+    with _pressure_poll_lock:
+        if _pressure_poll_active and _pressure_poll_thread and _pressure_poll_thread.is_alive():
+            return
+        _pressure_poll_active = True
+        _pressure_poll_thread = threading.Thread(target=_pressure_poll_loop, daemon=True)
+        _pressure_poll_thread.start()
+        if _logger:
+            _logger.info("[HARDWARE] Pressure poll started (%.1fs)", _pressure_poll_interval_sec)
+
+
+def stop_pressure_poll():
+    global _pressure_poll_active, _run_active
+    _run_active = False
+    with _pressure_poll_lock:
+        _pressure_poll_active = False
+
+
+def _pressure_poll_loop():
+    global _pressure_poll_active
+    while True:
+        with _pressure_poll_lock:
+            active = _pressure_poll_active
+            interval = _pressure_poll_interval_sec
+        if not active:
+            break
+        if _simulate_enabled():
+            time.sleep(interval)
+            continue
+        try:
+            result = send_command("#GET_PRESSURE*", timeout=COMMAND_TIMEOUT, max_retries=1)
+            if result.get("ok"):
+                val = _parse_pressure_mmhg(result.get("response") or result.get("normalized") or "")
+                if val is not None:
+                    _broadcast_pressure_mmhg(val)
+        except Exception as e:
+            if _logger:
+                _logger.debug("[HARDWARE] pressure poll: %s", e)
+        time.sleep(interval)
 
 
 def init(app, config):
@@ -187,6 +311,7 @@ def _open_esp_serial():
 
 
 def _broadcast_line(line: str):
+    _note_pressure_from_line(line)
     _append_uart_log("RX_STREAM", line)
     try:
         line_q.put_nowait(line)
@@ -263,6 +388,7 @@ def _simulation_loop():
 
 
 def send_command(cmd: str, timeout=COMMAND_TIMEOUT, max_retries=MAX_RETRIES, ignore_numeric_response=False):
+    """TX command and wait for matching ACK. Reader loop is the only serial reader."""
     global esp_ser
     if not cmd:
         return {"ok": False, "error": "Empty command"}
@@ -272,62 +398,68 @@ def send_command(cmd: str, timeout=COMMAND_TIMEOUT, max_retries=MAX_RETRIES, ign
     _append_uart_log("TX", cmd)
     if _simulate_enabled() or not serial:
         return {"ok": True, "response": "ok", "normalized": "ok", "kind": "ok", "cmd": cmd}
-    for attempt in range(max_retries):
-        if not esp_ser or not getattr(esp_ser, "is_open", False):
+
+    with _cmd_lock:
+        for attempt in range(max_retries):
+            if not esp_ser or not getattr(esp_ser, "is_open", False):
+                try:
+                    _open_esp_serial()
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        return {"ok": False, "error": str(e), "cmd": cmd}
+                    time.sleep(0.2)
+                    continue
             try:
-                _open_esp_serial()
+                # Drop stale queued lines so we wait for a fresh ACK for this TX.
+                drain_queue(max_lines=200)
+                with ser_lock:
+                    if esp_ser and esp_ser.is_open:
+                        # Do not reset_input_buffer — that discards live #SU frames.
+                        esp_ser.write(cmd.encode("ascii", errors="replace"))
+                        esp_ser.flush()
+                deadline = time.time() + (timeout or COMMAND_TIMEOUT)
+                while time.time() < deadline:
+                    try:
+                        line = line_q.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+                    if not line or not str(line).strip():
+                        continue
+                    raw = str(line).strip()
+                    if ignore_numeric_response and normalize_line(raw).isdigit():
+                        continue
+                    if _is_unsolicited_stream_line(raw) and not _ack_matches(cmd, raw):
+                        # Already pushed to SSE by reader; keep waiting for ACK.
+                        continue
+                    if not _ack_matches(cmd, raw):
+                        continue
+                    _append_uart_log("RX", raw)
+                    _note_pressure_from_line(raw)
+                    norm = normalize_line(raw)
+                    kind = classify_line(raw)
+                    ok = kind != "error"
+                    return {
+                        "ok": ok,
+                        "response": raw,
+                        "normalized": norm,
+                        "kind": kind,
+                        "cmd": cmd,
+                    }
+                if timeout is not None:
+                    return {"ok": False, "error": "Timeout", "cmd": cmd}
             except Exception as e:
                 if attempt == max_retries - 1:
                     return {"ok": False, "error": str(e), "cmd": cmd}
-                time.sleep(0.2)
-                continue
-        try:
-            drain_queue(max_lines=200)
-            with ser_lock:
-                if esp_ser and esp_ser.is_open:
-                    esp_ser.reset_input_buffer()
-                    esp_ser.write((cmd + "\n").encode("ascii", errors="replace"))
-                    esp_ser.flush()
-            deadline = time.time() + (timeout or COMMAND_TIMEOUT)
-            while time.time() < deadline:
                 try:
-                    line = line_q.get(timeout=0.1)
-                    if line and line.strip():
-                        raw = line.strip()
-                        if ignore_numeric_response and normalize_line(raw).isdigit():
-                            continue
-                        _append_uart_log("RX", raw)
-                        norm = normalize_line(raw)
-                        return {"ok": True, "response": raw, "normalized": norm, "kind": classify_line(raw), "cmd": cmd}
-                except queue.Empty:
+                    with ser_lock:
+                        if esp_ser:
+                            esp_ser.close()
+                            esp_ser = None
+                    _open_esp_serial()
+                except Exception:
                     pass
-                with ser_lock:
-                    if esp_ser and esp_ser.is_open and esp_ser.in_waiting > 0:
-                        raw = esp_ser.readline()
-                        if raw:
-                            line = raw.decode("ascii", errors="ignore").strip()
-                            if line:
-                                if ignore_numeric_response and normalize_line(line).isdigit():
-                                    continue
-                                _append_uart_log("RX", line)
-                                norm = normalize_line(line)
-                                return {"ok": True, "response": line, "normalized": norm, "kind": classify_line(line), "cmd": cmd}
-                time.sleep(0.05)
-            if timeout is not None:
-                return {"ok": False, "error": "Timeout", "cmd": cmd}
-        except Exception as e:
-            if attempt == max_retries - 1:
-                return {"ok": False, "error": str(e), "cmd": cmd}
-            try:
-                with ser_lock:
-                    if esp_ser:
-                        esp_ser.close()
-                        esp_ser = None
-                _open_esp_serial()
-            except Exception:
-                pass
-            time.sleep(0.2)
-    return {"ok": False, "error": "Max retries exceeded", "cmd": cmd}
+                time.sleep(0.2)
+        return {"ok": False, "error": "Max retries exceeded", "cmd": cmd}
 
 
 def _reader_loop():
@@ -427,12 +559,13 @@ def _extract_vacuum_mmhg_from_params(params: Dict[str, Any]) -> Optional[int]:
 
 
 def _cmd_start_vacuum_target(vacuum_mmhg: int):
-    """Send #START:NNN* and expect #START_ACK:NNN* from ESP."""
+    """Send #START:NNN* and expect #START_ACK:NNN* from ESP. Pi owns hold timer after that."""
     vac = _esp_mmhg_value(vacuum_mmhg)
     cmd = f"#START:{vac:03d}*"
     result = send_command(cmd, timeout=TEST_COMMAND_TIMEOUT)
     if result.get("ok"):
         result["targetVacuumMmHg"] = vac
+        start_pressure_poll(1.0)
         norm = normalize_line(result.get("normalized") or result.get("response") or "").lower().lstrip("#")
         if "start_ack" not in norm and "error" not in norm:
             result["ack"] = norm or "START_ACK"
@@ -464,12 +597,14 @@ def cmd_start_test(params: Dict[str, Any]):
                 daemon=True,
             )
             _sim_thread.start()
+        start_pressure_poll(1.0)
         return {"ok": True, "simulated": True, "targetVacuumMmHg": vac, "holdSeconds": hold_sec}
     return _cmd_start_vacuum_target(vac)
 
 
 def cmd_stop():
     global _sim_active
+    stop_pressure_poll()
     if _simulate_enabled():
         with _sim_lock:
             _sim_active = False
@@ -484,50 +619,55 @@ def cmd_status():
             return {
                 "ok": True,
                 "simulated": True,
-                "active": _sim_active,
-                "pressureMmHg": max(0, int(round(-_sim_pressure_mbar))),
+                "active": _sim_active or _run_active,
+                "pressureMmHg": _last_pressure_mmhg if _last_pressure_mmhg is not None else max(0, int(round(-_sim_pressure_mbar))),
                 "cycleIndex": _sim_cycle_index,
             }
+    # Prefer cached live value while a run is polling; otherwise query ESP once.
+    if _run_active and _last_pressure_mmhg is not None:
+        return {
+            "ok": True,
+            "active": True,
+            "pressureMmHg": _last_pressure_mmhg,
+            "source": "cache",
+        }
     result = send_command("#GET_PRESSURE*", timeout=COMMAND_TIMEOUT)
     if result.get("ok"):
-        norm = normalize_line(result.get("normalized") or result.get("response") or "").lower().lstrip("#")
-        if norm.startswith("pressure:"):
-            result["pressureMmHg"] = norm.split(":", 1)[1].strip()
+        val = _parse_pressure_mmhg(result.get("response") or result.get("normalized") or "")
+        if val is not None:
+            result["pressureMmHg"] = val
+            _broadcast_pressure_mmhg(val)
+    result["active"] = bool(_run_active)
     return result
 
 
 def _vacuum_validation_loop(vacuum_mmhg: float, duration_sec: float):
-    """Evacuate to target, broadcast #SU, then #TARGET_REACHED when at target."""
-    global _sim_active
+    """Evacuate to target and keep streaming #SU until Pi sends stop (Pi owns hold timer)."""
+    global _sim_active, _sim_pressure_mbar
     target = max(1.0, float(vacuum_mmhg))
-    duration = max(1.0, float(duration_sec))
     current = 0.0
-    hold_elapsed = 0.0
     tick = 1.0
-    evac_rate = target / max(3.0, duration * 0.3)
+    evac_rate = target / 5.0
     phase = "evacuate"
     target_announced = False
+    _ = duration_sec  # hold duration is owned by the Pi/frontend timer
 
     while _sim_active:
         if phase == "evacuate":
             current = min(target, current + evac_rate * tick)
+            _sim_pressure_mbar = -current
             _broadcast_line(f"#SU:{int(round(current)):03d}*")
             if current >= target and not target_announced:
                 _broadcast_line("#TARGET_REACHED*")
                 target_announced = True
                 phase = "hold"
-                hold_elapsed = 0.0
         else:
             current += random.uniform(-0.5, 0.8)
             current = max(target * 0.95, min(target * 1.02, current))
-            hold_elapsed += tick
+            _sim_pressure_mbar = -current
             _broadcast_line(f"#SU:{int(round(current)):03d}*")
-            if hold_elapsed >= duration:
-                break
         time.sleep(tick)
 
-    if _sim_active:
-        _broadcast_line("#IDLE*")
     _sim_active = False
 
 
@@ -552,6 +692,7 @@ def cmd_start_vacuum_validation(vacuum_mmhg: float, duration_sec: float):
                 daemon=True,
             )
             _sim_thread.start()
+        start_pressure_poll(1.0)
         return {"ok": True, "simulated": True, "vacuumMmHg": vac, "durationSec": dur}
     result = _cmd_start_vacuum_target(vac)
     if result.get("ok"):
@@ -569,8 +710,8 @@ def cmd_start_validation(mode: str):
 
 
 def _calibration_sim_loop(target_mmhg: float):
-    """Simulate evacuation to calibration target; broadcast #SU and #TARGET_REACHED."""
-    global _sim_active
+    """Simulate evacuation; stream #SU until Pi stops. Hold timer is owned by the UI."""
+    global _sim_active, _sim_pressure_mbar
     target = max(1.0, float(target_mmhg))
     current = 0.0
     tick = 1.0
@@ -578,6 +719,7 @@ def _calibration_sim_loop(target_mmhg: float):
     target_announced = False
     while _sim_active and current < target:
         current = min(target, current + evac_rate * tick)
+        _sim_pressure_mbar = -current
         _broadcast_line(f"#SU:{int(round(current)):03d}*")
         time.sleep(tick)
     if _sim_active and not target_announced:
@@ -586,12 +728,13 @@ def _calibration_sim_loop(target_mmhg: float):
     while _sim_active:
         current += random.uniform(-0.4, 0.4)
         current = max(target * 0.98, min(target * 1.02, current))
+        _sim_pressure_mbar = -current
         _broadcast_line(f"#SU:{int(round(current)):03d}*")
         time.sleep(tick)
 
 
 def cmd_start_calibration(target_mmhg: float = 400.0):
-    """Start vacuum pressure calibration (evacuate to target mmHg)."""
+    """Start vacuum pressure calibration (evacuate). Pi polls pressure; UI owns prompt timing."""
     global _sim_active, _sim_thread
     try:
         target = float(target_mmhg)
@@ -611,9 +754,11 @@ def cmd_start_calibration(target_mmhg: float = 400.0):
                 daemon=True,
             )
             _sim_thread.start()
+        start_pressure_poll(1.0)
         return {"ok": True, "simulated": True, "targetVacuumMmHg": target}
     result = send_command("#START_CALIB*", timeout=TEST_COMMAND_TIMEOUT)
     if result.get("ok"):
+        start_pressure_poll(1.0)
         norm = str(result.get("normalized") or "").lower()
         if "start_calib_ack" not in norm and "error" not in norm:
             result["ack"] = norm or "START_CALIB_ACK"

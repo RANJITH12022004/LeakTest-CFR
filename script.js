@@ -5572,6 +5572,7 @@ function _getHardwareSseUrl() {
 }
 
 function _closeTestRunHardwareEs() {
+    _stopTestRunPressurePoll();
     if (testRunHardwareEs) {
         if (_testRunHardwareTapListener) {
             try {
@@ -5584,6 +5585,43 @@ function _closeTestRunHardwareEs() {
         } catch (e2) {}
         testRunHardwareEs = null;
     }
+}
+
+function _applyLiveTestRunPressure(v) {
+    if (v == null || isNaN(v)) return;
+    testRunCurrentVacuumMmHg = v;
+    setRunCard('run-current-vacuum', Number(v).toFixed(1));
+    if (testRunHoldStarted || testRunButtonState !== 'abort' || testRunSetVacuumMmHg == null) return;
+    if (window._testRunStartPressureMmHg == null) {
+        window._testRunStartPressureMmHg = v;
+        return;
+    }
+    var startP = window._testRunStartPressureMmHg;
+    var target = testRunSetVacuumMmHg;
+    // Support both rising and falling absolute scales: start hold only after crossing target.
+    var crossed = (startP > target && v <= target) || (startP < target && v >= target);
+    if (crossed) _startTestRunHoldAfterTarget();
+}
+
+function _stopTestRunPressurePoll() {
+    if (window._testRunPressurePollId != null) {
+        clearInterval(window._testRunPressurePollId);
+        window._testRunPressurePollId = null;
+    }
+}
+
+function _startTestRunPressurePoll() {
+    _stopTestRunPressurePoll();
+    window._testRunPressurePollId = setInterval(function () {
+        if (testRunButtonState !== 'abort') return;
+        if (typeof apiRequest !== 'function') return;
+        apiRequest(API_BASE + '/api/hardware/status', { method: 'GET' }).then(function (res) {
+            if (!res || res.ok === false) return;
+            var raw = res.pressureMmHg != null ? res.pressureMmHg : res.pressure;
+            var v = parseFloat(raw);
+            if (!isNaN(v)) _applyLiveTestRunPressure(v);
+        }).catch(function () { /* ignore */ });
+    }, 1000);
 }
 
 function hardwareLeakStopSilently() {
@@ -6588,6 +6626,7 @@ function _openTestRunHardwareStream() {
         testRunHardwareEs = new EventSource(_testRunSseUrl());
     } catch (e) {
         testRunHardwareEs = null;
+        _startTestRunPressurePoll();
         return;
     }
     _testRunHardwareTapListener = function (ev) {
@@ -6606,28 +6645,16 @@ function _openTestRunHardwareStream() {
             var vac = parsed.su != null ? parsed.su : (parsed.vacuum != null ? parsed.vacuum : parsed.pressure);
             if (vac != null) {
                 var v = parseFloat(vac);
-                if (!isNaN(v)) {
-                    testRunCurrentVacuumMmHg = v;
-                    setRunCard('run-current-vacuum', v.toFixed(1));
-                    if (!testRunHoldStarted
-                        && testRunSetVacuumMmHg != null
-                        && v >= testRunSetVacuumMmHg) {
-                        _startTestRunHoldAfterTarget();
-                    }
-                }
+                if (!isNaN(v)) _applyLiveTestRunPressure(v);
             }
-            // Hold elapsed is driven by the local timer after vacuum is reached.
-            if (kind === 'completed' || norm === 'completed' || norm === 'complete.' || norm === 'idle') {
-                if (testRunHoldStarted) {
-                    _finishTestRunVacuumHold();
-                }
-            }
+            // Hold is owned by the Pi timer; ignore ESP idle/auto-complete.
             if (kind === 'error' || kind === 'adapter_error') {
                 _abortTestRunVacuumHoldWithError(norm || 'Unknown');
             }
         } catch (ex) { /* ignore */ }
     };
     testRunHardwareEs.addEventListener('message', _testRunHardwareTapListener);
+    _startTestRunPressurePoll();
 }
 
 function _maybeRecordHoldVacuumSample(force) {
@@ -7489,6 +7516,7 @@ function toggleTestRunState() {
         testRunHoldStarted = false;
         testRunVacuumSamples = [];
         testRunNextSamplePercent = 10;
+        window._testRunStartPressureMmHg = null;
         setRunCard('run-current-vacuum', '--');
         setRunCard('run-elapsed-time', '00:00');
         var resultCard = document.getElementById('test-run-result-card');
@@ -8282,6 +8310,9 @@ function completeRecipeFromStep2() {
 }
 
 function _closeValidationRunHardwareEs() {
+    if (typeof window._stopVdPressurePoll === 'function') {
+        window._stopVdPressurePoll();
+    }
     if (validationRunHardwareEs) {
         if (validationRunSseListener) {
             try {
