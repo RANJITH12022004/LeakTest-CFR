@@ -8832,21 +8832,13 @@ function renderCalibrationDetailsInPreview(preview) {
     var setVac = td.setVacuumMmHg != null ? td.setVacuumMmHg : (preview.setVacuumMmHg != null ? preview.setVacuumMmHg : '--');
     var actualVac = td.actualVacuumMmHg != null ? td.actualVacuumMmHg : (preview.actualVacuumMmHg != null ? preview.actualVacuumMmHg : '--');
     var gaugeVac = td.calibValue != null ? td.calibValue : actualVac;
-    var diff = td.calibDiff;
-    if (diff == null && preview.calibDiff != null) diff = preview.calibDiff;
-    if (diff == null && gaugeVac != null && setVac != null && !isNaN(Number(gaugeVac)) && !isNaN(Number(setVac))) {
-        diff = Math.round(Number(gaugeVac) - Number(setVac));
-    }
-    var diffDisplay = (diff == null || isNaN(Number(diff)))
-        ? '--'
-        : ((Number(diff) >= 0 ? '+' : '') + String(Math.round(Number(diff))));
     var rlTm = td.releaseTimeSec != null ? td.releaseTimeSec : (preview.releaseTimeSec != null ? preview.releaseTimeSec : '--');
     var status = td.status || preview.status || 'Completed';
     var rows = [
         '<tr><th colspan="4" class="report-validation-usp-header">Vacuum pressure calibration</th></tr>',
         '<tr><th>Date / Time</th><td colspan="3">' + dateStr + '</td></tr>',
         '<tr><th>Target Vacuum (mmHg)</th><td>' + setVac + '</td><th>Status</th><td>' + status + '</td></tr>',
-        '<tr><th>External Gauge (mmHg)</th><td>' + gaugeVac + '</td><th>CALIBVALUE Diff</th><td>' + diffDisplay + '</td></tr>',
+        '<tr><th>External Gauge (mmHg)</th><td>' + gaugeVac + '</td><th>CALIBVALUE</th><td>' + gaugeVac + '</td></tr>',
         '<tr><th>Release Wait (s)</th><td colspan="3">' + rlTm + '</td></tr>'
     ];
     bodyEl.innerHTML = rows.join('');

@@ -76,18 +76,6 @@ def _esp_mmhg_value(value) -> int:
     return v
 
 
-def _esp_calib_diff_token(diff) -> str:
-    """Signed 3-digit calib offset for #CALIBVALUE:+NNN* / #CALIBVALUE:-NNN*."""
-    try:
-        d = int(round(float(diff)))
-    except (TypeError, ValueError):
-        raise ValueError("Invalid calibration difference")
-    if abs(d) > 999:
-        raise ValueError("Calibration difference must be between -999 and +999 mmHg")
-    sign = "+" if d >= 0 else "-"
-    return f"{sign}{abs(d):03d}"
-
-
 def _esp_sec_value(value) -> int:
     try:
         v = int(round(float(value)))
@@ -806,19 +794,21 @@ def cmd_esp_stop_calib():
     return result
 
 
-def cmd_apply_calibration(calib_diff: float, release_time_sec: int = None, gauge_value: float = None, set_vacuum_mmhg: float = None):
-    """Send signed gauge−set difference as #CALIBVALUE:+NNN* / #CALIBVALUE:-NNN*."""
+def cmd_apply_calibration(calib_value: float, release_time_sec: int = None, gauge_value: float = None, set_vacuum_mmhg: float = None):
+    """Send absolute external-gauge mmHg as #CALIBVALUE:NNN* (user-entered actual value)."""
     try:
-        token = _esp_calib_diff_token(calib_diff)
-        d = int(round(float(calib_diff)))
+        v = _esp_mmhg_value(calib_value if calib_value is not None else gauge_value)
+        token = f"{v:03d}"
     except ValueError as e:
         return {"ok": False, "error": str(e)}
+    if gauge_value is None:
+        gauge_value = float(v)
     if _simulate_enabled():
         _broadcast_line(f"#CALIBVALUE_ACK:{token}*")
         return {
             "ok": True,
             "simulated": True,
-            "calibDiff": d,
+            "calibValue": v,
             "calibValueToken": token,
             "gaugeValue": gauge_value,
             "setVacuumMmHg": set_vacuum_mmhg,
@@ -827,7 +817,7 @@ def cmd_apply_calibration(calib_diff: float, release_time_sec: int = None, gauge
     r1 = send_command(f"#CALIBVALUE:{token}*", timeout=COMMAND_TIMEOUT)
     if not r1.get("ok"):
         return r1
-    r1["calibDiff"] = d
+    r1["calibValue"] = v
     r1["calibValueToken"] = token
     if gauge_value is not None:
         r1["gaugeValue"] = gauge_value

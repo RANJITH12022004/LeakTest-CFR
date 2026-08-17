@@ -6112,6 +6112,20 @@ input[type="number"] {
     padding: 8px 10px;
 }
 
+.vacuum-calibration-page .calibration-gauge-entry-card {
+    max-width: 720px;
+    margin: 12px auto 0;
+}
+
+.vacuum-calibration-page .calibration-gauge-entry-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+}
+
 .vd-validation-input-page {
     max-width: 760px;
     margin: 0 auto;
