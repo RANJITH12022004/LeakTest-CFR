@@ -156,7 +156,7 @@
         <div class="role-modal release-pressure-modal">
             <h3 id="release-pressure-title">Releasing pressure</h3>
             <p id="release-pressure-message" class="section-subtitle">Please wait. Do not touch the chamber.</p>
-            <div id="release-pressure-timer" class="release-pressure-timer" aria-label="Release countdown">03:00</div>
+            <div id="release-pressure-timer" class="release-pressure-timer" aria-label="Release countdown">01:20</div>
             <p id="release-pressure-sub" class="release-pressure-sub">Screen stays on. Report opens when this finishes.</p>
         </div>
     </div>
@@ -2087,6 +2087,10 @@
                                 <input type="number" id="factory-max-admins" class="input-field" min="1" max="99" placeholder="2" value="2">
                             </div>
                             <div class="form-group">
+                                <label>Max QA</label>
+                                <input type="number" id="factory-max-qa" class="input-field" min="1" max="99" placeholder="3" value="3">
+                            </div>
+                            <div class="form-group">
                                 <label>Max Reviewers</label>
                                 <input type="number" id="factory-max-supervisors" class="input-field" min="1" max="99" placeholder="3" value="3">
                             </div>
@@ -2123,7 +2127,7 @@
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=3"></script>
     <script src="rbac.js?v=6"></script>
-    <script src="script.js?v=74"></script>
+    <script src="script.js?v=75"></script>
     <script src="leaktest_patch.js?v=2"></script>
     <script src="validation_vd.js?v=15"></script>
 </body>

@@ -431,11 +431,12 @@ def count_active_supervisor_members() -> int:
 
 
 def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], existing_member: Optional[Dict] = None):
-    """Check factory limits for users, admins, supervisors. Raise ValueError if exceeded."""
+    """Check factory limits for users, admins, reviewers, and QA. Raise ValueError if exceeded."""
     fs = get_factory_settings()
     max_users = int(fs.get("maxUsers") or 10)
     max_admins = int(fs.get("maxAdmins") or 2)
     max_supervisors = int(fs.get("maxSupervisors") or 3)
+    max_qa = int(fs.get("maxQa") or 3)
 
     def count_role(ms: List, r: str) -> int:
         return sum(1 for m in ms if str(m.get("role", "")).strip().lower() == r)
@@ -444,6 +445,7 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
     users = count_role(members, "user")
     admins = count_role(members, "admin")
     supervisors = count_role(members, "supervisor")
+    qa = count_role(members, "qa")
 
     if existing_member:
         old_role = str(existing_member.get("role", "")).strip().lower()
@@ -453,6 +455,8 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
             admins -= 1
         elif old_role == "supervisor":
             supervisors -= 1
+        elif old_role == "qa":
+            qa -= 1
 
     if new_role == "user":
         users += 1
@@ -460,6 +464,8 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
         admins += 1
     elif new_role == "supervisor":
         supervisors += 1
+    elif new_role == "qa":
+        qa += 1
 
     if users > max_users:
         raise ValueError("Your limit for users reached. Contact support for upgrade.")
@@ -467,6 +473,8 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
         raise ValueError("Your limit for admins reached. Contact support for upgrade.")
     if supervisors > max_supervisors:
         raise ValueError("Your limit for reviewers reached. Contact support for upgrade.")
+    if qa > max_qa:
+        raise ValueError("Your limit for QA profiles reached. Contact support for upgrade.")
 
 
 def _member_username_key(member: Dict[str, Any]) -> str:
@@ -1054,17 +1062,53 @@ def all_known_audit_db_dirs() -> List[pathlib.Path]:
     return _unique_paths(dirs)
 
 
+_FACTORY_IDENTITY_KEYS = (
+    "companyName",
+    "companyLocation",
+    "serialNo",
+    "modelNo",
+    "instrumentId",
+    "installationDate",
+    "installedBy",
+)
+
+
+def _nonempty_factory_text(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    return text.upper() not in ("N/A", "NA", "--")
+
+
+def _factory_identity_score(data: Dict[str, Any]) -> int:
+    if not isinstance(data, dict):
+        return -1
+    return sum(10 for key in _FACTORY_IDENTITY_KEYS if _nonempty_factory_text(data.get(key)))
+
+
 def _collect_factory_settings_to_preserve() -> Dict[str, Any]:
-    """Keep the richest factorySettings.json found across all storage roots."""
-    best: Dict[str, Any] = {}
+    """Keep entered factory identity (name, serial, model, etc.) across reset."""
+    copies: List[Dict[str, Any]] = []
     for root in all_known_storage_dirs():
         path = root / "factorySettings.json"
         data = _load_json_file(path, default={})
-        if isinstance(data, dict) and len(data) >= len(best):
-            best = dict(data)
-    if not best:
-        best = dict(get_factory_settings() or {})
-    return best
+        if isinstance(data, dict) and data:
+            copies.append(dict(data))
+    live = get_factory_settings()
+    if isinstance(live, dict) and live:
+        copies.append(dict(live))
+    if not copies:
+        return {}
+    merged: Dict[str, Any] = {}
+    for copy in sorted(copies, key=_factory_identity_score):
+        merged.update(copy)
+    for copy in sorted(copies, key=_factory_identity_score, reverse=True):
+        for key in _FACTORY_IDENTITY_KEYS:
+            if _nonempty_factory_text(copy.get(key)) and not _nonempty_factory_text(merged.get(key)):
+                merged[key] = str(copy.get(key)).strip()
+    return merged
 
 
 def _wipe_storage_tree(storage_dir: pathlib.Path, preserved_settings: Dict[str, Any], stats: Dict[str, int]) -> None:
@@ -1139,9 +1183,17 @@ def factory_reset() -> Dict[str, Any]:
     delete_session_power_audit_pending()
     if preserved_settings:
         save_factory_settings(preserved_settings)
+        saved = get_factory_settings()
+        for storage_dir in all_known_storage_dirs():
+            try:
+                storage_dir.mkdir(parents=True, exist_ok=True)
+                _save_json_file(storage_dir / "factorySettings.json", saved)
+            except Exception:
+                pass
     return {
         "deleted": stats,
         "preservedFactorySettings": bool(preserved_settings),
+        "factorySettings": dict(get_factory_settings() if preserved_settings else {}),
         "auditDbDirs": [str(p) for p in all_known_audit_db_dirs()],
     }
 
@@ -1205,6 +1257,7 @@ def save_factory_settings(settings: Dict[str, Any]):
         ("maxRecipes", 150, 1, 999),
         ("maxUsers", 10, 1, 999),
         ("maxAdmins", 2, 1, 99),
+        ("maxQa", 3, 1, 99),
         ("maxSupervisors", 3, 1, 99),
         ("passwordResetPeriodDays", 30, 1, 3650),
         ("autoLogoutMinutes", 0, 0, 10080),

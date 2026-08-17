@@ -2890,12 +2890,6 @@ function enrollMemberBiometric() {
 var _releasePressureTimerId = null;
 var _releasePressureResolve = null;
 /** After a completed leak test: keep the screen on this long, then open the pending-approval report. */
-var POST_TEST_PENDING_REPORT_WAIT_SEC = 180;
-
-function getPostTestPendingReportWaitSec() {
-    return POST_TEST_PENDING_REPORT_WAIT_SEC;
-}
-
 function getReleasePressureLockSec() {
     var sec = 80;
     try {
@@ -2903,7 +2897,7 @@ function getReleasePressureLockSec() {
         if (stored) {
             var s = JSON.parse(stored);
             var r = parseInt(s.calibrationReleaseTimeSec, 10);
-            if (!isNaN(r) && r >= 1 && r <= 999) sec = r;
+            if (!isNaN(r) && r >= 1 && r <= 5999) sec = r;
         }
     } catch (e) { /* ignore */ }
     return sec;
@@ -2972,7 +2966,6 @@ function showReleasePressureLock(releaseSec) {
 window.showReleasePressureLock = showReleasePressureLock;
 window.hideReleasePressureLock = hideReleasePressureLock;
 window.getReleasePressureLockSec = getReleasePressureLockSec;
-window.getPostTestPendingReportWaitSec = getPostTestPendingReportWaitSec;
 
 // ===== Generic Loading Overlay (export progress, long ops) =====
 var _appLoadingCancelHandler = null;
@@ -5145,7 +5138,7 @@ function _releaseDurationSecFromSettings() {
         if (stored) {
             var s = JSON.parse(stored);
             var r = parseInt(s.calibrationReleaseTimeSec, 10);
-            if (!isNaN(r) && r >= 1 && r <= 999) sec = r;
+            if (!isNaN(r) && r >= 1 && r <= 5999) sec = r;
         }
     } catch (e) { /* ignore */ }
     return sec;
@@ -7010,9 +7003,7 @@ function _finishTestRunVacuumHold() {
     _postRunSessionHold = true;
     markAutoLogoutActivity();
     syncKioskScreenWakeLock();
-    var releaseSec = (typeof getPostTestPendingReportWaitSec === 'function')
-        ? getPostTestPendingReportWaitSec()
-        : POST_TEST_PENDING_REPORT_WAIT_SEC;
+    var releaseSec = (typeof getReleasePressureLockSec === 'function') ? getReleasePressureLockSec() : 80;
     showReleasePressureLock(releaseSec).then(function () {
         setRunCard('run-status-subtext', 'Saving report');
         saveTestRunReportAndGoToReportPreview();
@@ -7455,9 +7446,9 @@ function buildTestRunReportPayload() {
     var elapsedDisplay = (elapsedSec != null && typeof formatMmSs === 'function') ? formatMmSs(elapsedSec) : '--';
     var resultText = testRunResultText || _computeTestRunResult();
 
-    var releaseSec = (typeof getPostTestPendingReportWaitSec === 'function')
-        ? getPostTestPendingReportWaitSec()
-        : POST_TEST_PENDING_REPORT_WAIT_SEC;
+    var releaseSec = (typeof getReleasePressureLockSec === 'function')
+        ? getReleasePressureLockSec()
+        : _releaseDurationSecFromSettings();
     var holdSec = (testRunSetDurationSec != null) ? testRunSetDurationSec : null;
     var totalSec = (holdSec != null) ? (parseInt(holdSec, 10) + parseInt(releaseSec, 10)) : null;
 
@@ -9847,6 +9838,7 @@ function setFactorySettingsForm(settings) {
         ['factory-max-recipes', 'maxRecipes'],
         ['factory-max-users', 'maxUsers'],
         ['factory-max-admins', 'maxAdmins'],
+        ['factory-max-qa', 'maxQa'],
         ['factory-max-supervisors', 'maxSupervisors'],
         ['factory-password-reset-days', 'passwordResetPeriodDays'],
         ['factory-auto-logout-minutes', 'autoLogoutMinutes'],
@@ -9865,6 +9857,7 @@ function setFactorySettingsForm(settings) {
         if (pair[1] === 'maxRecipes') el.value = String(val || 150);
         else if (pair[1] === 'maxUsers') el.value = String(val || 10);
         else if (pair[1] === 'maxAdmins') el.value = String(val || 2);
+        else if (pair[1] === 'maxQa') el.value = String(val || 3);
         else if (pair[1] === 'maxSupervisors') el.value = String(val || 3);
         else if (pair[1] === 'passwordResetPeriodDays') el.value = String(val != null ? val : 30);
         else if (pair[1] === 'autoLogoutMinutes') el.value = String(val != null ? val : 0);
@@ -9915,6 +9908,7 @@ function saveFactorySettings() {
     var maxRecipesEl = document.getElementById('factory-max-recipes');
     var maxUsersEl = document.getElementById('factory-max-users');
     var maxAdminsEl = document.getElementById('factory-max-admins');
+    var maxQaEl = document.getElementById('factory-max-qa');
     var maxSupervisorsEl = document.getElementById('factory-max-supervisors');
     var passwordResetDaysEl = document.getElementById('factory-password-reset-days');
     var autoLogoutEl = document.getElementById('factory-auto-logout-minutes');
@@ -9932,6 +9926,7 @@ function saveFactorySettings() {
     var maxRecipes = Math.max(1, Math.min(999, parseInt(maxRecipesEl && maxRecipesEl.value ? maxRecipesEl.value : 150, 10)));
     var maxUsers = Math.max(1, Math.min(999, parseInt(maxUsersEl && maxUsersEl.value ? maxUsersEl.value : 10, 10)));
     var maxAdmins = Math.max(1, Math.min(99, parseInt(maxAdminsEl && maxAdminsEl.value ? maxAdminsEl.value : 2, 10)));
+    var maxQa = Math.max(1, Math.min(99, parseInt(maxQaEl && maxQaEl.value ? maxQaEl.value : 3, 10)));
     var maxSupervisors = Math.max(1, Math.min(99, parseInt(maxSupervisorsEl && maxSupervisorsEl.value ? maxSupervisorsEl.value : 3, 10)));
     var passwordResetPeriodDays = Math.max(1, Math.min(3650, parseInt(passwordResetDaysEl && passwordResetDaysEl.value ? passwordResetDaysEl.value : 30, 10)));
     var autoLogoutMinutes = Math.max(0, Math.min(10080, parseInt(autoLogoutEl && autoLogoutEl.value !== '' ? autoLogoutEl.value : '0', 10)));
@@ -9994,6 +9989,7 @@ function saveFactorySettings() {
         maxRecipes: maxRecipes,
         maxUsers: maxUsers,
         maxAdmins: maxAdmins,
+        maxQa: maxQa,
         maxSupervisors: maxSupervisors,
         passwordResetPeriodDays: passwordResetPeriodDays,
         autoLogoutMinutes: autoLogoutMinutes,
@@ -10045,8 +10041,15 @@ function showFactoryResetConfirm() {
         apiRequest((API_BASE || '') + '/api/data/factory-reset', { method: 'POST', body: {} })
             .then(function (result) {
                 clearClientStateAfterFactoryReset();
+                var kept = (result && result.settings) ? result.settings : null;
+                if (kept && typeof kept === 'object') {
+                    try { localStorage.setItem('factorySettings', JSON.stringify(kept)); } catch (e) {}
+                    if (typeof updateLoginFactorySettingsDisplay === 'function') {
+                        updateLoginFactorySettingsDisplay(kept);
+                    }
+                }
                 showAppModal(
-                    'Factory reset completed. All reports, recipes, users, and audit trails have been erased.',
+                    'Factory reset completed. All reports, recipes, users, and audit trails have been erased. Company name, serial, and other factory details were kept.',
                     'Factory Reset'
                 );
                 if (typeof showLoginScreen === 'function') showLoginScreen();
