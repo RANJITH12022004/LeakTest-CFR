@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import http.client
 import threading
 import time
 import urllib.error
@@ -129,11 +130,26 @@ class Client:
         if extra_headers:
             headers.update(extra_headers)
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return _Resp(resp.status, resp.read())
-        except urllib.error.HTTPError as e:
-            return _Resp(e.code, e.read())
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return _Resp(resp.status, resp.read())
+            except urllib.error.HTTPError as e:
+                try:
+                    payload = e.read()
+                except Exception:
+                    payload = b""
+                return _Resp(e.code, payload)
+            except (urllib.error.URLError, http.client.RemoteDisconnected, ConnectionResetError) as err:
+                last_err = err
+                if attempt < 2:
+                    wait_for_api(45)
+                    continue
+                break
+        if last_err:
+            raise last_err
+        return _Resp(503, b'{"error":"request failed"}')
 
     def set_user_headers(self, user: dict) -> None:
         if user.get("role"):
@@ -575,8 +591,23 @@ def unlock_all_oq(run: OQRun) -> None:
     reset_oq_passwords(run)
 
 
+def wait_for_api(timeout_sec: int = 90) -> bool:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(BASE + "/", timeout=3) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:
+            pass
+        time.sleep(2)
+    return False
+
+
 def run_smoke_scripts(run: OQRun) -> None:
     print("\n=== Phase 2: Existing smoke scripts ===")
+    if not wait_for_api():
+        print("  WARN API not ready before smoke scripts")
     env = os.environ.copy()
     env.update(
         {
@@ -592,12 +623,15 @@ def run_smoke_scripts(run: OQRun) -> None:
             "AUDIT_WRONG_PASS_USER": "OQUSR1",
         }
     )
+    # API-dependent smokes first; power-cut imports app in-process and may restart bridge.
     scripts = [
-        ("smoke_powercut_checkpoint.py", []),
         ("smoke_profile_enable_unlock.py", []),
         ("verify_audit_trail.py", []),
+        ("smoke_powercut_checkpoint.py", []),
     ]
     for name, extra in scripts:
+        if not wait_for_api():
+            print(f"  WARN API not ready before {name}")
         env_run = dict(env)
         if name == "smoke_powercut_checkpoint.py":
             env_run["STORAGE_DIR"] = str(APP_ROOT / "storage" / "_smoke_powercut_usb")
@@ -605,13 +639,22 @@ def run_smoke_scripts(run: OQRun) -> None:
             env_run["AUDIT_DB_DIR"] = str(APP_ROOT / "db")
         path = APP_ROOT / "scripts" / name
         cmd = [sys.executable, str(path)] + extra
-        proc = subprocess.run(cmd, cwd=str(APP_ROOT), env=env_run, capture_output=True, text=True)
-        out = (proc.stdout or "") + (proc.stderr or "")
+        for attempt in range(2):
+            proc = subprocess.run(cmd, cwd=str(APP_ROOT), env=env_run, capture_output=True, text=True)
+            out = (proc.stdout or "") + (proc.stderr or "")
+            if proc.returncode == 0 or attempt == 1:
+                break
+            print(f"  WARN {name} failed (exit={proc.returncode}), retrying after API recovery")
+            wait_for_api(120)
         run.smoke_outputs[name] = out
         ok = proc.returncode == 0
         print(f"  {'OK' if ok else 'FAIL'} {name} exit={proc.returncode}")
         if not ok:
             print(out[-800:])
+        if name == "smoke_powercut_checkpoint.py":
+            if not wait_for_api():
+                print("  WARN API not ready after power-cut smoke — waiting for kiosk-bridge restart")
+                wait_for_api(120)
 
 
 def section_user_management(run: OQRun) -> None:
@@ -879,7 +922,21 @@ def section_test_execution(run: OQRun) -> None:
     since = ts_ms() - 1000
     restore_oqusr1_cards(run)
     usr = Client()
-    usr.login("OQUSR1", run.credentials["OQUSR1"])
+    u, lr = usr.login("OQUSR1", run.credentials["OQUSR1"])
+    if not u:
+        for tid, desc in [
+            ("OQ-TE-HW", "Adapter check before live taps"),
+            ("OQ-TE-01", "Quick Test Execution"),
+            ("OQ-TE-02", "SP / Recipe Test Execution"),
+        ]:
+            run.record(tid, desc, "OQUSR1", "Fail", f"login HTTP {lr.status_code}")
+        rev = Client()
+        rev.login("OQREV1", run.credentials["OQREV1"])
+        entries = rev.audit_log(**{"from": since})
+        ok = any(e.get("action") == "Quick test performed" for e in entries)
+        run.record("OQ-TE-AT", "Audit Trail Check — Test Execution", "OQREV1", "Pass" if ok else "Fail")
+        rev.logout()
+        return
     start_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     chk = usr._request("POST", "/api/hardware/adapter/check", {})
     chk_body = chk.json() or {}
@@ -1467,9 +1524,9 @@ def main() -> int:
     set_factory_caps(run)
     setup_oq_users(run, c)
     reset_oq_passwords(run)
+    section_user_management(run)
     run_smoke_scripts(run)
     reset_oq_passwords(run)
-    section_user_management(run)
     section_permissions(run)
     section_security(run)
     section_recipe(run)

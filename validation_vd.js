@@ -155,8 +155,13 @@
     };
 
     function parseVdSseLine(data) {
-        var norm = String(data.normalized != null ? data.normalized : data.line || '').replace(/\*$/, '');
+        var raw = String(data.normalized != null ? data.normalized : data.line || '');
+        var norm = raw.replace(/^#/, '').replace(/\*$/, '');
         var out = {};
+        if (norm.indexOf(':') >= 0 && norm.indexOf(',') < 0) {
+            var head = norm.split(':');
+            out[head[0].trim().toLowerCase()] = head.slice(1).join(':').trim();
+        }
         norm.split(',').forEach(function (part) {
             var kv = part.split(':');
             if (kv.length >= 2) {
@@ -181,25 +186,21 @@
             var data = JSON.parse(raw);
             if (data.ping) return;
             var kind = String(data.kind || '');
-            var norm = String(data.normalized != null ? data.normalized : '').toLowerCase().replace(/\*$/, '');
+            var norm = String(data.normalized != null ? data.normalized : '').toLowerCase().replace(/^#/, '').replace(/\*$/, '');
             var parsed = parseVdSseLine(data);
-            if (parsed.vacuum != null) {
-                var v = parseFloat(parsed.vacuum);
+            var pressureVal = parsed.su != null ? parsed.su : (parsed.vacuum != null ? parsed.vacuum : parsed.pressure);
+            if (pressureVal != null) {
+                var v = parseFloat(pressureVal);
                 if (!isNaN(v)) {
                     validationRunCurrentVacuumMmHg = v;
                     setValRunEl('val-run-current-vacuum', v.toFixed(1));
                     _maybeStartVdHold(v);
                 }
             }
-            if (parsed.pressure != null) {
-                var p = parseFloat(parsed.pressure);
-                if (!isNaN(p)) {
-                    validationRunCurrentVacuumMmHg = p;
-                    setValRunEl('val-run-current-vacuum', p.toFixed(1));
-                    _maybeStartVdHold(p);
-                }
+            if (norm === 'target_reached' || norm.indexOf('target_reached') >= 0) {
+                _startVdHoldAfterTarget();
             }
-            if (kind === 'completed' || norm === 'completed' || norm === 'complete.') {
+            if (kind === 'completed' || norm === 'completed' || norm === 'complete.' || norm === 'idle') {
                 if (validationRunIntervalId != null) {
                     clearInterval(validationRunIntervalId);
                     validationRunIntervalId = null;
@@ -227,6 +228,11 @@
         var target = window._vdValidationParams && window._vdValidationParams.vacuumMmHg;
         if (target == null || isNaN(parseFloat(target))) return;
         if (vacuumVal < parseFloat(target)) return;
+        _startVdHoldAfterTarget();
+    }
+
+    function _startVdHoldAfterTarget() {
+        if (validationRunHoldStarted || validationRunState !== 'running') return;
         validationRunHoldStarted = true;
         validationRunElapsedSec = 0;
         setValRunEl('val-run-elapsed-time', '00:00');
@@ -616,19 +622,20 @@
             var data = JSON.parse(raw);
             if (data.ping) return;
             var parsed = parseVdSseLine(data);
-            var norm = String(data.normalized != null ? data.normalized : data.line || '').toLowerCase().replace(/\*$/, '');
+            var norm = String(data.normalized != null ? data.normalized : data.line || '').toLowerCase().replace(/^#/, '').replace(/\*$/, '');
             var vacuum = null;
-            if (parsed.vacuum != null) vacuum = parseFloat(parsed.vacuum);
+            if (parsed.su != null) vacuum = parseFloat(parsed.su);
+            else if (parsed.vacuum != null) vacuum = parseFloat(parsed.vacuum);
             else if (parsed.pressure != null) vacuum = parseFloat(parsed.pressure);
             if (vacuum != null && !isNaN(vacuum)) {
                 run.liveVacuumMmHg = vacuum;
                 _setCalRunEl('cal-live-vacuum', vacuum.toFixed(1));
             }
             if (run.phase === 'evacuating') {
-                var targetReached = norm.indexOf('target,reached') >= 0
-                    || norm.indexOf('target reached') >= 0
-                    || norm === 'target,reached,exactly'
-                    || norm.indexOf('target,reached,exactly') >= 0;
+                var targetReached = norm === 'target_reached'
+                    || norm.indexOf('target_reached') >= 0
+                    || norm.indexOf('target,reached') >= 0
+                    || norm.indexOf('target reached') >= 0;
                 if (targetReached) {
                     _startCalibrationHoldAfterTarget(run);
                 } else if (vacuum != null && !isNaN(vacuum) && vacuum >= run.targetVacuumMmHg) {
