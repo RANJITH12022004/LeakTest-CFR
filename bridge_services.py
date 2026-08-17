@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-bridge_services.py - Wrapper over hardware_service for Tap Density kiosk.
+bridge_services.py - Wrapper over hardware_service for Leak Test kiosk.
 """
 
 import errno

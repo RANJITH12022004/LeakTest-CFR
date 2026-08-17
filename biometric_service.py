@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-biometric_service.py - R307 fingerprint sensor service for Tap Density.
+biometric_service.py - R307 fingerprint sensor service for Leak Test.
 Implements enrollment, identification, and template management over UART.
 """
 
@@ -19,6 +19,10 @@ _config = {}
 _port = None
 _ser = None
 _lock = threading.Lock()
+
+# In-memory R307 stand-in when BIOMETRIC_MOCK=1 (no UART sensor required).
+_mock_templates = set()
+_mock_last_enrolled = None
 
 _PACKET_START = b"\xEF\x01"
 _DEFAULT_ADDRESS = 0xFFFFFFFF
@@ -44,11 +48,112 @@ _CONFIRM_NOT_FOUND = 0x0A
 _CONFIRM_ENROLL_MISMATCH = 0x0A
 
 
+def _configured_port():
+    return _config.get("BIOMETRIC_PORT", "/dev/ttyAMA5")
+
+
+def _truthy(val):
+    return str(val or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def mock_mode():
+    """True when BIOMETRIC_MOCK is enabled (config or environment).
+
+    On Windows, also auto-enables when the UART device node is missing so
+    desktop/dev runs can exercise biometric login without an R307.
+    Explicit BIOMETRIC_MOCK=0 disables that fallback.
+    """
+    raw = _config.get("BIOMETRIC_MOCK") if "BIOMETRIC_MOCK" in _config else os.environ.get("BIOMETRIC_MOCK", "")
+    raw = str(raw).strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    # Auto mock on Windows when the Pi UART path is absent
+    if os.name == "nt":
+        port = _configured_port()
+        if not port or not os.path.exists(port):
+            return True
+    return False
+
+
+def _mock_default_template_id():
+    try:
+        return int(_config.get("BIOMETRIC_MOCK_TEMPLATE_ID") or os.environ.get("BIOMETRIC_MOCK_TEMPLATE_ID") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _mock_seed_templates():
+    """Optional comma-separated template IDs to preload, e.g. BIOMETRIC_MOCK_SEED=1."""
+    global _mock_last_enrolled
+    raw = str(_config.get("BIOMETRIC_MOCK_SEED") or os.environ.get("BIOMETRIC_MOCK_SEED") or "").strip()
+    if not raw:
+        # Default seed matches common enrolled member templateId=1 for login demos.
+        raw = str(_mock_default_template_id())
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            tid = int(part)
+        except ValueError:
+            continue
+        if 1 <= tid <= 1000:
+            _mock_templates.add(tid)
+            _mock_last_enrolled = tid
+
+
+def sensor_available():
+    """True when mock mode is on, or pyserial is installed and the UART device node exists."""
+    if mock_mode():
+        return True
+    if not serial:
+        return False
+    port = _configured_port()
+    return bool(port and os.path.exists(port))
+
+
+def _hardware_unavailable_response():
+    port = _configured_port()
+    return {
+        "ok": False,
+        "hardwarePresent": False,
+        "port": port,
+        "error": "Biometric sensor not connected ({} not found). Connect the R307 sensor and restart.".format(port),
+    }
+
+
+def _mock_ok(**extra):
+    out = {
+        "ok": True,
+        "mock": True,
+        "hardwarePresent": True,
+        "port": _port or _configured_port() or "mock",
+    }
+    out.update(extra)
+    return out
+
+
 def init(app, config):
-    global _logger, _config, _port
+    global _logger, _config, _port, _mock_templates, _mock_last_enrolled
     _logger = app.logger
     _config = dict(config or {})
-    _port = _config.get("BIOMETRIC_PORT", "/dev/ttyAMA5")
+    _port = _configured_port()
+    _mock_templates = set()
+    _mock_last_enrolled = None
+    if mock_mode():
+        _mock_seed_templates()
+        if _logger:
+            _logger.info(
+                "[BIOMETRIC] Mock R307 enabled (templates seeded=%s)",
+                sorted(_mock_templates),
+            )
+        return
+    if not sensor_available():
+        if _logger:
+            _logger.warning("[BIOMETRIC] Sensor port not present at startup: %s", _port)
+        return
     try:
         _open_serial()
         if _logger:
@@ -129,13 +234,20 @@ def _open_serial():
 
 
 def _exec(cmd_payload, timeout_sec=2.0):
-    with _lock:
-        ser = _open_serial()
-        ser.reset_input_buffer()
-        packet = _build_packet(cmd_payload)
-        ser.write(packet)
-        ser.flush()
-        pkt_type, payload = _read_response(ser, timeout_sec=timeout_sec)
+    if not sensor_available():
+        return _hardware_unavailable_response()
+    try:
+        with _lock:
+            ser = _open_serial()
+            ser.reset_input_buffer()
+            packet = _build_packet(cmd_payload)
+            ser.write(packet)
+            ser.flush()
+            pkt_type, payload = _read_response(ser, timeout_sec=timeout_sec)
+    except FileNotFoundError:
+        return _hardware_unavailable_response()
+    except OSError as exc:
+        return {"ok": False, "hardwarePresent": sensor_available(), "error": str(exc), "code": None}
     if pkt_type != 0x07 or not payload:
         return {"ok": False, "error": "Invalid response packet", "code": None}
     code = payload[0]
@@ -157,24 +269,36 @@ def _confirm_msg(code):
 
 
 def verify_sensor():
+    if mock_mode():
+        return _mock_ok(code=_CONFIRM_OK)
     pwd = int(_config.get("BIOMETRIC_PASSWORD", _DEFAULT_PASSWORD))
     payload = bytes([_CMD_VERIFY_PASSWORD]) + pwd.to_bytes(4, "big")
     return _exec(payload, timeout_sec=2.0)
 
 
 def status():
+    port = _port or _configured_port()
+    if mock_mode():
+        return _mock_ok(templates=len(_mock_templates))
+    if not sensor_available():
+        return dict(_hardware_unavailable_response())
     verify = verify_sensor()
     if not verify.get("ok"):
+        verify.setdefault("hardwarePresent", True)
+        verify.setdefault("port", port)
         return verify
     count = get_template_count()
     return {
         "ok": True,
-        "port": _port or _config.get("BIOMETRIC_PORT", "/dev/ttyAMA5"),
+        "hardwarePresent": True,
+        "port": port,
         "templates": count.get("count", 0) if count.get("ok") else None,
     }
 
 
 def get_template_count():
+    if mock_mode():
+        return _mock_ok(count=len(_mock_templates))
     res = _exec(bytes([_CMD_TEMPLATE_COUNT]), timeout_sec=2.0)
     if not res.get("ok"):
         return res
@@ -186,6 +310,9 @@ def get_template_count():
 
 
 def _wait_for_finger(timeout_sec=10.0):
+    if mock_mode():
+        time.sleep(0.15)
+        return _mock_ok()
     end = time.time() + timeout_sec
     while time.time() < end:
         got = _exec(bytes([_CMD_GEN_IMAGE]), timeout_sec=1.5)
@@ -199,6 +326,11 @@ def _wait_for_finger(timeout_sec=10.0):
 
 
 def _capture_to_buffer(buffer_id, timeout_sec=10.0):
+    if mock_mode():
+        wait = _wait_for_finger(timeout_sec=timeout_sec)
+        if not wait.get("ok"):
+            return wait
+        return _mock_ok(bufferId=int(buffer_id))
     wait = _wait_for_finger(timeout_sec=timeout_sec)
     if not wait.get("ok"):
         return wait
@@ -219,9 +351,14 @@ def capture_enroll_finger(buffer_id, timeout_sec=10.0):
 
 def finalize_enroll(template_id):
     """Merge buffers 1+2 and store template after both captures succeeded."""
+    global _mock_last_enrolled
     template_id = int(template_id)
     if template_id <= 0 or template_id > 1000:
         return {"ok": False, "error": "templateId must be between 1 and 1000"}
+    if mock_mode():
+        _mock_templates.add(template_id)
+        _mock_last_enrolled = template_id
+        return _mock_ok(templateId=template_id)
     verify = verify_sensor()
     if not verify.get("ok"):
         return verify
@@ -248,7 +385,7 @@ def enroll(template_id, capture_timeout_sec=10.0):
     first = capture_enroll_finger(0x01, timeout_sec=capture_timeout_sec)
     if not first.get("ok"):
         return first
-    time.sleep(1.0)
+    time.sleep(0.2 if mock_mode() else 1.0)
     second = capture_enroll_finger(0x02, timeout_sec=capture_timeout_sec)
     if not second.get("ok"):
         return second
@@ -256,6 +393,22 @@ def enroll(template_id, capture_timeout_sec=10.0):
 
 
 def identify(timeout_sec=10.0):
+    if mock_mode():
+        if _truthy(_config.get("BIOMETRIC_MOCK_NO_MATCH") or os.environ.get("BIOMETRIC_MOCK_NO_MATCH")):
+            return {"ok": False, "mock": True, "error": "Fingerprint not recognized", "code": _CONFIRM_NOT_FOUND}
+        verify = verify_sensor()
+        if not verify.get("ok"):
+            return verify
+        cap = _capture_to_buffer(0x01, timeout_sec=min(timeout_sec, 1.0))
+        if not cap.get("ok"):
+            return cap
+        tid = _mock_last_enrolled if _mock_last_enrolled in _mock_templates else None
+        if tid is None:
+            default_id = _mock_default_template_id()
+            tid = default_id if default_id in _mock_templates else (next(iter(sorted(_mock_templates)), None))
+        if tid is None:
+            return {"ok": False, "mock": True, "error": "Fingerprint not recognized", "code": _CONFIRM_NOT_FOUND}
+        return _mock_ok(templateId=int(tid), confidence=120)
     verify = verify_sensor()
     if not verify.get("ok"):
         return verify
@@ -279,9 +432,17 @@ def identify(timeout_sec=10.0):
 
 def delete_template(template_id):
     template_id = int(template_id)
+    if mock_mode():
+        _mock_templates.discard(template_id)
+        return _mock_ok(templateId=template_id, deleted=True)
     payload = bytes([_CMD_DELETE]) + template_id.to_bytes(2, "big") + (1).to_bytes(2, "big")
     return _exec(payload, timeout_sec=2.0)
 
 
 def clear_templates():
+    global _mock_last_enrolled
+    if mock_mode():
+        _mock_templates.clear()
+        _mock_last_enrolled = None
+        return _mock_ok(cleared=True)
     return _exec(bytes([_CMD_EMPTY]), timeout_sec=3.0)

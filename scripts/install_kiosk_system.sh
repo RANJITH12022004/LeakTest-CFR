@@ -35,7 +35,7 @@ if [ -z "$INTERNAL_USB_UUID" ]; then
   INTERNAL_USB_UUID="D444-057C"
 fi
 
-echo "==> Installing systemd units"
+echo "==> Persisting internal USB identity"
 mkdir -p "$APP_ROOT/config"
 cat >"$APP_ROOT/config/internal_usb.env" <<EOF
 INTERNAL_USB_UUID=${INTERNAL_USB_UUID}
@@ -43,13 +43,6 @@ INTERNAL_USB_PKNAME=sda
 INTERNAL_USB_PARTITION=/dev/sda1
 EOF
 chmod 644 "$APP_ROOT/config/internal_usb.env"
-sed -e "s/INTERNAL_USB_UUIDS=.*/INTERNAL_USB_UUIDS=${INTERNAL_USB_UUID}/" \
-    "$APP_ROOT/kiosk-bridge.service" > "/tmp/kiosk-bridge.service"
-cp /tmp/kiosk-bridge.service /etc/systemd/system/kiosk-bridge.service
-cp "$APP_ROOT/kiosk-display.service" /etc/systemd/system/kiosk-display.service
-cp "$APP_ROOT/kiosk-console-vt.service" /etc/systemd/system/kiosk-console-vt.service
-cp "$APP_ROOT/kiosk-watchdog.service" /etc/systemd/system/kiosk-watchdog.service
-cp "$APP_ROOT/kiosk-watchdog.timer" /etc/systemd/system/kiosk-watchdog.timer
 
 if [ -f "$APP_ROOT/config/99-kiosk-internal-usb.rules" ]; then
   sed "s/ID_FS_UUID}==\"[^\"]*\"/ID_FS_UUID}==\"${INTERNAL_USB_UUID}\"/" \
@@ -57,7 +50,6 @@ if [ -f "$APP_ROOT/config/99-kiosk-internal-usb.rules" ]; then
   cp /tmp/99-kiosk-internal-usb.rules /etc/udev/rules.d/99-kiosk-internal-usb.rules
   udevadm control --reload-rules 2>/dev/null || true
 fi
-cp "$APP_ROOT/kiosk-internal-usb-mount.service" /etc/systemd/system/kiosk-internal-usb-mount.service
 
 echo "==> User session files ($KIOSK_USER)"
 install -o "$KIOSK_USER" -g "$KIOSK_USER" -m 0755 "$APP_ROOT/config/xinitrc" "$KIOSK_HOME/.xinitrc"
@@ -74,30 +66,6 @@ if [ -f "$KIOSK_HOME/.config/labwc/rc.xml" ]; then
   sed -i 's/mapToOutput="HDMI-A-1"/mapToOutput="HDMI-A-2"/g' "$KIOSK_HOME/.config/labwc/rc.xml" || true
 fi
 
-echo "==> Disabling console login prompts (kiosk owns tty2; no terminal login on HDMI)"
-GETTY_DROPIN="/etc/systemd/system/getty@tty1.service.d"
-mkdir -p "$GETTY_DROPIN"
-for conf in autologin.conf override.conf; do
-  if [ -f "$GETTY_DROPIN/$conf" ]; then
-    mv "$GETTY_DROPIN/$conf" "$GETTY_DROPIN/${conf}.disabled"
-  fi
-done
-GETTY_DROPIN_T2="/etc/systemd/system/getty@tty2.service.d"
-mkdir -p "$GETTY_DROPIN_T2"
-for conf in autologin.conf override.conf; do
-  if [ -f "$GETTY_DROPIN_T2/$conf" ]; then
-    mv "$GETTY_DROPIN_T2/$conf" "$GETTY_DROPIN_T2/${conf}.disabled"
-  fi
-done
-for tty in 1 2 3 4 5 6; do
-  systemctl stop "getty@${tty}.service" 2>/dev/null || true
-  systemctl disable "getty@${tty}.service" 2>/dev/null || true
-  if ! systemctl mask "getty@${tty}.service" 2>/dev/null; then
-    echo "WARN: could not mask getty@${tty}.service" >&2
-  fi
-done
-systemctl daemon-reload
-
 echo "==> RealVNC: share kiosk X display :0"
 if [ -f "$APP_ROOT/config/vnc-config.custom" ]; then
   cp "$APP_ROOT/config/vnc-config.custom" /etc/vnc/config.custom
@@ -106,15 +74,16 @@ fi
 if [ -f "$APP_ROOT/config/sudoers-kiosk-vnc" ]; then
   install -m 0440 "$APP_ROOT/config/sudoers-kiosk-vnc" /etc/sudoers.d/kiosk-vnc
 fi
-# Console desktop (LightDM) conflicts with kiosk-owned :0 — keep disabled.
-systemctl disable --now lightdm.service 2>/dev/null || true
+echo "==> Display hardening (systemd units, mask getty tty1–tty6, boot guard)"
+/bin/bash "$APP_ROOT/scripts/kiosk_harden_display.sh"
+
+echo "==> Apt post-upgrade display guard"
+cp "$APP_ROOT/config/apt-99kiosk-harden.conf" /etc/apt/apt.conf.d/99kiosk-harden
+chmod 644 /etc/apt/apt.conf.d/99kiosk-harden
 
 echo "==> Enabling services"
-systemctl daemon-reload
-systemctl enable kiosk-bridge.service kiosk-display.service kiosk-console-vt.service kiosk-watchdog.timer kiosk-internal-usb-mount.service
+systemctl enable kiosk-bridge.service kiosk-internal-usb-mount.service
 systemctl restart kiosk-bridge.service
-systemctl restart kiosk-display.service
-systemctl restart kiosk-console-vt.service
 systemctl start kiosk-watchdog.timer
 
 echo "==> Status"

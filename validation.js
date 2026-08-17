@@ -1,5 +1,5 @@
 /**
- * validation.js - Tap Density validation/calibration flow and hardware API calls
+ * validation.js - Leak Test validation/calibration flow and hardware API calls
  */
 
 function apiRequest(url, options) {

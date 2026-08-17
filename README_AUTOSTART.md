@@ -67,7 +67,42 @@ tail -f /var/log/kiosk_bridge.log
 - **Disable autostart**: `sudo systemctl disable kiosk.service`
 - **Check status**: `sudo systemctl status kiosk.service`
 
+## Production install (recommended)
+
+After copying or updating `/opt/kiosk` on the device:
+
+```bash
+sudo /opt/kiosk/scripts/install_kiosk_system.sh
+sudo reboot
+```
+
+This syncs systemd units, masks console getty on tty1–tty6 (so HDMI shows the kiosk, not a login terminal), installs a boot guard and apt post-upgrade hook, and restarts bridge/display services.
+
+If HDMI shows a terminal after a power cycle or OS update:
+
+```bash
+sudo /opt/kiosk/scripts/install_kiosk_system.sh
+sudo reboot
+```
+
+Or re-apply display hardening only:
+
+```bash
+sudo /opt/kiosk/scripts/kiosk_harden_display.sh
+sudo systemctl restart kiosk-display.service kiosk-console-vt.service
+```
+
 ## Troubleshooting
+
+### HDMI shows login terminal instead of kiosk
+
+Usually `getty@tty2` was re-enabled by an OS update, or `/etc/systemd/system/kiosk-display.service` drifted from the repo (stale `TTYPath`).
+
+1. Check getty: `systemctl is-enabled getty@tty2.service` (should be `masked`)
+2. Re-harden: `sudo /opt/kiosk/scripts/kiosk_harden_display.sh`
+3. Reboot: `sudo reboot`
+
+The watchdog and apt hook re-mask getty automatically when possible.
 
 ### Service fails to start
 

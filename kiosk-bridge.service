@@ -1,5 +1,5 @@
 [Unit]
-Description=Tap Density kiosk API (Flask app.py)
+Description=Leak Test kiosk API (Flask app.py)
 After=local-fs.target
 Wants=local-fs.target
 
@@ -8,6 +8,7 @@ Type=simple
 User=rle
 Group=rle
 Environment=PYTHONUNBUFFERED=1
+Environment=LEAK_TEST_SIMULATE=0
 Environment=INTERNAL_USB_PATH=/media/usb_internal
 Environment=INTERNAL_USB_PKNAME=sda
 Environment=INTERNAL_USB_PARTITION=/dev/sda1

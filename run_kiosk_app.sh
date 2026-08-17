@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launcher used by kiosk-bridge.service to start the Tap Density Flask backend.
+# Launcher used by kiosk-bridge.service to start the Leak Test Flask backend.
 # Mirrors the manual flow in /opt/kiosk/start_kiosk.sh (backend only; no Chromium).
 
 set -euo pipefail
@@ -37,4 +37,5 @@ fi
 
 export APP_ROOT PYTHONUNBUFFERED=1
 export FLASK_HOST=0.0.0.0
+export LEAK_TEST_SIMULATE="${LEAK_TEST_SIMULATE:-0}"
 exec "$PYTHON" "$APP_ROOT/bridge.py"

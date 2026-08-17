@@ -157,31 +157,32 @@
             // Backspace
             var val = currentInput.value;
             currentInput.value = val.substring(0, val.length - 1);
-            updatePopup();
         } else if (key === 'enter') {
             // Enter - close keyboard
             closeOSK();
+            return;
         } else if (key === 'space') {
             // Space
             currentInput.value += ' ';
-            updatePopup();
         } else if (key === 'shift') {
             // Toggle caps lock
             capsLockActive = !capsLockActive;
             shiftActive = capsLockActive;
             buildKeyboard();
+            return;
         } else if (key === '123') {
             // Switch to numbers
             numbersActive = true;
             buildKeyboard();
+            return;
         } else if (key === 'abc') {
             // Switch to letters
             numbersActive = false;
             buildKeyboard();
+            return;
         } else {
             // Regular key
             currentInput.value += key;
-            updatePopup();
 
             // Auto-disable shift after typing (but not caps lock)
             if (shiftActive && !capsLockActive) {
@@ -190,9 +191,18 @@
             }
         }
 
+        if (currentInput && currentInput.getAttribute('data-mmss-input') === 'true'
+            && typeof window.applyMmSsAutoColon === 'function') {
+            window.applyMmSsAutoColon(currentInput);
+        }
+
+        updatePopup();
+
         // Trigger input event for any listeners
-        var event = new Event('input', { bubbles: true });
-        currentInput.dispatchEvent(event);
+        if (currentInput) {
+            var event = new Event('input', { bubbles: true });
+            currentInput.dispatchEvent(event);
+        }
     }
 
     function _normalizeOskPromptText(raw) {
