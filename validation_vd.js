@@ -191,24 +191,12 @@
             var pressureVal = parsed.su != null ? parsed.su : (parsed.vacuum != null ? parsed.vacuum : parsed.pressure);
             if (pressureVal != null) {
                 var v = parseFloat(pressureVal);
-                if (!isNaN(v)) {
-                    validationRunCurrentVacuumMmHg = v;
-                    setValRunEl('val-run-current-vacuum', v.toFixed(1));
-                    _maybeStartVdHold(v);
-                }
+                if (!isNaN(v)) _applyVdLivePressure(v);
             }
             if (norm === 'target_reached' || norm.indexOf('target_reached') >= 0) {
                 _startVdHoldAfterTarget();
             }
-            if (kind === 'completed' || norm === 'completed' || norm === 'complete.' || norm === 'idle') {
-                if (validationRunIntervalId != null) {
-                    clearInterval(validationRunIntervalId);
-                    validationRunIntervalId = null;
-                }
-                if (validationRunHoldStarted) {
-                    completeValidationRunAfterDuration();
-                }
-            }
+            // Pi owns hold timer and sends #STOP — do not complete on ESP #IDLE.
             if (kind === 'error' || kind === 'adapter_error') {
                 if (validationRunIntervalId != null) {
                     clearInterval(validationRunIntervalId);
@@ -222,6 +210,45 @@
             }
         } catch (ex) { /* ignore */ }
     };
+
+    function _stopVdPressurePoll() {
+        if (window._vdPressurePollId != null) {
+            clearInterval(window._vdPressurePollId);
+            window._vdPressurePollId = null;
+        }
+    }
+    window._stopVdPressurePoll = _stopVdPressurePoll;
+
+    function _applyVdLivePressure(v) {
+        if (v == null || isNaN(v)) return;
+        validationRunCurrentVacuumMmHg = v;
+        setValRunEl('val-run-current-vacuum', Number(v).toFixed(1));
+        if (validationRunHoldStarted || validationRunState !== 'running') return;
+        var target = window._vdValidationParams && window._vdValidationParams.vacuumMmHg;
+        if (target == null || isNaN(parseFloat(target))) return;
+        target = parseFloat(target);
+        if (window._vdStartPressureMmHg == null) {
+            window._vdStartPressureMmHg = v;
+            return;
+        }
+        var startP = window._vdStartPressureMmHg;
+        var crossed = (startP > target && v <= target) || (startP < target && v >= target);
+        if (crossed) _startVdHoldAfterTarget();
+    }
+
+    function _startVdPressurePoll() {
+        _stopVdPressurePoll();
+        window._vdPressurePollId = setInterval(function () {
+            if (validationRunState !== 'running') return;
+            if (typeof apiRequest !== 'function') return;
+            apiRequest(API_BASE + '/api/hardware/status', { method: 'GET' }).then(function (res) {
+                if (!res || res.ok === false) return;
+                var raw = res.pressureMmHg != null ? res.pressureMmHg : res.pressure;
+                var v = parseFloat(raw);
+                if (!isNaN(v)) _applyVdLivePressure(v);
+            }).catch(function () { /* ignore */ });
+        }, 1000);
+    }
 
     function _maybeStartVdHold(vacuumVal) {
         if (validationRunHoldStarted || validationRunState !== 'running') return;
@@ -460,12 +487,14 @@
                 validationRunElapsedSec = 0;
                 validationRunHoldStarted = false;
                 validationRunCurrentVacuumMmHg = null;
+                window._vdStartPressureMmHg = null;
                 setValRunEl('val-run-elapsed-time', '00:00');
                 setValRunEl('val-run-current-vacuum', '0.0');
                 setValRunEl('val-run-status', 'Evacuating');
                 setValRunEl('val-run-status-sub', 'Waiting for set vacuum');
                 _setValRunStatusStyle('running');
                 _setValResultVisible(false);
+                _startVdPressurePoll();
                 logAuditEvent('Validation started', 'Vacuum validation run started', {
                     eventType: 'lifecycle',
                     entityType: 'validation',
@@ -560,6 +589,7 @@
     }
 
     function _closeVacuumCalEs() {
+        _stopCalPressurePoll();
         if (window._vacuumCalEsListener && window._vacuumCalEs) {
             try {
                 window._vacuumCalEs.removeEventListener('message', window._vacuumCalEsListener);
@@ -602,8 +632,42 @@
         }
     }
 
+    function _stopCalPressurePoll() {
+        if (window._calPressurePollId != null) {
+            clearInterval(window._calPressurePollId);
+            window._calPressurePollId = null;
+        }
+    }
+
+    function _startCalPressurePoll() {
+        _stopCalPressurePoll();
+        window._calPressurePollId = setInterval(function () {
+            var run = window._vacuumCalRun;
+            if (!run || run.phase === 'done' || run.phase === 'idle' || run.phase === 'prompt') return;
+            if (typeof apiRequest !== 'function') return;
+            apiRequest(API_BASE + '/api/hardware/status', { method: 'GET' }).then(function (res) {
+                if (!res || res.ok === false) return;
+                var raw = res.pressureMmHg != null ? res.pressureMmHg : res.pressure;
+                var v = parseFloat(raw);
+                if (isNaN(v)) return;
+                run.liveVacuumMmHg = v;
+                _setCalRunEl('cal-live-vacuum', v.toFixed(1));
+                if (run.phase !== 'evacuating') return;
+                if (run.startPressureMmHg == null) {
+                    run.startPressureMmHg = v;
+                    return;
+                }
+                var target = run.targetVacuumMmHg;
+                var startP = run.startPressureMmHg;
+                var crossed = (startP > target && v <= target) || (startP < target && v >= target);
+                if (crossed) _startCalibrationHoldAfterTarget(run);
+            }).catch(function () { /* ignore */ });
+        }, 1000);
+    }
+
     function abortVacuumCalibration() {
         _clearVacuumCalTimers();
+        _stopCalPressurePoll();
         _closeVacuumCalEs();
         if (typeof apiRequest === 'function') {
             apiRequest(API_BASE + '/api/hardware/calibration/stop', { method: 'POST' }).catch(function () {});
@@ -638,8 +702,15 @@
                     || norm.indexOf('target reached') >= 0;
                 if (targetReached) {
                     _startCalibrationHoldAfterTarget(run);
-                } else if (vacuum != null && !isNaN(vacuum) && vacuum >= run.targetVacuumMmHg) {
-                    _startCalibrationHoldAfterTarget(run);
+                } else if (vacuum != null && !isNaN(vacuum)) {
+                    if (run.startPressureMmHg == null) {
+                        run.startPressureMmHg = vacuum;
+                    } else {
+                        var target = run.targetVacuumMmHg;
+                        var startP = run.startPressureMmHg;
+                        var crossed = (startP > target && vacuum <= target) || (startP < target && vacuum >= target);
+                        if (crossed) _startCalibrationHoldAfterTarget(run);
+                    }
                 }
             }
         } catch (ex) { /* ignore */ }
@@ -847,6 +918,7 @@
                 window._vacuumCalRun.phase = 'evacuating';
                 _setCalRunEl('cal-run-status', 'Evacuating to ' + settings.targetVacuumMmHg + ' mmHg');
                 _setCalRunEl('cal-live-vacuum', '0.0');
+                _startCalPressurePoll();
             }
         }).catch(function (err) {
             _closeVacuumCalEs();
