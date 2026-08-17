@@ -734,13 +734,13 @@ def _calibration_sim_loop(target_mmhg: float):
 
 
 def cmd_start_calibration(target_mmhg: float = 400.0):
-    """Start vacuum pressure calibration (evacuate). Pi polls pressure; UI owns prompt timing."""
+    """Begin calibration evacuate using the same #START:NNN* command as a test (default 400)."""
     global _sim_active, _sim_thread
     try:
-        target = float(target_mmhg)
-    except (TypeError, ValueError):
-        return {"ok": False, "error": "Invalid calibration target vacuum"}
-    if target < 1 or target > 650:
+        target = _esp_mmhg_value(target_mmhg)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    if target > 650:
         return {"ok": False, "error": "Calibration target must be 1–650 mmHg"}
     if _simulate_enabled():
         with _sim_lock:
@@ -750,15 +750,23 @@ def cmd_start_calibration(target_mmhg: float = 400.0):
             _sim_active = True
             _sim_thread = threading.Thread(
                 target=_calibration_sim_loop,
-                args=(target,),
+                args=(float(target),),
                 daemon=True,
             )
             _sim_thread.start()
         start_pressure_poll(1.0)
-        return {"ok": True, "simulated": True, "targetVacuumMmHg": target}
+        return {"ok": True, "simulated": True, "targetVacuumMmHg": target, "cmd": f"#START:{target:03d}*"}
+    # Same evacuate command as test/validation — not #START_CALIB yet.
+    return _cmd_start_vacuum_target(target)
+
+
+def cmd_esp_start_calib():
+    """After TARGET_REACHED: enter ESP calibration mode (#START_CALIB*)."""
+    if _simulate_enabled():
+        _broadcast_line("#START_CALIB_ACK*")
+        return {"ok": True, "simulated": True, "response": "#START_CALIB_ACK*"}
     result = send_command("#START_CALIB*", timeout=TEST_COMMAND_TIMEOUT)
     if result.get("ok"):
-        start_pressure_poll(1.0)
         norm = str(result.get("normalized") or "").lower()
         if "start_calib_ack" not in norm and "error" not in norm:
             result["ack"] = norm or "START_CALIB_ACK"

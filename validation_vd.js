@@ -371,7 +371,7 @@
         stopValidationOnBackend().catch(function () {});
         _closeValidationRunHardwareEs();
         setValRunEl('val-run-status', 'Completed');
-        setValRunEl('val-run-status-sub', 'Select Pass or Fail');
+        setValRunEl('val-run-status-sub', 'Releasing pressure');
         _setValResultVisible(false);
         _resetValidationRunActionButtonToStart();
 
@@ -379,63 +379,70 @@
         var targetVac = p.vacuumMmHg;
         var actualVac = validationRunCurrentVacuumMmHg;
         var actualTimeDisplay = formatMmSs(validationRunElapsedSec);
+        var releaseSec = (typeof getReleasePressureLockSec === 'function') ? getReleasePressureLockSec() : 80;
+        var lockFn = (typeof showReleasePressureLock === 'function')
+            ? showReleasePressureLock
+            : function () { return Promise.resolve(); };
 
-        if (typeof showValidationPassFailModal !== 'function') {
-            validationSessionResults.distance = buildValidationRunSnapshot(true);
-            validationCompletion.distance = true;
-            saveCombinedValidationReport();
-            return;
-        }
-
-        showValidationPassFailModal({
-            setVacuumMmHg: targetVac,
-            actualVacuumMmHg: actualVac,
-            setDurationDisplay: p.durationDisplay,
-            actualDurationSec: validationRunElapsedSec,
-            actualDurationDisplay: actualTimeDisplay
-        }).then(function (choice) {
-            if (choice === 'pass') {
-                logAuditEvent('Validation marked Pass', 'Operator marked vacuum validation Pass', {
-                    eventType: 'lifecycle',
-                    entityType: 'validation',
-                    extra: {
-                        validationType: 'distance',
-                        status: 'Pass',
-                        setVacuumMmHg: targetVac,
-                        actualVacuumMmHg: actualVac
-                    }
-                });
+        lockFn(releaseSec).then(function () {
+            setValRunEl('val-run-status-sub', 'Select Pass or Fail');
+            if (typeof showValidationPassFailModal !== 'function') {
                 validationSessionResults.distance = buildValidationRunSnapshot(true);
                 validationCompletion.distance = true;
                 saveCombinedValidationReport();
                 return;
             }
-            logAuditEvent('Validation marked Fail', 'Operator marked vacuum validation Fail — redirecting to calibration', {
-                eventType: 'lifecycle',
-                entityType: 'validation',
-                extra: {
-                    validationType: 'distance',
-                    status: 'Fail',
-                    setVacuumMmHg: targetVac,
-                    actualVacuumMmHg: actualVac
-                }
-            });
-            window._lastFailedValidation = {
+
+            showValidationPassFailModal({
                 setVacuumMmHg: targetVac,
                 actualVacuumMmHg: actualVac,
                 setDurationDisplay: p.durationDisplay,
                 actualDurationSec: validationRunElapsedSec,
-                actualDurationDisplay: actualTimeDisplay,
-                status: 'Fail'
-            };
-            validationCompletion.distance = false;
-            if (typeof showLoadingOverlay === 'function') {
-                showLoadingOverlay('Please wait', 'Redirecting to CALIBRATION', { cancellable: false });
-            }
-            setTimeout(function () {
-                if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
-                goToPage('vacuum-calibration');
-            }, 1500);
+                actualDurationDisplay: actualTimeDisplay
+            }).then(function (choice) {
+                if (choice === 'pass') {
+                    logAuditEvent('Validation marked Pass', 'Operator marked vacuum validation Pass', {
+                        eventType: 'lifecycle',
+                        entityType: 'validation',
+                        extra: {
+                            validationType: 'distance',
+                            status: 'Pass',
+                            setVacuumMmHg: targetVac,
+                            actualVacuumMmHg: actualVac
+                        }
+                    });
+                    validationSessionResults.distance = buildValidationRunSnapshot(true);
+                    validationCompletion.distance = true;
+                    saveCombinedValidationReport();
+                    return;
+                }
+                logAuditEvent('Validation marked Fail', 'Operator marked vacuum validation Fail — redirecting to calibration', {
+                    eventType: 'lifecycle',
+                    entityType: 'validation',
+                    extra: {
+                        validationType: 'distance',
+                        status: 'Fail',
+                        setVacuumMmHg: targetVac,
+                        actualVacuumMmHg: actualVac
+                    }
+                });
+                window._lastFailedValidation = {
+                    setVacuumMmHg: targetVac,
+                    actualVacuumMmHg: actualVac,
+                    setDurationDisplay: p.durationDisplay,
+                    actualDurationSec: validationRunElapsedSec,
+                    actualDurationDisplay: actualTimeDisplay,
+                    status: 'Fail'
+                };
+                validationCompletion.distance = false;
+                if (typeof showLoadingOverlay === 'function') {
+                    showLoadingOverlay('Please wait', 'Redirecting to CALIBRATION', { cancellable: false });
+                }
+                setTimeout(function () {
+                    if (typeof hideLoadingOverlay === 'function') hideLoadingOverlay();
+                    goToPage('vacuum-calibration');
+                }, 1500);
+            });
         });
     };
 
@@ -606,23 +613,28 @@
 
     function _startCalibrationHoldAfterTarget(run) {
         if (!run || run.phase !== 'evacuating') return;
-        run.phase = 'holding';
-        run.holdSec = 0;
-        _setCalRunEl('cal-run-status', 'Target reached — holding 5 s');
-        _setCalRunEl('cal-hold-elapsed', '00:00');
+        // After TARGET_REACHED: send #START_CALIB*, then collect gauge value for #CALIBVALUE.
+        run.phase = 'esp_calib';
         _clearVacuumCalTimers();
-        window._vacuumCalHoldTimer = setInterval(function () {
-            var r = window._vacuumCalRun;
-            if (!r || r.phase !== 'holding') return;
-            r.holdSec += 1;
-            _setCalRunEl('cal-hold-elapsed', formatMmSs(r.holdSec));
-            if (r.holdSec >= r.holdAfterTargetSec) {
-                _clearVacuumCalTimers();
-                r.phase = 'prompt';
+        _setCalRunEl('cal-run-status', 'Target reached — starting ESP calibration…');
+        _setCalRunEl('cal-hold-elapsed', '00:00');
+        apiRequest(API_BASE + '/api/hardware/calibration/esp-start', { method: 'POST' })
+            .then(function (res) {
+                if (!res || res.ok !== true) {
+                    return Promise.reject(new Error((res && res.error) ? String(res.error) : 'ESP did not acknowledge START_CALIB'));
+                }
+                if (!window._vacuumCalRun || window._vacuumCalRun !== run) return;
+                run.phase = 'prompt';
                 _setCalRunEl('cal-run-status', 'Enter external gauge reading');
-                showCalibrationGaugeModal(r);
-            }
-        }, 1000);
+                showCalibrationGaugeModal(run);
+            })
+            .catch(function (err) {
+                run.phase = 'idle';
+                _setCalRunEl('cal-run-status', 'ESP calibration start failed');
+                var startBtn = document.getElementById('btn-calibration-start');
+                if (startBtn) startBtn.disabled = false;
+                showAppModal('Failed to start ESP calibration: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
+            });
     }
 
     function _clearVacuumCalTimers() {
@@ -643,7 +655,7 @@
         _stopCalPressurePoll();
         window._calPressurePollId = setInterval(function () {
             var run = window._vacuumCalRun;
-            if (!run || run.phase === 'done' || run.phase === 'idle' || run.phase === 'prompt') return;
+            if (!run || run.phase === 'done' || run.phase === 'idle' || run.phase === 'prompt' || run.phase === 'esp_calib') return;
             if (typeof apiRequest !== 'function') return;
             apiRequest(API_BASE + '/api/hardware/status', { method: 'GET' }).then(function (res) {
                 if (!res || res.ok === false) return;
@@ -679,7 +691,7 @@
 
     function vacuumCalibrationHardwareMessage(ev) {
         var run = window._vacuumCalRun;
-        if (!run || run.phase === 'done' || run.phase === 'prompt') return;
+        if (!run || run.phase === 'done' || run.phase === 'prompt' || run.phase === 'esp_calib') return;
         try {
             var raw = ev.data;
             if (raw == null || raw === '') return;
@@ -810,6 +822,8 @@
     }
 
     function saveCalibrationReport(payload) {
+        window._postRunSessionHold = true;
+        if (typeof markAutoLogoutActivity === 'function') markAutoLogoutActivity();
         return apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: payload })
             .then(function (result) {
                 var reportId = result && result.id;
@@ -817,10 +831,12 @@
                 if (reportId && typeof openReportPreview === 'function') {
                     openReportPreview(reportId, { setGate: true });
                 } else {
+                    window._postRunSessionHold = false;
                     goToPage('reports');
                 }
             })
             .catch(function (err) {
+                window._postRunSessionHold = false;
                 console.error('Failed to save calibration report', err);
                 showAppModal('Calibration saved to device failed: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
                 goToPage('reports');
@@ -830,7 +846,7 @@
     function finishVacuumCalibration(actualPressure) {
         var run = window._vacuumCalRun;
         if (!run) return;
-        _setCalRunEl('cal-run-status', 'Applying calibration…');
+        _setCalRunEl('cal-run-status', 'Applying calibration value…');
         apiRequest(API_BASE + '/api/hardware/calibration/apply', {
             method: 'POST',
             body: {
@@ -854,9 +870,16 @@
             _clearVacuumCalTimers();
             _closeVacuumCalEs();
             apiRequest(API_BASE + '/api/hardware/calibration/stop', { method: 'POST' }).catch(function () {});
-            var payload = buildCalibrationReportPayload(actualPressure, run);
-            window._lastFailedValidation = null;
-            return saveCalibrationReport(payload);
+            _setCalRunEl('cal-run-status', 'Releasing pressure…');
+            var releaseSec = run.releaseTimeSec || ((typeof getReleasePressureLockSec === 'function') ? getReleasePressureLockSec() : 80);
+            var lockFn = (typeof showReleasePressureLock === 'function')
+                ? showReleasePressureLock
+                : function () { return Promise.resolve(); };
+            return lockFn(releaseSec).then(function () {
+                var payload = buildCalibrationReportPayload(actualPressure, run);
+                window._lastFailedValidation = null;
+                return saveCalibrationReport(payload);
+            });
         }).catch(function (err) {
             _setCalRunEl('cal-run-status', 'Calibration failed');
             showAppModal('Failed to apply calibration: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
@@ -912,11 +935,11 @@
             body: { targetVacuumMmHg: settings.targetVacuumMmHg }
         }).then(function (res) {
             if (!res || res.ok !== true) {
-                return Promise.reject(new Error((res && res.error) ? String(res.error) : 'Hardware did not acknowledge START_CALIB'));
+                return Promise.reject(new Error((res && res.error) ? String(res.error) : 'Hardware did not acknowledge START'));
             }
             if (window._vacuumCalRun) {
                 window._vacuumCalRun.phase = 'evacuating';
-                _setCalRunEl('cal-run-status', 'Evacuating to ' + settings.targetVacuumMmHg + ' mmHg');
+                _setCalRunEl('cal-run-status', 'Evacuating to ' + settings.targetVacuumMmHg + ' mmHg (START)');
                 _setCalRunEl('cal-live-vacuum', '0.0');
                 _startCalPressurePoll();
             }
