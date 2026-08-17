@@ -7,7 +7,7 @@
     <meta name="viewport"
         content="width=1024, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Leak Test Apparatus</title>
-    <link rel="stylesheet" href="styles.css?v=37">
+    <link rel="stylesheet" href="styles.css?v=39">
 </head>
 
 <body>
@@ -1161,7 +1161,7 @@
                 <div class="page" id="page-validate">
                     <div class="validation-main-container">
                         <h2 class="section-title">Validation</h2>
-                        <p class="section-subtitle">Choose validation procedure</p>
+                        <p class="section-subtitle">Choose validation or calibration procedure</p>
                         <div class="validation-settings-grid">
                             <button class="settings-card settings-validate" onclick="selectOperation('validate')">
                                 <div class="settings-icon">
@@ -1173,6 +1173,24 @@
                                 </div>
                                 <h3>Validate</h3>
                                 <p>Vacuum apparatus validation</p>
+                            </button>
+                            <button class="settings-card settings-calibrate" onclick="selectOperation('calibrate')">
+                                <div class="settings-icon">
+                                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M12 2v6"></path>
+                                        <path d="M12 16v6"></path>
+                                        <path d="M4.93 4.93l4.24 4.24"></path>
+                                        <path d="M14.83 14.83l4.24 4.24"></path>
+                                        <path d="M2 12h6"></path>
+                                        <path d="M16 12h6"></path>
+                                        <path d="M4.93 19.07l4.24-4.24"></path>
+                                        <path d="M14.83 9.17l4.24-4.24"></path>
+                                        <circle cx="12" cy="12" r="3"></circle>
+                                    </svg>
+                                </div>
+                                <h3>Calibration</h3>
+                                <p>Vacuum pressure calibration</p>
                             </button>
                         </div>
                     </div>
@@ -1408,11 +1426,11 @@
                     </div>
                 </div>
 
-                <!-- Vacuum pressure calibration (auto-run to factory target, gauge entry, report) -->
+                <!-- Vacuum pressure calibration (manual start after gauge setup, gauge entry, report) -->
                 <div class="page" id="page-vacuum-calibration">
                     <div class="validation-type-page vacuum-calibration-page">
                         <h2 class="section-title">Vacuum Pressure Calibration</h2>
-                        <p class="section-subtitle">Evacuates to the factory calibration target, holds 5 s at target, then enter the external gauge reading.</p>
+                        <p class="section-subtitle">Connect the external pressure gauge as described in the instruction manual and switch the gauge ON before starting calibration.</p>
                         <div class="val-run-panel-inner val-run-vacuum-metrics">
                             <div class="val-run-metric-card">
                                 <div class="val-run-metric-title">Vacuum (mmHg)</div>
@@ -1443,11 +1461,12 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="validation-card" style="margin-top:16px;">
+                        <div class="validation-card calibration-status-card">
                             <div class="validation-card-label">Status</div>
-                            <span class="validation-card-value" id="cal-run-status">Starting…</span>
+                            <span class="validation-card-value" id="cal-run-status">Ready to start</span>
                         </div>
-                        <div class="quick-test-actions" style="margin-top:24px;">
+                        <div class="quick-test-actions calibration-actions">
+                            <button type="button" class="btn btn-primary" id="btn-calibration-start" onclick="confirmVacuumCalibration()">Start Calibration</button>
                             <button type="button" class="btn btn-secondary" onclick="abortVacuumCalibration()">Back</button>
                         </div>
                     </div>
@@ -2094,7 +2113,7 @@
     <script src="rbac.js?v=6"></script>
     <script src="script.js?v=67"></script>
     <script src="leaktest_patch.js?v=2"></script>
-    <script src="validation_vd.js?v=9"></script>
+    <script src="validation_vd.js?v=10"></script>
 </body>
 
 </html>

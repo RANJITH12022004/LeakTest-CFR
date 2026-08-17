@@ -1582,7 +1582,7 @@ body {
     flex-direction: column;
     justify-content: center;
     align-items: center;
-    padding: 24px 20px;
+    padding: 18px 16px;
     min-height: 0;
     width: 100%;
     box-sizing: border-box;
@@ -1613,12 +1613,12 @@ body {
     justify-items: center;
 }
 
-/* Validation page: single Validate card — modestly larger than default settings tiles */
 #page-validate .validation-settings-grid {
-    grid-template-columns: 1fr;
-    justify-items: stretch;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+    justify-items: center;
     width: 100%;
-    max-width: 440px;
+    max-width: 760px;
     margin-left: auto;
     margin-right: auto;
 }
@@ -1629,32 +1629,36 @@ body {
 }
 
 #page-validate .validation-settings-grid .settings-card {
-    min-width: 0;
+    min-width: 220px;
     width: 100%;
-    max-width: none;
-    min-height: 220px;
-    padding: 28px 26px;
-    gap: 14px;
+    max-width: 320px;
+    min-height: 180px;
+    padding: 20px 18px;
+    gap: 10px;
 }
 
 #page-validate .validation-settings-grid .settings-icon {
-    width: 72px;
-    height: 72px;
-    margin-bottom: 6px;
+    width: 60px;
+    height: 60px;
+    margin-bottom: 2px;
 }
 
 #page-validate .validation-settings-grid .settings-icon svg {
-    width: 40px;
-    height: 40px;
+    width: 34px;
+    height: 34px;
 }
 
 #page-validate .validation-settings-grid .settings-card h3 {
-    font-size: 20px;
+    font-size: 21px;
 }
 
 #page-validate .validation-settings-grid .settings-card p {
     font-size: 14px;
-    line-height: 1.45;
+    line-height: 1.35;
+}
+
+#page-validate .section-subtitle {
+    margin-bottom: 14px;
 }
 
 .settings-validate {
@@ -6059,9 +6063,38 @@ input[type="number"] {
     cursor: not-allowed;
 }
 
+.vacuum-calibration-page {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 20px 18px 18px;
+}
+
+.vacuum-calibration-page .section-title {
+    margin-bottom: 6px;
+}
+
+.vacuum-calibration-page .section-subtitle {
+    margin-bottom: 10px;
+    font-size: 14px;
+    line-height: 1.35;
+}
+
 .vacuum-calibration-page .val-run-vacuum-metrics {
     max-width: 720px;
     margin: 0 auto;
+}
+
+.vacuum-calibration-page .val-run-metric-card {
+    min-height: 0;
+}
+
+.vacuum-calibration-page .calibration-status-card {
+    max-width: 720px;
+    margin: 10px auto 0;
+}
+
+.vacuum-calibration-page .calibration-actions {
+    margin-top: 14px;
 }
 
 .vacuum-calibration-page .quick-test-actions {
