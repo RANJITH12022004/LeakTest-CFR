@@ -786,7 +786,11 @@
     }
 
     function startVacuumCalibrationRun() {
+        if (window._vacuumCalRun && window._vacuumCalRun.phase && window._vacuumCalRun.phase !== 'idle' && window._vacuumCalRun.phase !== 'done') {
+            return;
+        }
         var settings = getFactoryCalibrationSettings();
+        var startBtn = document.getElementById('btn-calibration-start');
         window._vacuumCalRun = {
             targetVacuumMmHg: settings.targetVacuumMmHg,
             releaseTimeSec: settings.releaseTimeSec,
@@ -800,6 +804,7 @@
         _setCalRunEl('cal-release-time', String(settings.releaseTimeSec));
         _setCalRunEl('cal-hold-elapsed', '00:00');
         _setCalRunEl('cal-run-status', 'Starting calibration…');
+        if (startBtn) startBtn.disabled = true;
         _clearVacuumCalTimers();
         _closeVacuumCalEs();
         try {
@@ -807,6 +812,9 @@
             window._vacuumCalEsListener = vacuumCalibrationHardwareMessage;
             window._vacuumCalEs.addEventListener('message', window._vacuumCalEsListener);
         } catch (esErr) {
+            if (startBtn) startBtn.disabled = false;
+            if (window._vacuumCalRun) window._vacuumCalRun.phase = 'idle';
+            _setCalRunEl('cal-run-status', 'Hardware stream unavailable');
             showAppModal('Could not connect to hardware stream.', 'Calibration');
             return;
         }
@@ -835,15 +843,25 @@
             }
         }).catch(function (err) {
             _closeVacuumCalEs();
+            if (startBtn) startBtn.disabled = false;
+            if (window._vacuumCalRun) window._vacuumCalRun.phase = 'idle';
             _setCalRunEl('cal-run-status', 'Start failed');
             showAppModal('Failed to start calibration: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
         });
     }
 
     function initVacuumCalibrationPage() {
-        showAppModal('Connect external pressure gauge, then calibration will evacuate to the factory target automatically.', 'Instruction', function () {
-            startVacuumCalibrationRun();
-        });
+        var settings = getFactoryCalibrationSettings();
+        var startBtn = document.getElementById('btn-calibration-start');
+        window._vacuumCalRun = null;
+        _clearVacuumCalTimers();
+        _closeVacuumCalEs();
+        _setCalRunEl('cal-set-vacuum', String(settings.targetVacuumMmHg));
+        _setCalRunEl('cal-live-vacuum', '--');
+        _setCalRunEl('cal-release-time', String(settings.releaseTimeSec));
+        _setCalRunEl('cal-hold-elapsed', '00:00');
+        _setCalRunEl('cal-run-status', 'Ready to start');
+        if (startBtn) startBtn.disabled = false;
     }
 
     window.confirmVacuumCalibration = function () {
