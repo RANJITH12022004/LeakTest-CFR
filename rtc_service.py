@@ -84,25 +84,38 @@ def _read_rtc_sysfs_wall_datetime() -> Optional[datetime]:
 
 
 def sync_system_clock_from_rtc() -> bool:
-    """Load hardware RTC into the system clock."""
-    dt = read_rtc_wall_datetime()
-    if dt is not None:
-        date_cmd_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-        ok, err = _run_privileged(["timedatectl", "set-time", date_cmd_str], timeout_sec=8)
+    """Load hardware RTC into the system clock.
+
+    Prefer ``hwclock --hctosys``. Avoid ``timedatectl set-time`` with a second-truncated
+    RTC read: that path also writes the RTC and, if called in a crash loop, steals
+    ~0.5s per call (~10–15s per minute).
+    """
+    rtc_dev = kernel_rtc_device_path()
+    if rtc_dev:
+        ok, err = _run_privileged(["hwclock", "-f", rtc_dev, "--hctosys"], timeout_sec=8)
         if ok:
             return True
-        ok2, err2 = _run_privileged(["date", "-s", date_cmd_str], timeout_sec=5)
-        if ok2:
-            return True
         if _logger:
-            _logger.warning("Could not set system time from RTC read: %s / %s", err, err2)
-    rtc_dev = kernel_rtc_device_path()
-    if not rtc_dev:
+            _logger.warning("hwclock --hctosys failed (%s): %s", rtc_dev, err)
+    dt = read_rtc_wall_datetime()
+    if dt is None:
         return False
-    ok, err = _run_privileged(["hwclock", "-f", rtc_dev, "--hctosys"], timeout_sec=8)
-    if not ok and _logger:
-        _logger.warning("hwclock --hctosys failed (%s): %s", rtc_dev, err)
-    return ok
+    # Skip no-op sets when system already matches RTC (within 2s).
+    try:
+        if abs((datetime.now() - dt).total_seconds()) <= 2:
+            return True
+    except Exception:
+        pass
+    date_cmd_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+    ok, err = _run_privileged(["date", "-s", date_cmd_str], timeout_sec=5)
+    if ok:
+        return True
+    ok2, err2 = _run_privileged(["timedatectl", "set-time", date_cmd_str], timeout_sec=8)
+    if ok2:
+        return True
+    if _logger:
+        _logger.warning("Could not set system time from RTC read: %s / %s", err, err2)
+    return False
 
 
 def _parse_hwclock_line(line: str) -> Optional[datetime]:
