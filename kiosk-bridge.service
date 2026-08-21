@@ -2,6 +2,8 @@
 Description=Leak Test kiosk API (Flask app.py)
 After=local-fs.target
 Wants=local-fs.target
+# Legacy bridge.service must not run: its RestartSec crash-loop reset RTC via timedatectl.
+Conflicts=bridge.service
 
 [Service]
 Type=simple
