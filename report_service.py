@@ -654,12 +654,20 @@ def _format_report_ts(value: Any) -> str:
     if not s:
         return "--"
     try:
-        clean = s.replace("Z", "").strip()
-        if "+" in clean:
-            clean = clean.split("+", 1)[0].strip()
-        if clean.count("-") > 2:
-            clean = clean.rsplit("-", 1)[0].strip()
-        dt = datetime.fromisoformat(clean)
+        # Treat trailing Z as UTC so local display (IST) matches browser formatReportDate.
+        if s.endswith("Z") or s.endswith("z"):
+            dt = datetime.fromisoformat(s[:-1] + "+00:00")
+        else:
+            clean = s.strip()
+            if "+" in clean[10:]:
+                # keep offset for fromisoformat
+                dt = datetime.fromisoformat(clean)
+            else:
+                if clean.count("-") > 2:
+                    clean = clean.rsplit("-", 1)[0].strip()
+                dt = datetime.fromisoformat(clean)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
         return dt.strftime("%d/%m/%Y %H:%M:%S")
     except Exception:
         return s

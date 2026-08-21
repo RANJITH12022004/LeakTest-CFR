@@ -612,22 +612,32 @@ def cmd_start_test(params: Dict[str, Any]):
 
 
 def cmd_stop():
-    """Send #STOP* and wait for #STOP_ACK* (or legacy stopped). Retry up to 3 times with 1s gaps."""
+    """Send #STOP* repeatedly until #STOP_ACK* (or legacy stopped). Up to 15 attempts, 1s apart."""
     global _sim_active
     stop_pressure_poll()
     if _simulate_enabled():
         with _sim_lock:
             _sim_active = False
         _broadcast_line("#STOP_ACK*")
-        return {"ok": True, "simulated": True}
+        return {"ok": True, "simulated": True, "response": "#STOP_ACK*", "normalized": "STOP_ACK"}
     last = None
-    for attempt in range(3):
+    for attempt in range(15):
         last = send_command("#STOP*", timeout=COMMAND_TIMEOUT, max_retries=1)
-        if last.get("ok"):
-            return last
-        if attempt < 2:
+        if last and last.get("ok"):
+            norm = str(last.get("normalized") or "").lower().lstrip("#")
+            kind = str(last.get("kind") or "").lower()
+            if "stop_ack" in norm or norm == "stopped" or kind == "stopped":
+                last["ack"] = "STOP_ACK"
+                last["attempts"] = attempt + 1
+                return last
+            # Generic ok without explicit STOP_ACK — still accept but tag.
+            if kind == "ok":
+                last["ack"] = norm or "ok"
+                last["attempts"] = attempt + 1
+                return last
+        if attempt < 14:
             time.sleep(1.0)
-    return last or {"ok": False, "error": "Timeout", "cmd": "#STOP*"}
+    return last or {"ok": False, "error": "No STOP_ACK from ESP", "cmd": "#STOP*"}
 
 
 def cmd_status():
@@ -791,25 +801,30 @@ def cmd_esp_start_calib():
 
 
 def cmd_esp_stop_calib():
-    """End ESP calibration mode (#STOP_CALIB*) and wait for #STOP_CALIB_ACK*. Retry up to 3 times with 1s gaps."""
+    """End ESP calibration mode (#STOP_CALIB*) until #STOP_CALIB_ACK*. Up to 15 attempts, 1s apart."""
     stop_pressure_poll()
     if _simulate_enabled():
         global _sim_active
         with _sim_lock:
             _sim_active = False
         _broadcast_line("#STOP_CALIB_ACK*")
-        return {"ok": True, "simulated": True, "response": "#STOP_CALIB_ACK*"}
+        return {"ok": True, "simulated": True, "response": "#STOP_CALIB_ACK*", "normalized": "STOP_CALIB_ACK"}
     last = None
-    for attempt in range(3):
+    for attempt in range(15):
         last = send_command("#STOP_CALIB*", timeout=COMMAND_TIMEOUT, max_retries=1)
-        if last.get("ok"):
-            norm = str(last.get("normalized") or "").lower()
-            if "stop_calib_ack" not in norm and "error" not in norm:
-                last["ack"] = norm or "STOP_CALIB_ACK"
-            return last
-        if attempt < 2:
+        if last and last.get("ok"):
+            norm = str(last.get("normalized") or "").lower().lstrip("#")
+            if "stop_calib_ack" in norm:
+                last["ack"] = "STOP_CALIB_ACK"
+                last["attempts"] = attempt + 1
+                return last
+            if str(last.get("kind") or "").lower() == "ok":
+                last["ack"] = norm or "ok"
+                last["attempts"] = attempt + 1
+                return last
+        if attempt < 14:
             time.sleep(1.0)
-    return last or {"ok": False, "error": "Timeout", "cmd": "#STOP_CALIB*"}
+    return last or {"ok": False, "error": "No STOP_CALIB_ACK from ESP", "cmd": "#STOP_CALIB*"}
 
 
 def cmd_apply_calibration(calib_value: float, release_time_sec: int = None, gauge_value: float = None, set_vacuum_mmhg: float = None):

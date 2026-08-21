@@ -1047,8 +1047,8 @@ def _report_brand_title(rtype: str) -> str:
 
 
 def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: Dict[str, Any]) -> Dict[str, str]:
-    """Hold = set hold time; Release = factory/release lock; Total = hold + release.
-    Aborted/power-interruption reports use actual elapsed for Hold and Total.
+    """Hold = set/actual hold; Release = factory lock; Total = build + hold + release (stored).
+    Aborted/power-interruption: Hold = actual elapsed; Total prefers stored totalDurationSec.
     """
     hold = td.get("holdDurationSec")
     if hold in (None, ""):
@@ -1063,6 +1063,10 @@ def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: D
     if release in (None, ""):
         release = 80
     total = td.get("totalDurationSec")
+    try:
+        build_i = int(round(float(td.get("buildDurationSec")))) if td.get("buildDurationSec") not in (None, "") else 0
+    except (TypeError, ValueError):
+        build_i = 0
     status_low = str(td.get("status") or "").strip().lower()
     remarks_low = str(td.get("remarks") or "").strip().lower()
     is_aborted = status_low == "aborted" or "power interruption" in remarks_low
@@ -1072,7 +1076,6 @@ def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: D
             actual = td.get("durationSeconds")
         if actual not in (None, ""):
             hold = actual
-            total = actual
     try:
         hold_i = int(round(float(hold))) if hold not in (None, "") else None
     except (TypeError, ValueError):
@@ -1081,8 +1084,24 @@ def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: D
         release_i = int(round(float(release))) if release not in (None, "") else None
     except (TypeError, ValueError):
         release_i = None
-    if total in (None, "") and hold_i is not None and release_i is not None and not is_aborted:
-        total = hold_i + release_i
+    if total in (None, ""):
+        if hold_i is not None and release_i is not None:
+            total = build_i + hold_i + release_i
+        else:
+            # Wall-clock fallback Start→End
+            start = td.get("testStartTime")
+            end = td.get("testEndTime")
+            if start and end:
+                try:
+                    from datetime import datetime as _dt
+
+                    def _parse(v):
+                        s = str(v).replace("Z", "+00:00")
+                        return _dt.fromisoformat(s)
+
+                    total = max(0, int((_parse(end) - _parse(start)).total_seconds()))
+                except Exception:
+                    pass
     return {
         "hold": _fmt_mmss_value(hold_i) if hold_i is not None else "--",
         "release": _fmt_mmss_value(release_i) if release_i is not None else "--",

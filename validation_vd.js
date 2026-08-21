@@ -592,17 +592,19 @@
                             }
                             validationRunState = 'idle';
                             validationRunHoldStarted = false;
-                            var stopP = (typeof hardwareLeakStopAwait === 'function')
-                                ? hardwareLeakStopAwait()
-                                : stopValidationOnBackend();
-                            Promise.resolve(stopP).catch(function () {}).then(function () {
-                                _closeValidationRunHardwareEs();
-                                _stopVdPressurePoll();
-                                _resetValidationRunActionButtonToStart();
-                                setValRunEl('val-run-status', 'Error');
-                                setValRunEl('val-run-status-sub', 'Pressure not building');
-                                showAppModal('Check for leaks. Pressure not building', 'Validation');
-                            });
+                            _closeValidationRunHardwareEs();
+                            _stopVdPressurePoll();
+                            _resetValidationRunActionButtonToStart();
+                            setValRunEl('val-run-status', 'Error');
+                            setValRunEl('val-run-status-sub', 'Pressure not building');
+                            // Modal + STOP until STOP_ACK (backend retries until ACK).
+                            showAppModal('Check for leaks. Pressure not building', 'Validation');
+                            var stopFn = (typeof hardwareLeakStopUntilAck === 'function')
+                                ? hardwareLeakStopUntilAck
+                                : (typeof hardwareLeakStopAwait === 'function')
+                                    ? hardwareLeakStopAwait
+                                    : stopValidationOnBackend;
+                            Promise.resolve(stopFn()).catch(function () {});
                         }
                     });
                 }
@@ -1193,13 +1195,13 @@
                         onFail: function () {
                             var startBtnFail = document.getElementById('btn-calibration-start');
                             var backBtnFail = document.getElementById('btn-calibration-back');
-                            Promise.resolve(_stopVacuumCalibrationHardware()).catch(function () {}).then(function () {
-                                if (window._vacuumCalRun) window._vacuumCalRun.phase = 'idle';
-                                if (startBtnFail) startBtnFail.disabled = false;
-                                if (backBtnFail) backBtnFail.textContent = 'Back';
-                                _setCalRunEl('cal-run-status', 'Pressure not building');
-                                showAppModal('Check for leaks. Pressure not building', 'Calibration');
-                            });
+                            if (window._vacuumCalRun) window._vacuumCalRun.phase = 'idle';
+                            if (startBtnFail) startBtnFail.disabled = false;
+                            if (backBtnFail) backBtnFail.textContent = 'Back';
+                            _setCalRunEl('cal-run-status', 'Pressure not building');
+                            // Modal + STOP_CALIB until ACK (same time).
+                            showAppModal('Check for leaks. Pressure not building', 'Calibration');
+                            Promise.resolve(_stopVacuumCalibrationHardware()).catch(function () {});
                         }
                     });
                 }
