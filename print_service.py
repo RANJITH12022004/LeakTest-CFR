@@ -1047,8 +1047,11 @@ def _report_brand_title(rtype: str) -> str:
 
 
 def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: Dict[str, Any]) -> Dict[str, str]:
-    """Hold = set/actual hold; Release = factory lock; Total = build + hold + release (stored).
-    Aborted/power-interruption: Hold = actual elapsed; Total prefers stored totalDurationSec.
+    """Hold / release / total for report text.
+
+    Completed: Total = build + hold + release (stored).
+    Aborted/power-interruption: Total = actual wall elapsed; release = 0 unless stamped;
+    never fall back to planned setDuration / factory release.
     """
     hold = td.get("holdDurationSec")
     if hold in (None, ""):
@@ -1071,11 +1074,39 @@ def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: D
     remarks_low = str(td.get("remarks") or "").strip().lower()
     is_aborted = status_low == "aborted" or "power interruption" in remarks_low
     if is_aborted:
-        actual = td.get("actualDurationSec")
+        actual = td.get("wallElapsedSec")
+        if actual in (None, ""):
+            actual = td.get("actualDurationSec")
         if actual in (None, ""):
             actual = td.get("durationSeconds")
-        if actual not in (None, ""):
+        if actual in (None, ""):
+            start = td.get("testStartTime")
+            end = td.get("testEndTime")
+            if start and end:
+                try:
+                    from datetime import datetime as _dt
+
+                    def _parse_wall(v):
+                        s = str(v).replace("Z", "+00:00")
+                        return _dt.fromisoformat(s)
+
+                    actual = max(0, int((_parse_wall(end) - _parse_wall(start)).total_seconds()))
+                except Exception:
+                    actual = None
+        # Prefer explicit hold from power-loss stamp; do not substitute setDuration.
+        if td.get("holdDurationSec") not in (None, ""):
+            hold = td.get("holdDurationSec")
+        elif actual not in (None, ""):
             hold = actual
+        # Power cut never completes release lock.
+        if td.get("releaseDurationSec") not in (None, ""):
+            release = td.get("releaseDurationSec")
+        else:
+            release = 0
+        if actual not in (None, ""):
+            total = actual
+        elif td.get("totalDurationSec") not in (None, ""):
+            total = td.get("totalDurationSec")
     try:
         hold_i = int(round(float(hold))) if hold not in (None, "") else None
     except (TypeError, ValueError):
@@ -1109,7 +1140,7 @@ def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: D
                     total_i = max(0, int((_parse(end) - _parse(start)).total_seconds()))
                 except Exception:
                     pass
-    else:
+    elif not is_aborted:
         # Legacy reports: total was hold+release only (buildDurationSec missing / 0).
         # Prefer Start→End wall clock when it clearly includes build time.
         start = td.get("testStartTime")
@@ -1132,6 +1163,7 @@ def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: D
         "hold": _fmt_mmss_value(hold_i) if hold_i is not None else "--",
         "release": _fmt_mmss_value(release_i) if release_i is not None else "--",
         "total": _fmt_mmss_value(total_i) if total_i is not None else "--",
+        "buildSec": build_i,
         "holdSec": hold_i,
         "releaseSec": release_i,
         "totalSec": total_i,

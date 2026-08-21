@@ -1604,27 +1604,47 @@ def save_test_run_data(test_data: Dict[str, Any]):
         pass
 
 def get_test_run_data() -> Dict[str, Any]:
-    """Get last mid-test checkpoint (USB primary, then .bak, then SD mirror)."""
+    """Get last mid-test checkpoint (freshest among USB, .bak, and SD mirror)."""
     primary = _get_storage_path("test_run.json")
-    data = _load_checkpoint_candidate(primary)
-    if _is_usable_checkpoint(data):
-        return data
-    bak = primary.with_name(primary.name + ".bak")
-    data = _load_checkpoint_candidate(bak)
-    if _is_usable_checkpoint(data):
-        return data
-    mirror = _test_run_mirror_path()
-    # Avoid treating primary and mirror as the same path when STORAGE_DIR is APP_ROOT/storage.
-    try:
-        if mirror.resolve() != primary.resolve():
-            data = _load_checkpoint_candidate(mirror)
-            if _is_usable_checkpoint(data):
-                return data
-    except OSError:
-        data = _load_checkpoint_candidate(mirror)
+    candidates = []
+    for path in (primary, primary.with_name(primary.name + ".bak"), _test_run_mirror_path()):
+        try:
+            if path.resolve() in {c[0].resolve() for c in candidates}:
+                continue
+        except OSError:
+            pass
+        data = _load_checkpoint_candidate(path)
         if _is_usable_checkpoint(data):
-            return data
-    return {}
+            candidates.append((path, data))
+
+    if not candidates:
+        return {}
+
+    def _cp_rank(item):
+        _path, data = item
+        td = data.get("testData") if isinstance(data.get("testData"), dict) else {}
+        stamp = (
+            data.get("_checkpointAt")
+            or data.get("testEndTime")
+            or td.get("testEndTime")
+            or data.get("wallElapsedSec")
+            or td.get("wallElapsedSec")
+            or td.get("durationSeconds")
+            or 0
+        )
+        # Prefer ISO timestamps lexicographically; fall back to numeric elapsed.
+        try:
+            if isinstance(stamp, (int, float)):
+                return (1, float(stamp))
+            s = str(stamp).strip()
+            if s:
+                return (2, s)
+        except Exception:
+            pass
+        return (0, "")
+
+    candidates.sort(key=_cp_rank)
+    return dict(candidates[-1][1])
 
 
 def clear_test_run_data() -> None:

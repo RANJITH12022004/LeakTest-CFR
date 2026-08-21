@@ -5638,24 +5638,43 @@ function _reportDurationFieldsFromPreview(td, recipe, fs) {
     if ((total == null || isNaN(parseInt(total, 10))) && !isNaN(holdN) && !isNaN(releaseN)) {
         total = buildN + holdN + releaseN;
     }
-    // Aborted / power-cut: Hold = actual elapsed; Total prefers stored wall/build+hold+release
+    // Aborted / power-cut: show actual wall time performed (never planned hold+release).
     var statusLow = String(td.status || '').trim().toLowerCase();
     var remarksLow = String(td.remarks || '').trim().toLowerCase();
     var isAborted = statusLow === 'aborted' || remarksLow.indexOf('power interruption') >= 0;
     if (isAborted) {
-        var actual = td.actualDurationSec != null ? td.actualDurationSec : td.durationSeconds;
-        if (actual != null && !isNaN(parseInt(actual, 10))) {
-            hold = actual;
+        var actual = td.wallElapsedSec != null ? td.wallElapsedSec : td.actualDurationSec;
+        if (actual == null) actual = td.durationSeconds;
+        var aN = parseInt(actual, 10);
+        if (isNaN(aN) && td.testStartTime && td.testEndTime) {
+            try {
+                var wMs = new Date(td.testEndTime).getTime() - new Date(td.testStartTime).getTime();
+                if (!isNaN(wMs) && wMs >= 0) aN = Math.floor(wMs / 1000);
+            } catch (eA) { /* ignore */ }
         }
-        if (total == null || isNaN(parseInt(total, 10))) {
-            var aN = parseInt(actual, 10);
-            if (!isNaN(aN) && !isNaN(releaseN)) total = buildN + aN + releaseN;
-            else if (!isNaN(aN)) total = aN;
+        var holdStored = parseInt(td.holdDurationSec, 10);
+        if (!isNaN(holdStored) && holdStored >= 0) {
+            hold = holdStored;
+        } else if (!isNaN(aN)) {
+            hold = aN;
+        }
+        release = (td.releaseDurationSec != null && td.releaseDurationSec !== '')
+            ? td.releaseDurationSec
+            : 0;
+        releaseN = parseInt(release, 10);
+        if (isNaN(releaseN)) releaseN = 0;
+        buildN = parseInt(td.buildDurationSec, 10);
+        if (isNaN(buildN)) buildN = 0;
+        if (!isNaN(aN)) {
+            total = aN;
+        } else {
+            var tStored = parseInt(td.totalDurationSec, 10);
+            if (!isNaN(tStored)) total = tStored;
         }
     }
     // If build was never stored (or frozen to 0 by early checkpoint), prefer Start→End wall clock
     // when it clearly exceeds hold+release (build time missing from total).
-    if (td.testStartTime && td.testEndTime) {
+    if (!isAborted && td.testStartTime && td.testEndTime) {
         try {
             var wallMs = new Date(td.testEndTime).getTime() - new Date(td.testStartTime).getTime();
             if (!isNaN(wallMs) && wallMs >= 0) {
@@ -7693,10 +7712,7 @@ function _testRunTimerTick() {
     testRunElapsedSec++;
     setRunCard('run-elapsed-time', formatMmSs(testRunElapsedSec));
     _maybeRecordHoldVacuumSample();
-    // Refresh checkpoint every 5s so power-cut recovery has accurate elapsed time
-    if (testRunElapsedSec > 0 && (testRunElapsedSec % 5) === 0) {
-        syncTestRunCheckpoint();
-    }
+    // 1s checkpoint heartbeat covers power-cut recovery; no extra 5s sync needed.
     if (testRunSetDurationSec != null && testRunElapsedSec >= testRunSetDurationSec) {
         _finishTestRunVacuumHold();
     }
@@ -7710,6 +7726,7 @@ function _computeTestRunResult() {
 
 function _abortTestRunVacuumHoldWithError(msg) {
     if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
+    if (typeof clearTestRunCheckpointHeartbeat === 'function') clearTestRunCheckpointHeartbeat();
     if (testRunIntervalId != null) {
         clearInterval(testRunIntervalId);
         testRunIntervalId = null;
@@ -7726,6 +7743,7 @@ function _abortTestRunVacuumHoldWithError(msg) {
 
 function _abortTestRunPressureNotBuilding() {
     if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
+    if (typeof clearTestRunCheckpointHeartbeat === 'function') clearTestRunCheckpointHeartbeat();
     // Idempotent: watchdog / STOP path must not spam audits if called twice.
     if (window._testRunLeakAbortInFlight) {
         var stopFnEarly = (typeof hardwareLeakStopUntilAck === 'function')
@@ -7768,6 +7786,7 @@ function _abortTestRunPressureNotBuilding() {
 function _finishTestRunVacuumHold() {
     if (testRunButtonState !== 'abort') return;
     if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
+    if (typeof clearTestRunCheckpointHeartbeat === 'function') clearTestRunCheckpointHeartbeat();
     if (testRunIntervalId != null) {
         clearInterval(testRunIntervalId);
         testRunIntervalId = null;
@@ -8203,7 +8222,54 @@ function buildTestRunCheckpointPayload() {
     var payload = buildTestRunReportPayload();
     if (!payload) return null;
     payload.testData = payload.testData || {};
+    var now = new Date().toISOString();
+    var startIso = testRunStartTime || payload.testData.testStartTime || now;
+    var wallElapsed = 0;
+    try {
+        var wallMs = Date.now() - new Date(startIso).getTime();
+        if (!isNaN(wallMs) && wallMs >= 0) wallElapsed = Math.floor(wallMs / 1000);
+    } catch (eWall) {
+        wallElapsed = 0;
+    }
+    var holdElapsed = 0;
+    if (testRunHoldStarted) {
+        holdElapsed = (testRunElapsedSec != null && !isNaN(parseInt(testRunElapsedSec, 10)))
+            ? Math.max(0, parseInt(testRunElapsedSec, 10))
+            : 0;
+    }
+    var buildSoFar = (typeof _freezeTestRunBuildDurationSec === 'function')
+        ? _freezeTestRunBuildDurationSec()
+        : 0;
+    if (!testRunHoldStarted) {
+        // Still evacuating: entire wall clock so far is build.
+        buildSoFar = wallElapsed;
+        holdElapsed = 0;
+    } else if (buildSoFar + holdElapsed > wallElapsed + 2) {
+        buildSoFar = Math.max(0, wallElapsed - holdElapsed);
+    }
+
     payload.testData.status = 'running';
+    payload.testData.testStartTime = startIso;
+    payload.testData.testEndTime = now;
+    payload.testData.durationSeconds = wallElapsed;
+    payload.testData.actualDurationSec = wallElapsed;
+    payload.testData.wallElapsedSec = wallElapsed;
+    payload.testData.buildDurationSec = buildSoFar;
+    payload.testData.holdDurationSec = holdElapsed;
+    // Release never started while mid-run — do not stamp planned RL_TM into checkpoint.
+    payload.testData.releaseDurationSec = 0;
+    payload.testData.releaseTimeSec = 0;
+    payload.testData.totalDurationSec = wallElapsed;
+    payload.testData.completedAt = now;
+    payload.testStartTime = startIso;
+    payload.testEndTime = now;
+    payload.durationSeconds = wallElapsed;
+    payload.wallElapsedSec = wallElapsed;
+    payload._wallElapsedSec = wallElapsed;
+    payload._checkpointAt = now;
+    payload.createdAt = startIso;
+    payload.completedAt = now;
+
     var u = (typeof window.currentUser !== 'undefined' && window.currentUser) ? window.currentUser : null;
     if (u) {
         var un = (u.username || u.name || '').trim();
@@ -8217,17 +8283,39 @@ function buildTestRunCheckpointPayload() {
     return payload;
 }
 
+function clearTestRunCheckpointHeartbeat() {
+    if (window._testRunCheckpointHeartbeatId != null) {
+        clearInterval(window._testRunCheckpointHeartbeatId);
+        window._testRunCheckpointHeartbeatId = null;
+    }
+}
+
+/** Persist mid-test timing every 1s so power-cut recovery has Start≠End and real elapsed. */
+function startTestRunCheckpointHeartbeat() {
+    clearTestRunCheckpointHeartbeat();
+    window._testRunCheckpointHeartbeatId = setInterval(function () {
+        if (testRunButtonState !== 'abort') {
+            clearTestRunCheckpointHeartbeat();
+            return;
+        }
+        syncTestRunCheckpoint();
+    }, 1000);
+}
+window.startTestRunCheckpointHeartbeat = startTestRunCheckpointHeartbeat;
+window.clearTestRunCheckpointHeartbeat = clearTestRunCheckpointHeartbeat;
+
 function syncTestRunCheckpoint() {
     if (testRunButtonState !== 'abort') return Promise.resolve();
     var body = buildTestRunCheckpointPayload();
     if (!body) return Promise.resolve();
     body.type = 'test';
     body._checkpointPhase = 'running';
-    body._checkpointAt = new Date().toISOString();
+    if (!body._checkpointAt) body._checkpointAt = new Date().toISOString();
     return apiRequest(API_BASE + '/api/data/test-run/checkpoint', { method: 'PUT', body: body }).catch(function () {});
 }
 
 function clearTestRunCheckpoint() {
+    clearTestRunCheckpointHeartbeat();
     return apiRequest(API_BASE + '/api/data/test-run/checkpoint', { method: 'DELETE' }).catch(function () {});
 }
 
@@ -8399,6 +8487,7 @@ function abortTestRunAndSave() {
     }
 
     if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
+    if (typeof clearTestRunCheckpointHeartbeat === 'function') clearTestRunCheckpointHeartbeat();
     if (testRunIntervalId != null) {
         clearInterval(testRunIntervalId);
         testRunIntervalId = null;
@@ -8693,10 +8782,14 @@ function toggleTestRunState() {
                 clearInterval(testRunIntervalId);
                 testRunIntervalId = null;
             }
-            // Persist in-progress run immediately so power loss can synthesize a Fail report.
+            // Persist in-progress run immediately + every 1s for power-cut recovery.
             syncTestRunCheckpoint();
+            if (typeof startTestRunCheckpointHeartbeat === 'function') {
+                startTestRunCheckpointHeartbeat();
+            }
         }).catch(function (err) {
             if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
+            if (typeof clearTestRunCheckpointHeartbeat === 'function') clearTestRunCheckpointHeartbeat();
             if (btn) btn.disabled = false;
             _resetTestRunButtonToStart();
             showAppModal('Test run failed to start: ' + (err && err.message ? err.message : 'Error'), 'Test Run');
