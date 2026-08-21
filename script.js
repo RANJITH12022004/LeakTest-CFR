@@ -4778,6 +4778,18 @@ function loadReports(filterType) {
             list.forEach(function (r, i) {
                 var row = document.createElement('tr');
                 var name = r.name;
+                // Legacy bug: completion saved name as "... Pending Approval"; never show that for approved reports.
+                if (r.type === 'validation' && name && /pending\s*approval/i.test(String(name))) {
+                    var appr = String(r.reportApprovalStatus || '').trim().toLowerCase();
+                    var pf = String(r.approvalPassFail || '').trim().toUpperCase();
+                    if (appr === 'approved' && (pf === 'PASS' || pf === 'FAIL')) {
+                        name = 'Validation - Vacuum - ' + (pf === 'PASS' ? 'Pass' : 'Fail');
+                    } else if (appr === 'aborted') {
+                        name = 'Validation - Vacuum - Aborted';
+                    } else {
+                        name = 'Validation - Vacuum';
+                    }
+                }
                 if (!name && r.type === 'validation') {
                     if (!name) name = 'Validation - ' + (r.validationSubtype === 'load' ? 'Pressure Decay' : 'Vacuum Decay');
                 }
@@ -9711,11 +9723,15 @@ function buildCombinedValidationReportPayload() {
             overallPass = false;
         }
     }
-    // Without operator Pass/Fail (approval decides later), keep status completed
+    // Without operator Pass/Fail (approval decides later), keep status completed.
+    // Do NOT bake "Pending Approval" into the report name — that is reportApprovalStatus only.
+    // Otherwise approved reports keep showing as "Pending Approval" in the list.
     var overallStatus = hasAborted
         ? 'aborted'
         : (hasPassFail ? (overallPass ? 'Pass' : 'Fail') : 'completed');
-    var overallName = hasAborted ? 'Aborted' : (hasPassFail ? overallStatus : 'Pending Approval');
+    var reportName = 'Validation - Vacuum';
+    if (hasAborted) reportName = 'Validation - Vacuum - Aborted';
+    else if (hasPassFail) reportName = 'Validation - Vacuum - ' + overallStatus;
     var user = window.currentUser || {};
     var now = new Date().toISOString();
     var first = runs[0] || {};
@@ -9726,7 +9742,7 @@ function buildCombinedValidationReportPayload() {
         || (setDur != null && typeof formatMmSs === 'function' ? formatMmSs(setDur) : null);
     var actDur = first.actualDurationSec;
     return {
-        name: 'Validation - Vacuum - ' + overallName,
+        name: reportName,
         type: 'validation',
         validationSubtype: 'distance',
         validationRuns: runs,
