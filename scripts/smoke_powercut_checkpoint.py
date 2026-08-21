@@ -205,48 +205,37 @@ def main() -> int:
         st = str(power_rep.get("reportApprovalStatus") or "").lower()
         status = str(power_rep.get("status") or td.get("status") or "").lower()
         remarks = str(td.get("remarks") or power_rep.get("remarks") or "").lower()
-        if st == "aborted" and status == "aborted" and "power interruption" in remarks:
-            dur = td.get("durationSeconds")
-            if dur is None:
-                dur = power_rep.get("durationSeconds")
-            try:
-                dur_n = int(dur)
-            except (TypeError, ValueError):
-                dur_n = -1
-            start_s = td.get("testStartTime") or power_rep.get("testStartTime")
-            end_s = td.get("testEndTime") or power_rep.get("testEndTime")
-            if dur_n >= 90 and start_s and end_s and start_s != end_s:
-                res.ok(
-                    f"power-cut Aborted report id={power_rep.get('id')} "
-                    f"duration={dur_n}s start≠end"
-                )
-            else:
-                res.ok(
-                    f"power-cut Aborted report id={power_rep.get('id')} "
-                    f"approval={st} status={status}"
-                )
-        elif st == "approved" and status == "failed" and "power interruption" in remarks:
+        result = str(td.get("result") or power_rep.get("result") or "").upper()
+        appr_pf = str(power_rep.get("approvalPassFail") or td.get("approvalPassFail") or "").upper()
+        dur = td.get("durationSeconds")
+        if dur is None:
+            dur = power_rep.get("durationSeconds")
+        try:
+            dur_n = int(dur)
+        except (TypeError, ValueError):
+            dur_n = -1
+        if (
+            st == "approved"
+            and status == "aborted"
+            and result == "FAIL"
+            and appr_pf == "FAIL"
+            and "power interruption" in remarks
+        ):
+            res.ok(
+                f"power-cut aborted/FAIL system-approved report id={power_rep.get('id')} "
+                f"duration={dur_n}s"
+            )
+        elif st == "aborted" and status == "aborted" and "power interruption" in remarks:
             res.fail(
-                "legacy Fail+system-approved power-cut path still active "
-                f"(id={power_rep.get('id')})"
+                "power-cut report still using legacy approval=aborted "
+                f"(want approved+FAIL); id={power_rep.get('id')}"
             )
         else:
-            dur = td.get("durationSeconds")
-            if dur is None:
-                dur = power_rep.get("durationSeconds")
-            try:
-                dur_n = int(dur)
-            except (TypeError, ValueError):
-                dur_n = -1
-            start_s = td.get("testStartTime") or power_rep.get("testStartTime")
-            end_s = td.get("testEndTime") or power_rep.get("testEndTime")
-            if dur_n >= 90 and start_s and end_s and start_s != end_s:
-                res.ok(f"power-cut report saved id={power_rep.get('id')} duration={dur_n}s start≠end")
-            else:
-                res.fail(
-                    f"power report unexpected approval/status "
-                    f"approval={st} status={status} remarks={power_rep.get('remarks')!r}"
-                )
+            res.fail(
+                f"power report unexpected approval/status "
+                f"approval={st} status={status} result={result} pf={appr_pf} "
+                f"remarks={power_rep.get('remarks')!r}"
+            )
     else:
         res.fail("no power-interruption report created on unclean startup")
 

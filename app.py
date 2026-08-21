@@ -521,39 +521,45 @@ def _apply_power_loss_duration(report: dict, checkpoint: dict = None) -> dict:
 
 
 def _apply_power_loss_abort_to_report(report: dict, checkpoint: dict = None) -> dict:
-    """Mark a report aborted after power loss (no Pass/Fail, no system auto-approve)."""
+    """Finalize a mid-test report after power loss.
+
+    Production rules:
+      - Test status: aborted
+      - Result: FAIL
+      - Approval: system auto-approved (FAIL)
+      - Remarks: Power interruption
+    """
     report = _apply_power_loss_duration(dict(report or {}), checkpoint)
     td = report.get("testData")
     if not isinstance(td, dict):
         td = {}
     else:
         td = dict(td)
+    now_iso = _utc_now_iso()
     td["status"] = "aborted"
+    td["result"] = "FAIL"
     td["remarks"] = POWER_INTERRUPTION_REMARKS
-    for k in ("approvalPassFail", "passFail", "result", "drumPassFail"):
-        td.pop(k, None)
+    td["approvalPassFail"] = "FAIL"
+    td["passFail"] = "FAIL"
     report["testData"] = td
     report["remarks"] = POWER_INTERRUPTION_REMARKS
     report["status"] = "aborted"
-    report["reportApprovalStatus"] = "aborted"
-    for k in (
-        "approvalPassFail",
-        "passFail",
-        "result",
-        "approvedBy",
-        "approvedByName",
-        "approvedByUsername",
-        "approvalRemarks",
-        "approvedAt",
-    ):
-        report.pop(k, None)
+    report["result"] = "FAIL"
+    report["approvalPassFail"] = "FAIL"
+    report["passFail"] = "FAIL"
+    report["reportApprovalStatus"] = "approved"
+    report["approvedBy"] = "System (power interruption)"
+    report["approvedByName"] = POWER_INTERRUPTION_SYSTEM_APPROVER
+    report["approvedByUsername"] = "system"
+    report["approvalRemarks"] = POWER_INTERRUPTION_REMARKS
+    report["approvedAt"] = now_iso
     if not report.get("completedAt"):
-        report["completedAt"] = report.get("testEndTime") or _utc_now_iso()
+        report["completedAt"] = report.get("testEndTime") or now_iso
     return report
 
 
 def _audit_power_loss_aborted_report(report: dict) -> None:
-    """Generate PDF and audit rows for a power-loss aborted report."""
+    """Generate PDF and audit rows for a power-loss aborted/FAIL system-approved report."""
     rid = report.get("id")
     if rid is None:
         return
@@ -573,11 +579,18 @@ def _audit_power_loss_aborted_report(report: dict) -> None:
         pdf_ok = False
         app.logger.exception("Power-loss report PDF failed for id %s", rid)
     pl_detail = (
-        "{} | unclean shutdown | duration: {} | status: aborted | remarks: {}"
+        "{} | unclean shutdown | duration: {} | status: aborted | result: FAIL | "
+        "approved by System (power interruption) | remarks: {}"
     ).format(ctx, dur_txt, POWER_INTERRUPTION_REMARKS)
     if pdf_ok:
         pl_detail = "{} | PDF saved".format(pl_detail)
     _audit("System", "System", "Report aborted (power loss)", pl_detail)
+    _audit(
+        "System",
+        "System",
+        "Report auto-approved (power interruption)",
+        "{} | approvalPassFail=FAIL".format(ctx),
+    )
     if pdf_ok:
         _audit_report_pdf_generated(int(rid), report)
 
@@ -595,13 +608,51 @@ def _checkpoint_is_mid_test(cp) -> bool:
     if cp.get("_pendingReportId") is not None:
         return True
     td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
-    if str(td.get("status") or "").strip().lower() in ("running", "in_progress", "hold"):
+    st = str(td.get("status") or cp.get("status") or "").strip().lower()
+    if st in ("running", "in_progress", "hold", "evacuating"):
         return True
+    if st in ("completed", "aborted", "pass", "fail", "failed"):
+        return False
+    # Start-just-saved checkpoint: has recipe/product + start stamp, phase may be running/blank.
+    has_product = bool(
+        cp.get("recipe")
+        or td.get("recipe")
+        or td.get("productName")
+        or cp.get("productName")
+        or cp.get("name")
+    )
+    has_start = bool(
+        cp.get("_checkpointAt")
+        or cp.get("testStartTime")
+        or td.get("testStartTime")
+    )
+    return bool(has_product and has_start)
+
+
+def _power_loss_report_already_saved(checkpoint: dict) -> bool:
+    """True if a Power interruption report for this run start already exists."""
+    cp = checkpoint if isinstance(checkpoint, dict) else {}
+    cp_td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+    start = str(
+        cp.get("testStartTime")
+        or cp_td.get("testStartTime")
+        or ""
+    ).strip()
+    if not start:
+        return False
+    for report in data_service.list_reports("all") or []:
+        td = report.get("testData") if isinstance(report.get("testData"), dict) else {}
+        remarks = str(td.get("remarks") or report.get("remarks") or "").lower()
+        if "power interruption" not in remarks:
+            continue
+        r_start = str(td.get("testStartTime") or report.get("testStartTime") or "").strip()
+        if r_start and r_start == start:
+            return True
     return False
 
 
 def _abort_pending_reports_after_power_loss(session_username):
-    """Finalize pending reports as aborted after unclean shutdown (power loss)."""
+    """Finalize pending reports as aborted/FAIL after unclean shutdown (power loss)."""
     un = _norm_username(session_username)
     if not un:
         return 0
@@ -623,11 +674,8 @@ def _abort_pending_reports_after_power_loss(session_username):
 
 
 def _create_aborted_report_from_power_loss_checkpoint(session_username):
-    """If a run was in progress (checkpoint) but no pending report existed, save aborted report."""
+    """If a run was in progress (checkpoint) but no pending report existed, save aborted/FAIL report."""
     un = _norm_username(session_username)
-    if not un:
-        data_service.clear_test_run_data()
-        return 0
     cp = data_service.get_test_run_data()
     if not isinstance(cp, dict) or not cp:
         return 0
@@ -638,6 +686,9 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username):
     if rtype not in ("test", "validation", "calibration"):
         data_service.clear_test_run_data()
         return 0
+    if _power_loss_report_already_saved(cp):
+        data_service.clear_test_run_data()
+        return 0
     td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
     op = _norm_username(
         cp.get("operatedByUsername")
@@ -646,35 +697,58 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username):
         or cp.get("username")
         or ""
     )
-    if op and op != un:
-        return 0
+    # Prefer matching operator; if checkpoint has no operator, use session user.
+    if op and un and op != un:
+        app.logger.warning(
+            "Power-loss checkpoint operator %s != session %s; still creating report",
+            op,
+            un,
+        )
     report_data = dict(cp)
     if not report_data.get("type"):
         report_data["type"] = rtype
+    if un:
+        report_data.setdefault("operatedByUsername", un)
+        report_data.setdefault("employeeId", un)
+        if isinstance(report_data.get("testData"), dict):
+            report_data["testData"] = dict(report_data["testData"])
+            report_data["testData"].setdefault("operatedByUsername", un)
+            report_data["testData"].setdefault("employeeId", un)
     recipe = report_data.get("recipe") or (td.get("recipe") if isinstance(td, dict) else None)
-    enriched = report_service.generate_report(
-        report_data,
-        recipe=recipe,
-        factory_settings=report_data.get("factorySettings"),
-    )
-    enriched = _stamp_report_operator(enriched)
-    enriched = _apply_power_loss_abort_to_report(enriched, cp)
-    report_id = data_service.save_report(enriched)
-    enriched["id"] = report_id
-    data_service.save_report(enriched)
-    _audit_power_loss_aborted_report(enriched)
-    data_service.clear_test_run_data()
-    return 1
+    try:
+        enriched = report_service.generate_report(
+            report_data,
+            recipe=recipe,
+            factory_settings=report_data.get("factorySettings"),
+        )
+        enriched = _stamp_report_operator(enriched)
+        enriched = _apply_power_loss_abort_to_report(enriched, cp)
+        report_id = data_service.save_report(enriched)
+        enriched["id"] = report_id
+        data_service.save_report(enriched)
+        _audit_report_created(report_id, enriched)
+        _audit_power_loss_aborted_report(enriched)
+        data_service.clear_test_run_data()
+        app.logger.info(
+            "Power-loss report created id=%s type=%s status=aborted result=FAIL",
+            report_id,
+            rtype,
+        )
+        return 1
+    except Exception:
+        app.logger.exception("Failed creating power-loss report from checkpoint")
+        return 0
+
 
 def _startup_session_power_audit():
-    """If the last run ended without a clean stop while a session was active, log one power-interruption row."""
+    """If the last run ended without a clean stop while a session was active, log power interruption and save report."""
     try:
         had_clean_shutdown = data_service.consume_app_clean_stop_flag()
         pending = data_service.read_session_power_audit_pending()
         if pending and not had_clean_shutdown:
+            un = (pending.get("username") or "").strip()
+            role = (pending.get("role") or "").strip()
             if not pending.get("powerAuditLogged"):
-                un = (pending.get("username") or "").strip()
-                role = (pending.get("role") or "").strip()
                 audit_time = _audit_time_fields()
                 if audit_service.is_hidden_factory_actor(un, role):
                     pi_details = "Privileged factory session was active when power was interrupted or the system restarted."
@@ -700,11 +774,22 @@ def _startup_session_power_audit():
                 pending = dict(pending)
                 pending["powerAuditLogged"] = True
                 data_service.write_session_power_audit_pending(pending)
-                try:
-                    _abort_pending_reports_after_power_loss(un)
-                    _create_aborted_report_from_power_loss_checkpoint(un)
-                except Exception:
-                    app.logger.exception("Abort pending reports after power loss failed")
+            # Always attempt report finalization on unclean boot (idempotent via checkpoint clear / duplicate guard).
+            try:
+                _abort_pending_reports_after_power_loss(un)
+                created = _create_aborted_report_from_power_loss_checkpoint(un)
+                if created:
+                    app.logger.info("Power-loss checkpoint recovered into report(s)")
+                else:
+                    # Log why for production diagnosis
+                    cp = data_service.get_test_run_data()
+                    app.logger.warning(
+                        "Power-loss report not created (checkpoint mid-test=%s keys=%s)",
+                        _checkpoint_is_mid_test(cp),
+                        list(cp.keys())[:12] if isinstance(cp, dict) else None,
+                    )
+            except Exception:
+                app.logger.exception("Abort pending reports after power loss failed")
         elif pending and had_clean_shutdown and pending.get("powerAuditLogged"):
             pending = dict(pending)
             pending.pop("powerAuditLogged", None)
