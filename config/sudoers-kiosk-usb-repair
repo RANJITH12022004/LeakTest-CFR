@@ -1,0 +1,3 @@
+# Allow kiosk user to heal remount-ro USB without password (bridge runtime path).
+rle ALL=(root) NOPASSWD: /bin/bash /opt/kiosk/scripts/kiosk_repair_internal_usb.sh
+rle ALL=(root) NOPASSWD: /bin/bash /opt/kiosk/scripts/kiosk_usb_health_watchdog.sh

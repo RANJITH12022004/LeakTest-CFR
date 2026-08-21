@@ -196,6 +196,19 @@ def _path_is_writable(path: pathlib.Path) -> bool:
         return False
 
 
+_CRITICAL_JSON_NAMES = frozenset(
+    {
+        "members.json",
+        "recipes.json",
+        "reports.json",
+        "factorySettings.json",
+        "roles.json",
+        "current_user.json",
+        "session_power_audit_pending.json",
+    }
+)
+
+
 def _sd_storage_dir() -> pathlib.Path:
     app_root = None
     if _config:
@@ -203,6 +216,120 @@ def _sd_storage_dir() -> pathlib.Path:
     if not app_root:
         app_root = os.environ.get("APP_ROOT", "/opt/kiosk")
     return pathlib.Path(app_root) / "storage"
+
+
+def _json_richness_score(name: str, data, path: Optional[pathlib.Path] = None) -> int:
+    """Higher = prefer this copy (survives empty SD placeholders after remount-ro fallback)."""
+    if data is None:
+        return -1
+    score = 0
+    if isinstance(data, list):
+        score = len(data) * 100
+        if name == "members.json":
+            enrolled = 0
+            for m in data:
+                if not isinstance(m, dict):
+                    continue
+                if m.get("fingerprintTemplateId") not in (None, "", 0, "0"):
+                    enrolled += 1
+            score += enrolled * 10
+    elif isinstance(data, dict):
+        score = len(data) * 10
+        if data:
+            score += 5
+    else:
+        return 0
+    if path is not None:
+        try:
+            score += min(50, int(path.stat().st_mtime) % 100000 // 2000)
+        except OSError:
+            pass
+    return score
+
+
+def _candidate_storage_dirs_for_read() -> List[pathlib.Path]:
+    """USB (even if RO) + active storage + SD mirror — used to avoid empty fallback views."""
+    seen = set()
+    out: List[pathlib.Path] = []
+
+    def _add(p: Optional[pathlib.Path]) -> None:
+        if p is None:
+            return
+        try:
+            key = str(p.resolve())
+        except OSError:
+            key = str(p)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(p)
+
+    _add(_internal_usb_storage_dir())
+    if _storage_dir is not None:
+        _add(_storage_dir)
+    _add(_sd_storage_dir())
+    configured = _configured_storage_dir()
+    _add(configured)
+    return out
+
+
+def _load_critical_json(name: str, default=None):
+    """Load critical JSON from the richest readable copy (USB RO / USB RW / SD mirror)."""
+    if default is None:
+        default = []
+    best = None
+    best_score = -1
+    for root in _candidate_storage_dirs_for_read():
+        path = root / name
+        if not path.is_file():
+            continue
+        data = _load_json_file(path, default=None)
+        score = _json_richness_score(name, data, path)
+        if score > best_score:
+            best_score = score
+            best = data
+    if best is None:
+        return default
+    return best
+
+
+def _mirror_critical_json(filepath: pathlib.Path, data) -> None:
+    """Dual-write critical files to SD (and USB when available) so remount-ro cannot erase login data."""
+    name = filepath.name
+    if name not in _CRITICAL_JSON_NAMES:
+        return
+    usb = _internal_usb_storage_dir()
+    sd = _sd_storage_dir()
+    try:
+        primary = filepath.resolve()
+    except OSError:
+        primary = filepath
+    targets: List[pathlib.Path] = []
+    try:
+        if usb is not None and primary.parent.resolve() == usb.resolve():
+            targets.append(sd / name)
+        elif primary.parent.resolve() == sd.resolve():
+            if usb is not None and _path_is_writable(usb):
+                targets.append(usb / name)
+        else:
+            # Unexpected path — still keep an SD mirror.
+            targets.append(sd / name)
+            if usb is not None and _path_is_writable(usb):
+                targets.append(usb / name)
+    except OSError:
+        targets.append(sd / name)
+
+    for target in targets:
+        try:
+            if target.resolve() == primary:
+                continue
+        except OSError:
+            if str(target) == str(filepath):
+                continue
+        try:
+            _save_json_file_atomic(target, data)
+        except Exception:
+            pass
 
 
 def _storage_file_needs_seed(path: pathlib.Path) -> bool:
@@ -263,7 +390,7 @@ def _seed_storage_from_readonly_usb(dest: pathlib.Path) -> None:
                     src_data = _load_json_file(src, default=[])
                     dst_data = _load_json_file(dst, default=[])
                     if isinstance(src_data, list) and isinstance(dst_data, list):
-                        if len(src_data) > len(dst_data):
+                        if _json_richness_score(name, src_data, src) > _json_richness_score(name, dst_data, dst):
                             shutil.copy2(src, dst)
                 continue
             except Exception:
@@ -332,13 +459,8 @@ def _load_json_file(filepath: pathlib.Path, default=None):
         return default
 
 
-def _save_json_file(filepath: pathlib.Path, data):
-    """Atomic JSON write with unique temp name (safe under concurrent Flask requests).
-
-    Using a fixed ``name.tmp`` races when two threads write the same file: one
-    ``os.replace`` removes the shared tmp and the other raises FileNotFoundError,
-    which can 500 recipe/member APIs and leave the UI with an empty list.
-    """
+def _save_json_file_atomic(filepath: pathlib.Path, data):
+    """Atomic JSON write (no mirroring)."""
     filepath.parent.mkdir(parents=True, exist_ok=True)
     lock = _json_write_lock_for(filepath)
     with lock:
@@ -379,13 +501,21 @@ def _save_json_file(filepath: pathlib.Path, data):
             raise
 
 
+def _save_json_file(filepath: pathlib.Path, data):
+    """Atomic JSON write + dual-write critical files to SD/USB mirror."""
+    _save_json_file_atomic(filepath, data)
+    try:
+        _mirror_critical_json(filepath, data)
+    except Exception:
+        pass
+
+
 # =================== RECIPE OPERATIONS ==========================
 
 
 def list_recipes(filter_type=None):
     """List all recipes, optionally filtered by type."""
-    recipes_path = _get_storage_path("recipes.json")
-    recipes = _load_json_file(recipes_path, default=[])
+    recipes = _load_critical_json("recipes.json", default=[])
     if not isinstance(recipes, list):
         recipes = []
     if filter_type:
@@ -469,8 +599,7 @@ def delete_recipe(recipe_id: int) -> bool:
 
 def list_reports(filter_type="all"):
     """List reports, optionally filtered by type."""
-    reports_path = _get_storage_path("reports.json")
-    reports = _load_json_file(reports_path, default=[])
+    reports = _load_critical_json("reports.json", default=[])
     if not isinstance(reports, list):
         reports = []
     if filter_type and filter_type != "all":
@@ -539,8 +668,7 @@ def delete_report(report_id: int) -> bool:
 
 def list_members():
     """List all members. Excludes hidden factory user. Normalizes status/failedAttempts."""
-    members_path = _get_storage_path("members.json")
-    members = _load_json_file(members_path, default=[])
+    members = _load_critical_json("members.json", default=[])
     if not isinstance(members, list):
         members = []
 
@@ -973,8 +1101,7 @@ def get_member_by_username(username: str) -> Optional[Dict[str, Any]]:
     if username_clean.upper() == FACTORY_USERNAME.upper():
         return None
     username_lower = username_clean.lower()
-    members_path = _get_storage_path("members.json")
-    members = _load_json_file(members_path, default=[])
+    members = _load_critical_json("members.json", default=[])
     if not isinstance(members, list):
         members = []
     for m in members:
@@ -1373,8 +1500,7 @@ def factory_reset() -> Dict[str, Any]:
 
 def get_factory_settings() -> Dict[str, Any]:
     """Get factory settings."""
-    settings_path = _get_storage_path("factorySettings.json")
-    settings = _load_json_file(settings_path, default={})
+    settings = _load_critical_json("factorySettings.json", default={})
     if not isinstance(settings, dict):
         settings = {}
     if "biometricEnabled" not in settings:
