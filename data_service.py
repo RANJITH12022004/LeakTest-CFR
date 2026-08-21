@@ -205,8 +205,39 @@ def _sd_storage_dir() -> pathlib.Path:
     return pathlib.Path(app_root) / "storage"
 
 
+def _storage_file_needs_seed(path: pathlib.Path) -> bool:
+    """True when dest is missing or is an empty JSON placeholder ([] / {})."""
+    if not path.is_file():
+        return True
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return True
+    if size <= 0:
+        return True
+    # "[]" / "{}" are 2 bytes — treat as empty so RO-USB seed is not skipped.
+    if size <= 4:
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+            if raw in ("", "[]", "{}", "null"):
+                return True
+        except OSError:
+            return True
+    try:
+        data = _load_json_file(path, default=None)
+        if data is None:
+            return True
+        if isinstance(data, list) and len(data) == 0:
+            return True
+        if isinstance(data, dict) and len(data) == 0:
+            return True
+    except Exception:
+        return True
+    return False
+
+
 def _seed_storage_from_readonly_usb(dest: pathlib.Path) -> None:
-    """If USB is readable but RO, copy critical JSON so login still works on SD."""
+    """If USB is readable but RO, copy critical JSON so login/recipes still work on SD."""
     usb_storage = _internal_usb_storage_dir()
     if usb_storage is None or not usb_storage.is_dir():
         return
@@ -214,13 +245,29 @@ def _seed_storage_from_readonly_usb(dest: pathlib.Path) -> None:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError:
         return
-    for name in ("members.json", "factorySettings.json", "recipes.json", "roles.json"):
+    for name in (
+        "members.json",
+        "factorySettings.json",
+        "recipes.json",
+        "roles.json",
+        "reports.json",
+    ):
         src = usb_storage / name
         dst = dest / name
         if not src.is_file():
             continue
-        if dst.is_file() and dst.stat().st_size > 0:
-            continue
+        if not _storage_file_needs_seed(dst):
+            # Still refresh when USB clearly has more members/recipes than empty-looking SD.
+            try:
+                if name in ("members.json", "recipes.json", "reports.json"):
+                    src_data = _load_json_file(src, default=[])
+                    dst_data = _load_json_file(dst, default=[])
+                    if isinstance(src_data, list) and isinstance(dst_data, list):
+                        if len(src_data) > len(dst_data):
+                            shutil.copy2(src, dst)
+                continue
+            except Exception:
+                continue
         try:
             shutil.copy2(src, dst)
         except OSError:
@@ -228,17 +275,22 @@ def _seed_storage_from_readonly_usb(dest: pathlib.Path) -> None:
 
 
 def _refresh_storage_dir() -> None:
-    """Re-resolve STORAGE_DIR after boot; skip USB when remounted read-only."""
+    """Re-resolve STORAGE_DIR; always prefer writable USB when present.
+
+    After power-loss the launcher may start on SD fallback while USB is still RO.
+    Once USB is repaired/writable again, switch back so members/recipes/reports return.
+    """
     global _storage_dir
-    configured = _configured_storage_dir()
+    usb = _internal_usb_storage_dir()
     sd_fallback = _sd_storage_dir()
-    if configured is not None:
-        if _path_is_writable(configured):
-            _storage_dir = configured
-            return
-        # Configured USB/path not writable (typical after power-cut remount-ro).
-        _seed_storage_from_readonly_usb(sd_fallback)
-        _storage_dir = sd_fallback
+    if usb is not None and _path_is_writable(usb):
+        _storage_dir = usb
+        return
+    # USB absent or remount-ro — seed SD from readable USB so login/recipes are not empty.
+    _seed_storage_from_readonly_usb(sd_fallback)
+    configured = _configured_storage_dir()
+    if configured is not None and _path_is_writable(configured):
+        _storage_dir = configured
         return
     candidates = _storage_dir_candidates()
     writable = [p for p in candidates if _path_is_writable(p)]
@@ -248,7 +300,6 @@ def _refresh_storage_dir() -> None:
         else:
             _storage_dir = max(writable, key=_storage_dir_score)
         return
-    _seed_storage_from_readonly_usb(sd_fallback)
     _storage_dir = sd_fallback
 
 
