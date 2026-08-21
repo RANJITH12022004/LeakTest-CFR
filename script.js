@@ -1633,6 +1633,18 @@ async function fetchDateTimeFromBackend() {
     return null;
 }
 
+/** Same as get_datetime but also compares RTC to WiFi/network time (does not change the clock). */
+async function fetchDateTimeFromBackendCompare() {
+    try {
+        var r = await fetch((API_BASE || '') + '/api/get_datetime?compare=1');
+        if (r.ok) {
+            var data = await r.json();
+            if (data && (data.datetime || data.date)) return data;
+        }
+    } catch (e) {}
+    return null;
+}
+
 /** Parse API naive ISO wall time (YYYY-MM-DDTHH:MM:SS) as local components — not UTC via Date(). */
 function parseWallDatetimeIso(isoStr) {
     var s = String(isoStr || '').trim().replace('Z', '');
@@ -1743,6 +1755,8 @@ function showAppContainer() {
     var app = document.querySelector('.app-container');
     if (login) login.style.display = 'none';
     if (app) app.style.display = 'flex';
+    // Top bar always reloads from hardware RTC (source of truth) on every login.
+    _wallClockAnchor = null;
     updateDateTime();
     if (!dateTimeClockInterval) {
         dateTimeClockInterval = setInterval(function () {
@@ -4678,7 +4692,11 @@ function loadReports(filterType) {
                 }
                 if (!name) name = (r.recipe && r.recipe.productName) || 'Report ' + (r.id || (i + 1));
                 var created = r.createdAt || r.created || '';
-                if (created && created.length > 10) created = created.slice(0, 10) + ' ' + created.slice(11, 19);
+                if (created && typeof formatReportDate === 'function') {
+                    created = formatReportDate(created);
+                } else if (created && created.length > 10) {
+                    created = created.slice(0, 10) + ' ' + created.slice(11, 19);
+                }
                 row.innerHTML = '<td>' + (i + 1) + '</td><td>' + name + '</td><td>' + created + '</td><td><button class="reports-open-btn" onclick="openReportPreview(' + (r.id || 0) + ')">Open</button></td>';
                 tbody.appendChild(row);
             });
@@ -5498,10 +5516,13 @@ function _reportDurationFieldsFromPreview(td, recipe, fs) {
     var total = td.totalDurationSec;
     var holdN = parseInt(hold, 10);
     var releaseN = parseInt(release, 10);
+    var buildN = parseInt(td.buildDurationSec, 10);
+    if (isNaN(buildN)) buildN = 0;
+    // Prefer stored total (build + hold + release). Legacy fallback: hold + release.
     if ((total == null || isNaN(parseInt(total, 10))) && !isNaN(holdN) && !isNaN(releaseN)) {
-        total = holdN + releaseN;
+        total = buildN + holdN + releaseN;
     }
-    // Aborted / power-cut: show actual elapsed, not full set hold/total
+    // Aborted / power-cut: Hold = actual elapsed; Total prefers stored wall/build+hold+release
     var statusLow = String(td.status || '').trim().toLowerCase();
     var remarksLow = String(td.remarks || '').trim().toLowerCase();
     var isAborted = statusLow === 'aborted' || remarksLow.indexOf('power interruption') >= 0;
@@ -5509,8 +5530,19 @@ function _reportDurationFieldsFromPreview(td, recipe, fs) {
         var actual = td.actualDurationSec != null ? td.actualDurationSec : td.durationSeconds;
         if (actual != null && !isNaN(parseInt(actual, 10))) {
             hold = actual;
-            total = actual;
         }
+        if (total == null || isNaN(parseInt(total, 10))) {
+            var aN = parseInt(actual, 10);
+            if (!isNaN(aN) && !isNaN(releaseN)) total = buildN + aN + releaseN;
+            else if (!isNaN(aN)) total = aN;
+        }
+    }
+    // Last-resort: Start→End wall clock when total still missing
+    if ((total == null || isNaN(parseInt(total, 10))) && td.testStartTime && td.testEndTime) {
+        try {
+            var wallMs = new Date(td.testEndTime).getTime() - new Date(td.testStartTime).getTime();
+            if (!isNaN(wallMs) && wallMs >= 0) total = Math.floor(wallMs / 1000);
+        } catch (eWall) { /* ignore */ }
     }
     function fmt(v) {
         if (v == null || v === '' || isNaN(parseInt(v, 10))) return '--';
@@ -6150,8 +6182,32 @@ var testRunNextSamplePercent = 10;
 /** Set when starting a test from Quick Test; cleared after report save so the form resets. */
 var _quickTestRunPendingFormReset = false;
 var testRunButtonState = 'start'; // 'start' | 'abort'
-/** ISO timestamp when the operator presses START (after weight/volume entry). */
+/** ISO timestamp when the operator presses START (ESP start / pressure build begins). */
 var testRunStartTime = null;
+/** ISO timestamp when set vacuum is reached and hold timer starts (end of build). */
+var testRunHoldStartTime = null;
+/** Frozen build (evacuate) seconds: Start → TARGET_REACHED, or Start → abort if never reached. */
+var testRunBuildDurationSec = null;
+
+function _freezeTestRunBuildDurationSec() {
+    if (testRunBuildDurationSec != null && !isNaN(parseInt(testRunBuildDurationSec, 10))) {
+        return parseInt(testRunBuildDurationSec, 10);
+    }
+    var buildSec = 0;
+    try {
+        if (testRunStartTime && testRunHoldStartTime) {
+            var bMs = new Date(testRunHoldStartTime).getTime() - new Date(testRunStartTime).getTime();
+            if (!isNaN(bMs) && bMs >= 0) buildSec = Math.floor(bMs / 1000);
+        } else if (testRunStartTime) {
+            var bMs2 = Date.now() - new Date(testRunStartTime).getTime();
+            if (!isNaN(bMs2) && bMs2 >= 0) buildSec = Math.floor(bMs2 / 1000);
+        }
+    } catch (eFreeze) {
+        buildSec = 0;
+    }
+    testRunBuildDurationSec = buildSec;
+    return buildSec;
+}
 var testRunIntervalId = null;
 var testRunCurrentStepIndex = 0;
 var testRunCurrentTapCount = 0;
@@ -6259,6 +6315,39 @@ function hardwareLeakStopAwait() {
         });
 }
 window.hardwareLeakStopAwait = hardwareLeakStopAwait;
+
+/**
+ * Keep calling /api/hardware/leak/stop until ESP STOP_ACK (backend also retries).
+ * Used with the "Check for leaks" modal so the pump is stopped for sure.
+ */
+function hardwareLeakStopUntilAck(opts) {
+    opts = opts || {};
+    // Backend cmd_stop already retries UART until STOP_ACK (up to 15×). Extra HTTP attempts
+    // only cover a failed request (e.g. bridge restart), not per-UART retries.
+    var maxAttempts = opts.maxAttempts != null ? opts.maxAttempts : 2;
+    var gapMs = opts.gapMs != null ? opts.gapMs : 1000;
+    var attempt = 0;
+    function once() {
+        attempt += 1;
+        return apiRequest(API_BASE + '/api/hardware/leak/stop', { method: 'POST' })
+            .then(function (res) {
+                if (res && res.ok) return res;
+                if (attempt >= maxAttempts) return res || { ok: false, error: 'No STOP_ACK' };
+                return new Promise(function (resolve) {
+                    setTimeout(function () { resolve(once()); }, gapMs);
+                });
+            })
+            .catch(function (err) {
+                console.error('leak/stop until ACK error', err);
+                if (attempt >= maxAttempts) return null;
+                return new Promise(function (resolve) {
+                    setTimeout(function () { resolve(once()); }, gapMs);
+                });
+            });
+    }
+    return once();
+}
+window.hardwareLeakStopUntilAck = hardwareLeakStopUntilAck;
 
 /** Pressure-build leak guard (test / validation / calibration). Absolute mmHg scale rising toward set. */
 var PRESSURE_BUILD_WATCH_MS = 60000;
@@ -7231,6 +7320,8 @@ function startTestRun(recipe) {
     testRunVacuumSamples = [];
     testRunNextSamplePercent = 10;
     testRunStartTime = null;
+    testRunHoldStartTime = null;
+    testRunBuildDurationSec = null;
     testRunButtonState = 'start';
 
     if (testRunIntervalId != null) {
@@ -7308,6 +7399,8 @@ function _startTestRunHoldAfterTarget() {
     if (testRunHoldStarted || testRunButtonState !== 'abort') return;
     if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
     testRunHoldStarted = true;
+    if (!testRunHoldStartTime) testRunHoldStartTime = new Date().toISOString();
+    _freezeTestRunBuildDurationSec();
     testRunElapsedSec = 0;
     testRunVacuumSamples = [];
     testRunNextSamplePercent = 10;
@@ -7460,17 +7553,17 @@ function _abortTestRunPressureNotBuilding() {
     }
     testRunButtonState = 'start';
     testRunHoldStarted = false;
-    var stopP = (typeof hardwareLeakStopAwait === 'function')
-        ? hardwareLeakStopAwait()
-        : hardwareLeakStopSilently();
-    return Promise.resolve(stopP).then(function () {
-        _closeTestRunHardwareEs();
-        if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
-        setRunCard('run-status-text', 'Error');
-        setRunCard('run-status-subtext', 'Pressure not building');
-        _resetTestRunButtonToStart();
-        showAppModal('Check for leaks. Pressure not building', 'Test Run');
-    });
+    _closeTestRunHardwareEs();
+    if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
+    setRunCard('run-status-text', 'Error');
+    setRunCard('run-status-subtext', 'Pressure not building');
+    _resetTestRunButtonToStart();
+    // Show modal immediately and keep sending STOP until ESP STOP_ACK.
+    showAppModal('Check for leaks. Pressure not building', 'Test Run');
+    var stopFn = (typeof hardwareLeakStopUntilAck === 'function')
+        ? hardwareLeakStopUntilAck
+        : hardwareLeakStopAwait;
+    return Promise.resolve(stopFn()).catch(function () { return null; });
 }
 
 function _finishTestRunVacuumHold() {
@@ -7744,6 +7837,8 @@ function resetTestRunPageForNewLoad() {
 
     testRunButtonState = 'start';
     testRunStartTime = null;
+    testRunHoldStartTime = null;
+    testRunBuildDurationSec = null;
     testRunCurrentStepIndex = 0;
     testRunCurrentTapCount = 0;
     testRunStepTapsBase = 0;
@@ -7968,6 +8063,7 @@ function buildValidationCheckpointPayload() {
 function buildTestRunReportPayload() {
     var recipe = lastTestRunRecipe;
     if (!recipe) return null;
+    // End stamp is after release lock finishes (caller saves after showReleasePressureLock).
     var now = new Date().toISOString();
     var startIso = testRunStartTime || now;
     var elapsedSec = (testRunElapsedSec != null) ? testRunElapsedSec : null;
@@ -7982,7 +8078,15 @@ function buildTestRunReportPayload() {
         ? getReleasePressureLockSec()
         : _releaseDurationSecFromSettings();
     var holdSec = (testRunSetDurationSec != null) ? testRunSetDurationSec : null;
-    var totalSec = (holdSec != null) ? (parseInt(holdSec, 10) + parseInt(releaseSec, 10)) : null;
+
+    // Build = Start → TARGET_REACHED (pressure build). Hold = set hold. Release = factory RL_TM.
+    // TOTAL = build + hold + release.
+    var buildSec = (typeof _freezeTestRunBuildDurationSec === 'function')
+        ? _freezeTestRunBuildDurationSec()
+        : 0;
+    var holdPart = (holdSec != null && !isNaN(parseInt(holdSec, 10))) ? parseInt(holdSec, 10) : 0;
+    var releasePart = (!isNaN(parseInt(releaseSec, 10))) ? parseInt(releaseSec, 10) : 0;
+    var totalSec = buildSec + holdPart + releasePart;
 
     var testData = {
         recipe: recipe,
@@ -7999,6 +8103,7 @@ function buildTestRunReportPayload() {
         actualVacuumMmHg: testRunCurrentVacuumMmHg,
         setDurationSec: testRunSetDurationSec,
         setDurationDisplay: testRunSetDurationDisplay,
+        buildDurationSec: buildSec,
         holdDurationSec: holdSec,
         releaseDurationSec: releaseSec,
         releaseTimeSec: releaseSec,
@@ -8010,7 +8115,7 @@ function buildTestRunReportPayload() {
         testStartTime: startIso,
         testEndTime: now,
         durationSeconds: elapsedSec,
-        createdAt: startIso,
+        createdAt: now,
         completedAt: now
     };
 
@@ -8019,7 +8124,7 @@ function buildTestRunReportPayload() {
         type: 'test',
         recipe: recipe,
         testData: testData,
-        createdAt: startIso,
+        createdAt: now,
         completedAt: now
     };
     return stampOperatorOnTestReportPayload(payload);
@@ -8088,6 +8193,9 @@ function confirmTestRunAbortRemarks() {
 
 function abortTestRunAndSave() {
     if (_abortSaveInFlight) return Promise.resolve();
+
+    // Freeze build seconds before clearing hold flags / release lock (release must not inflate build).
+    if (typeof _freezeTestRunBuildDurationSec === 'function') _freezeTestRunBuildDurationSec();
 
     if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
     if (testRunIntervalId != null) {
@@ -8161,12 +8269,22 @@ function _abortTestRunAndSaveWithRemarks(remarks) {
     payload.remarks = remarks;
     payload.completedAt = new Date().toISOString();
     payload.testData.completedAt = payload.completedAt;
-    // Display Hold/Total as actual elapsed for aborted mid-run stops
-    if (payload.testData.actualDurationSec != null) {
-        payload.testData.holdDurationSec = payload.testData.actualDurationSec;
-        payload.testData.totalDurationSec = payload.testData.actualDurationSec;
-        payload.testData.durationSeconds = payload.testData.actualDurationSec;
-    }
+    payload.createdAt = payload.completedAt;
+    payload.testData.createdAt = payload.completedAt;
+    // Aborted: Hold = actual hold elapsed; Total = build + hold + release
+    var buildA = parseInt(payload.testData.buildDurationSec, 10);
+    if (isNaN(buildA)) buildA = 0;
+    var holdA = payload.testData.actualDurationSec != null
+        ? parseInt(payload.testData.actualDurationSec, 10)
+        : 0;
+    if (isNaN(holdA)) holdA = 0;
+    var releaseA = parseInt(payload.testData.releaseDurationSec != null
+        ? payload.testData.releaseDurationSec
+        : payload.testData.releaseTimeSec, 10);
+    if (isNaN(releaseA)) releaseA = 0;
+    payload.testData.holdDurationSec = holdA;
+    payload.testData.totalDurationSec = buildA + holdA + releaseA;
+    payload.testData.durationSeconds = holdA;
     stampOperatorOnTestReportPayload(payload);
 
     return apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: payload })
@@ -8326,6 +8444,8 @@ function toggleTestRunState() {
         if (btn) btn.disabled = true;
         auditTestRunStarted(lastTestRunRecipe);
         testRunStartTime = new Date().toISOString();
+        testRunHoldStartTime = null;
+        testRunBuildDurationSec = null;
         testRunElapsedSec = 0;
         testRunCurrentVacuumMmHg = null;
         testRunResultText = null;
@@ -10301,8 +10421,26 @@ function applyDateTime() {
             }
         }
         updateDateTime();
-        showAppModal('Date and time updated.', 'Success', function () {
-            goBack();
+        // Compare to WiFi/network clock (diagnostic only — does not change RTC).
+        fetchDateTimeFromBackendCompare().then(function (cmp) {
+            var msg = 'Date and time updated. Top bar and RTC now match what you set.';
+            if (cmp && cmp.networkOffsetSec != null && !isNaN(cmp.networkOffsetSec)) {
+                var off = parseInt(cmp.networkOffsetSec, 10);
+                if (Math.abs(off) > 5) {
+                    msg += ' WiFi/network clock differs by about ' + Math.abs(off) + 's'
+                        + (off > 0 ? ' (network ahead).' : ' (device ahead).')
+                        + ' Device keeps your set time (NTP stays off).';
+                } else {
+                    msg += ' Matches WiFi/network clock.';
+                }
+            }
+            showAppModal(msg, 'Success', function () {
+                goBack();
+            });
+        }).catch(function () {
+            showAppModal('Date and time updated. Top bar and RTC now match what you set.', 'Success', function () {
+                goBack();
+            });
         });
     }).catch(function (err) {
         var msg = (err && err.message) ? err.message : 'Network error';

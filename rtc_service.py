@@ -195,14 +195,21 @@ def write_rtc_from_system() -> bool:
 
 
 def _write_hwclock_set(rtc_dev: str, dt: datetime) -> bool:
-    """Write local wall time to the DS1307 (chip stores UTC; --localtime interprets date as local)."""
+    """Write local wall time (IST) into DS1307 kept in UTC (LocalRTC=no).
+
+    ``dt`` is naive local wall time as shown on the top bar. hwclock --utc
+    converts that local moment into the UTC value stored on the chip.
+    """
     date_arg = dt.strftime("%Y-%m-%d %H:%M:%S")
-    for extra in (["--localtime"], []):
-        cmd = ["hwclock", "-f", rtc_dev, "--set", "--date=" + date_arg] + extra
-        ok, _ = _run_privileged(cmd, timeout_sec=8)
-        if ok:
-            return True
-    return False
+    cmd = ["hwclock", "-f", rtc_dev, "--utc", "--set", "--date=" + date_arg]
+    ok, _ = _run_privileged(cmd, timeout_sec=8)
+    if ok:
+        return True
+    # Older util-linux: omit --utc (timedatectl LocalRTC=no still applies).
+    ok2, _ = _run_privileged(
+        ["hwclock", "-f", rtc_dev, "--set", "--date=" + date_arg], timeout_sec=8
+    )
+    return ok2
 
 
 def _wall_times_match(wanted: datetime, got: Optional[datetime], slack_sec: int = 3) -> bool:
@@ -212,8 +219,31 @@ def _wall_times_match(wanted: datetime, got: Optional[datetime], slack_sec: int 
     return delta <= slack_sec
 
 
+def _probe_network_wall_datetime(timeout_sec: float = 2.0) -> Optional[datetime]:
+    """Best-effort WiFi/network UTC→local wall time (diagnostic only; never overrides RTC)."""
+    try:
+        import urllib.request
+        from email.utils import parsedate_to_datetime
+
+        req = urllib.request.Request("https://www.google.com", method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            date_hdr = resp.headers.get("Date")
+        if not date_hdr:
+            return None
+        net = parsedate_to_datetime(date_hdr)
+        if net.tzinfo is not None:
+            net = net.astimezone().replace(tzinfo=None)
+        return net
+    except Exception:
+        return None
+
+
 def apply_user_wall_time(dt: datetime) -> Tuple[bool, str]:
-    """Apply user-entered local date/time: disable NTP, set system, write DS1307, verify."""
+    """Apply user-entered local date/time: disable NTP, set system, write DS1307, verify.
+
+    The value shown/edited in the top bar is the source of truth. WiFi/NTP must not
+    overwrite it; the DS1307 must carry the same local wall time across reboot/login.
+    """
     if dt is None:
         return False, "datetime required"
     disable_network_time_sync()
@@ -226,42 +256,55 @@ def apply_user_wall_time(dt: datetime) -> Tuple[bool, str]:
         if not ok_date:
             return False, "timedatectl failed: {}; date failed: {}".format(err_td, err_date)
     disable_network_time_sync()
+    # systohc is preferred: system local → correct UTC in RTC.
     rtc_written = write_rtc_from_system()
     if not rtc_written:
         rtc_written = _write_rtc_ioctl(dt)
     if not rtc_written:
         rtc_dev = kernel_rtc_device_path()
         rtc_written = bool(rtc_dev and _write_hwclock_set(rtc_dev, dt))
-    if not rtc_written and _logger:
-        _logger.warning(
-            "hwclock/ioctl could not write DS1307; system time was set to %s",
-            date_cmd_str,
-        )
+    if not rtc_written:
+        return False, "System time set but hardware RTC write failed — time will drift after reboot"
+    # Re-load system from RTC so boot path and top bar share one source.
+    sync_system_clock_from_rtc()
+    disable_network_time_sync()
     read_back = read_rtc_wall_datetime()
-    if read_back and not _wall_times_match(dt, read_back, slack_sec=8):
-        if _logger:
-            _logger.warning(
-                "RTC readback mismatch: wanted %s, got %s",
-                dt.strftime("%Y-%m-%d %H:%M:%S"),
-                read_back.strftime("%Y-%m-%d %H:%M:%S"),
-            )
-    elif not _wall_times_match(dt, datetime.now(), slack_sec=3):
+    if read_back is None:
+        return False, "Hardware RTC write could not be verified"
+    if not _wall_times_match(dt, read_back, slack_sec=8):
+        return False, "RTC readback mismatch: wanted {}, got {}".format(
+            dt.strftime("%Y-%m-%d %H:%M:%S"),
+            read_back.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+    if not _wall_times_match(dt, datetime.now(), slack_sec=3):
         return False, "Could not set or verify device time"
     return True, ""
 
 
-def get_device_wall_datetime_payload() -> Dict[str, Any]:
-    """Payload for /api/get_datetime — hardware RTC when available, else system clock."""
+def get_device_wall_datetime_payload(compare_network: bool = False) -> Dict[str, Any]:
+    """Payload for /api/get_datetime — hardware RTC wall time (top-bar source of truth)."""
     dt = read_rtc_wall_datetime()
     source = "rtc" if dt is not None else "system-fallback"
     if dt is None:
         dt = datetime.now()
-    return {
+    payload = {
         "datetime": dt.strftime("%Y-%m-%dT%H:%M:%S"),
         "date": dt.strftime("%d/%m/%Y"),
         "time": dt.strftime("%H:%M:%S"),
         "source": source,
+        "timezone": "Asia/Kolkata",
+        "ntpEnabled": False,
     }
+    # Optional WiFi comparison — never used to change the clock (opt-in; avoid delaying top bar).
+    if compare_network:
+        net = _probe_network_wall_datetime()
+        if net is not None:
+            payload["networkDatetime"] = net.strftime("%Y-%m-%dT%H:%M:%S")
+            payload["networkOffsetSec"] = int(round((net - dt).total_seconds()))
+        else:
+            payload["networkDatetime"] = None
+            payload["networkOffsetSec"] = None
+    return payload
 
 
 def ensure_rtc_is_clock_authority() -> None:

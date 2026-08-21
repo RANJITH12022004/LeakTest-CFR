@@ -501,9 +501,21 @@ def _apply_power_loss_duration(report: dict, checkpoint: dict = None) -> dict:
         td["durationSeconds"] = duration
         td["actualDurationSec"] = duration
         report["durationSeconds"] = duration
-        # Display Hold/Total as actual elapsed for aborted power-cut reports
+        # Hold = actual hold elapsed. Total = build + hold (+ release if already on report).
         td["holdDurationSec"] = duration
-        td["totalDurationSec"] = duration
+        try:
+            build_i = int(round(float(td.get("buildDurationSec") or 0)))
+        except (TypeError, ValueError):
+            build_i = 0
+        try:
+            release_i = td.get("releaseDurationSec")
+            if release_i in (None, ""):
+                release_i = td.get("releaseTimeSec")
+            release_i = int(round(float(release_i))) if release_i not in (None, "") else 0
+        except (TypeError, ValueError):
+            release_i = 0
+        # Power-cut mid-run usually never finishes release lock — keep 0 unless already stamped.
+        td["totalDurationSec"] = build_i + int(duration) + release_i
     report["testData"] = td
     return report
 
@@ -4836,7 +4848,10 @@ def _get_stored_datetime():
 
 @app.route("/api/get_datetime", methods=["GET"])
 def get_datetime():
-    return jsonify(_get_stored_datetime())
+    compare = str(request.args.get("compare") or request.args.get("network") or "").strip().lower() in (
+        "1", "true", "yes",
+    )
+    return jsonify(rtc_service.get_device_wall_datetime_payload(compare_network=compare))
 
 
 def _set_datetime_common():
