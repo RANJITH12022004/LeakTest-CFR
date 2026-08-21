@@ -3210,8 +3210,15 @@ function hideReleasePressureLock() {
  * Lock the full screen for releaseSec while pressure vents.
  * Returns a Promise that resolves when the countdown finishes.
  * Idle auto-logout is suppressed for the whole countdown.
+ *
+ * ESP vents on #STOP* — send STOP 2–3 times as soon as this timer starts
+ * (do not wait until the countdown ends).
+ *
+ * options.sendStop — default true; set false for calibration (uses STOP_CALIB elsewhere).
+ * options.stopBurstCount — how many STOP posts (default 3).
  */
-function showReleasePressureLock(releaseSec) {
+function showReleasePressureLock(releaseSec, options) {
+    options = options || {};
     return new Promise(function (resolve) {
         if (_releasePressureTimerId != null) {
             clearInterval(_releasePressureTimerId);
@@ -3241,6 +3248,12 @@ function showReleasePressureLock(releaseSec) {
         if (overlay) overlay.style.display = 'flex';
         markAutoLogoutActivity();
         syncKioskScreenWakeLock();
+
+        // Vent immediately when the release lock starts (ESP releases on STOP).
+        if (options.sendStop !== false && typeof hardwareLeakStopBurst === 'function') {
+            hardwareLeakStopBurst(options.stopBurstCount != null ? options.stopBurstCount : 3);
+        }
+
         _releasePressureTimerId = setInterval(function () {
             remaining -= 1;
             markAutoLogoutActivity();
@@ -5539,18 +5552,34 @@ function _reportDurationFieldsFromPreview(td, recipe, fs) {
             else if (!isNaN(aN)) total = aN;
         }
     }
-    // Last-resort: Start→End wall clock when total still missing
-    if ((total == null || isNaN(parseInt(total, 10))) && td.testStartTime && td.testEndTime) {
+    // If build was never stored (or frozen to 0 by early checkpoint), prefer Start→End wall clock
+    // when it clearly exceeds hold+release (build time missing from total).
+    if (td.testStartTime && td.testEndTime) {
         try {
             var wallMs = new Date(td.testEndTime).getTime() - new Date(td.testStartTime).getTime();
-            if (!isNaN(wallMs) && wallMs >= 0) total = Math.floor(wallMs / 1000);
+            if (!isNaN(wallMs) && wallMs >= 0) {
+                var wallSec = Math.floor(wallMs / 1000);
+                var totalN = parseInt(total, 10);
+                var holdRelease = (!isNaN(holdN) && !isNaN(releaseN)) ? (holdN + releaseN) : null;
+                if (total == null || isNaN(totalN)) {
+                    total = wallSec;
+                } else if (
+                    holdRelease != null
+                    && totalN <= holdRelease + 2
+                    && wallSec > holdRelease + 5
+                    && (isNaN(buildN) || buildN <= 0)
+                ) {
+                    total = wallSec;
+                    buildN = Math.max(0, wallSec - holdRelease);
+                }
+            }
         } catch (eWall) { /* ignore */ }
     }
     function fmt(v) {
         if (v == null || v === '' || isNaN(parseInt(v, 10))) return '--';
         return (typeof formatMmSs === 'function') ? formatMmSs(parseInt(v, 10)) : String(v);
     }
-    return { hold: fmt(hold), release: fmt(release), total: fmt(total) };
+    return { hold: fmt(hold), release: fmt(release), total: fmt(total), buildSec: buildN };
 }
 
 function _approverFieldsFromPreview(preview, td) {
@@ -6191,24 +6220,43 @@ var testRunHoldStartTime = null;
 /** Frozen build (evacuate) seconds: Start → TARGET_REACHED, or Start → abort if never reached. */
 var testRunBuildDurationSec = null;
 
-function _freezeTestRunBuildDurationSec() {
-    if (testRunBuildDurationSec != null && !isNaN(parseInt(testRunBuildDurationSec, 10))) {
-        return parseInt(testRunBuildDurationSec, 10);
-    }
-    var buildSec = 0;
+function _freezeTestRunBuildDurationSec(opts) {
+    opts = opts || {};
+    // Authoritative: Start → TARGET_REACHED / hold start. Always recompute when both stamps exist
+    // so an early checkpoint cannot permanently freeze build to ~0.
     try {
         if (testRunStartTime && testRunHoldStartTime) {
             var bMs = new Date(testRunHoldStartTime).getTime() - new Date(testRunStartTime).getTime();
-            if (!isNaN(bMs) && bMs >= 0) buildSec = Math.floor(bMs / 1000);
-        } else if (testRunStartTime) {
-            var bMs2 = Date.now() - new Date(testRunStartTime).getTime();
-            if (!isNaN(bMs2) && bMs2 >= 0) buildSec = Math.floor(bMs2 / 1000);
+            if (!isNaN(bMs) && bMs >= 0) {
+                testRunBuildDurationSec = Math.floor(bMs / 1000);
+                return testRunBuildDurationSec;
+            }
         }
-    } catch (eFreeze) {
-        buildSec = 0;
+    } catch (eHold) { /* fall through */ }
+
+    // Abort / incomplete build: optionally freeze time-until-now once.
+    if (opts.finalize && testRunStartTime && !testRunHoldStartTime) {
+        try {
+            var bMs2 = Date.now() - new Date(testRunStartTime).getTime();
+            if (!isNaN(bMs2) && bMs2 >= 0) {
+                testRunBuildDurationSec = Math.floor(bMs2 / 1000);
+                return testRunBuildDurationSec;
+            }
+        } catch (eAbort) { /* ignore */ }
     }
-    testRunBuildDurationSec = buildSec;
-    return buildSec;
+
+    if (testRunBuildDurationSec != null && !isNaN(parseInt(testRunBuildDurationSec, 10))) {
+        return parseInt(testRunBuildDurationSec, 10);
+    }
+
+    // Mid-build checkpoint: report provisional build so far, but do NOT freeze it.
+    if (testRunStartTime && !testRunHoldStarted) {
+        try {
+            var bMs3 = Date.now() - new Date(testRunStartTime).getTime();
+            if (!isNaN(bMs3) && bMs3 >= 0) return Math.floor(bMs3 / 1000);
+        } catch (eProv) { /* ignore */ }
+    }
+    return 0;
 }
 var testRunIntervalId = null;
 var testRunCurrentStepIndex = 0;
@@ -6301,6 +6349,25 @@ function _startTestRunPressurePoll() {
 function hardwareLeakStopSilently() {
     return apiRequest(API_BASE + '/api/hardware/leak/stop', { method: 'POST' }).catch(function () {});
 }
+
+/**
+ * Fire leak/stop several times with short gaps (ESP vents on STOP).
+ * Used when the release-pressure lock starts — do not wait for the 80s UI to finish.
+ */
+function hardwareLeakStopBurst(times) {
+    var n = parseInt(times, 10);
+    if (isNaN(n) || n < 1) n = 3;
+    if (n > 5) n = 5;
+    var gapMs = 500;
+    for (var i = 0; i < n; i++) {
+        (function (delay) {
+            setTimeout(function () {
+                hardwareLeakStopSilently();
+            }, delay);
+        })(i * gapMs);
+    }
+}
+window.hardwareLeakStopBurst = hardwareLeakStopBurst;
 
 /** Await leak/stop so ESP motor actually stops before UI continues; never rejects. */
 function hardwareLeakStopAwait() {
@@ -7581,7 +7648,7 @@ function _finishTestRunVacuumHold() {
     }
     testRunButtonState = 'start';
     testRunHoldStarted = false;
-    hardwareLeakStopSilently();
+    // STOP is sent when the release lock starts (ESP vents on STOP) — not after the 80s UI ends.
     _closeTestRunHardwareEs();
 
     testRunResultText = _computeTestRunResult();
@@ -8197,7 +8264,9 @@ function abortTestRunAndSave() {
     if (_abortSaveInFlight) return Promise.resolve();
 
     // Freeze build seconds before clearing hold flags / release lock (release must not inflate build).
-    if (typeof _freezeTestRunBuildDurationSec === 'function') _freezeTestRunBuildDurationSec();
+    if (typeof _freezeTestRunBuildDurationSec === 'function') {
+        _freezeTestRunBuildDurationSec({ finalize: true });
+    }
 
     if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
     if (testRunIntervalId != null) {

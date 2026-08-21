@@ -1102,7 +1102,7 @@
                 var lockFn = (typeof showReleasePressureLock === 'function')
                     ? showReleasePressureLock
                     : function () { return Promise.resolve(); };
-                return lockFn(releaseSec).then(function () {
+                return lockFn(releaseSec, { sendStop: false }).then(function () {
                     var payload = buildCalibrationReportPayload(actualPressure, run);
                     window._lastFailedValidation = null;
                     return saveCalibrationReport(payload);

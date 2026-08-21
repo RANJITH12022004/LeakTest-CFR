@@ -1084,11 +1084,18 @@ def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: D
         release_i = int(round(float(release))) if release not in (None, "") else None
     except (TypeError, ValueError):
         release_i = None
-    if total in (None, ""):
+    if total not in (None, ""):
+        try:
+            total_i = int(round(float(total)))
+        except (TypeError, ValueError):
+            total_i = None
+    else:
+        total_i = None
+    if total_i is None:
         if hold_i is not None and release_i is not None:
-            total = build_i + hold_i + release_i
+            total_i = build_i + hold_i + release_i
         else:
-            # Wall-clock fallback Start→End
+            total_i = None
             start = td.get("testStartTime")
             end = td.get("testEndTime")
             if start and end:
@@ -1099,16 +1106,35 @@ def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: D
                         s = str(v).replace("Z", "+00:00")
                         return _dt.fromisoformat(s)
 
-                    total = max(0, int((_parse(end) - _parse(start)).total_seconds()))
+                    total_i = max(0, int((_parse(end) - _parse(start)).total_seconds()))
                 except Exception:
                     pass
+    else:
+        # Legacy reports: total was hold+release only (buildDurationSec missing / 0).
+        # Prefer Start→End wall clock when it clearly includes build time.
+        start = td.get("testStartTime")
+        end = td.get("testEndTime")
+        if start and end and hold_i is not None and release_i is not None and build_i <= 0:
+            try:
+                from datetime import datetime as _dt
+
+                def _parse2(v):
+                    s = str(v).replace("Z", "+00:00")
+                    return _dt.fromisoformat(s)
+
+                wall = max(0, int((_parse2(end) - _parse2(start)).total_seconds()))
+                hold_release = hold_i + release_i
+                if wall > hold_release + 5 and total_i <= hold_release + 2:
+                    total_i = wall
+            except Exception:
+                pass
     return {
         "hold": _fmt_mmss_value(hold_i) if hold_i is not None else "--",
         "release": _fmt_mmss_value(release_i) if release_i is not None else "--",
-        "total": _fmt_mmss_value(total) if total not in (None, "") else "--",
+        "total": _fmt_mmss_value(total_i) if total_i is not None else "--",
         "holdSec": hold_i,
         "releaseSec": release_i,
-        "totalSec": int(total) if total not in (None, "") else None,
+        "totalSec": total_i,
     }
 
 
