@@ -24,13 +24,28 @@ _dir_writable() {
 
 # Prefer internal USB when mounted AND writable.
 # After power-loss FAT may remount-ro; repair script should heal it, but if not, use SD.
+_mirror_critical_to_sd() {
+  local src_dir="$1"
+  local dst_dir="$2"
+  mkdir -p "$dst_dir" 2>/dev/null || true
+  local f
+  for f in members.json factorySettings.json recipes.json reports.json roles.json \
+           current_user.json session_power_audit_pending.json; do
+    if [ -f "$src_dir/$f" ]; then
+      cp -a "$src_dir/$f" "$dst_dir/$f" 2>/dev/null || true
+    fi
+  done
+}
+
 if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null && _dir_writable "$INTERNAL_USB_PATH/storage"; then
   export INTERNAL_USB_PATH
   export STORAGE_DIR="${STORAGE_DIR:-$INTERNAL_USB_PATH/storage}"
   export REPORTS_DIR="${REPORTS_DIR:-$INTERNAL_USB_PATH/reports}"
   export AUDIT_DB_DIR="${AUDIT_DB_DIR:-$INTERNAL_USB_PATH/db}"
   export INTERNAL_USB_UUIDS="${INTERNAL_USB_UUIDS:-D444-057C}"
-  echo "run_kiosk_app: using USB storage at $STORAGE_DIR" >&2
+  # Keep SD mirror warm so remount-ro never leaves login/recipes empty.
+  _mirror_critical_to_sd "$STORAGE_DIR" "$APP_ROOT/storage"
+  echo "run_kiosk_app: using USB storage at $STORAGE_DIR (SD mirror refreshed)" >&2
 else
   unset STORAGE_DIR REPORTS_DIR AUDIT_DB_DIR 2>/dev/null || true
   export STORAGE_DIR="$APP_ROOT/storage"
@@ -57,8 +72,17 @@ else
     for f in members.json factorySettings.json recipes.json reports.json roles.json; do
       src="$INTERNAL_USB_PATH/storage/$f"
       dst="$STORAGE_DIR/$f"
-      if [ -f "$src" ] && _needs_seed "$dst"; then
-        cp -a "$src" "$dst" 2>/dev/null || true
+      if [ -f "$src" ]; then
+        if _needs_seed "$dst"; then
+          cp -a "$src" "$dst" 2>/dev/null || true
+        else
+          # Prefer larger USB copy (richer members/recipes) over stale SD placeholder.
+          ssz="$(wc -c < "$src" 2>/dev/null || echo 0)"
+          dsz="$(wc -c < "$dst" 2>/dev/null || echo 0)"
+          if [ "${ssz:-0}" -gt "${dsz:-0}" ]; then
+            cp -a "$src" "$dst" 2>/dev/null || true
+          fi
+        fi
       fi
     done
   fi

@@ -5151,6 +5151,88 @@ _register_clean_shutdown_signals()
 _register_clean_shutdown_atexit()
 
 
+def _usb_storage_is_writable() -> bool:
+    usb = pathlib.Path(os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal")) / "storage"
+    try:
+        return data_service._path_is_writable(usb)
+    except Exception:
+        return False
+
+
+def _try_repair_internal_usb() -> bool:
+    """Ask root helper to heal remount-ro USB (sudoers NOPASSWD)."""
+    script = APP_ROOT / "scripts" / "kiosk_repair_internal_usb.sh"
+    if not script.is_file():
+        return False
+    try:
+        proc = subprocess.run(
+            ["sudo", "-n", "/bin/bash", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        if proc.returncode != 0:
+            app.logger.warning(
+                "USB repair helper rc=%s stderr=%s",
+                proc.returncode,
+                (proc.stderr or "")[:300],
+            )
+        data_service._refresh_storage_dir()
+        return _usb_storage_is_writable()
+    except Exception:
+        app.logger.exception("USB repair helper failed")
+        return False
+
+
+def _usb_health_monitor_loop():
+    """Detect remount-ro during runtime and heal without waiting for reboot."""
+    # Stagger first check so boot ExecStartPre repair can finish.
+    time.sleep(25)
+    while True:
+        try:
+            usb_root = pathlib.Path(os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal"))
+            mounted = usb_root.is_dir() and os.path.ismount(str(usb_root))
+            writable = _usb_storage_is_writable() if mounted else False
+            if mounted and not writable:
+                app.logger.warning("Internal USB remount-ro detected — invoking repair")
+                if _try_repair_internal_usb():
+                    app.logger.info("Internal USB restored to writable")
+                else:
+                    # Keep serving richest SD/USB-readable copies.
+                    try:
+                        data_service._seed_storage_from_readonly_usb(data_service._sd_storage_dir())
+                        data_service._refresh_storage_dir()
+                    except Exception:
+                        pass
+            elif not mounted:
+                # Attempt mount/repair if stick disappeared briefly after power event.
+                _try_repair_internal_usb()
+            else:
+                # Healthy: keep STORAGE_DIR on USB if it drifted to SD.
+                try:
+                    data_service._refresh_storage_dir()
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                app.logger.exception("USB health monitor tick failed")
+            except Exception:
+                pass
+        time.sleep(20)
+
+
+def _start_usb_health_monitor():
+    try:
+        t = threading.Thread(target=_usb_health_monitor_loop, name="usb-health", daemon=True)
+        t.start()
+    except Exception:
+        app.logger.exception("Failed to start USB health monitor")
+
+
+_start_usb_health_monitor()
+
+
 @app.route("/<path:path>", methods=["GET"])
 def serve_static(path):
     if path.startswith("api/"):

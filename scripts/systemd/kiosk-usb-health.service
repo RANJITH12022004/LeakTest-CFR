@@ -1,0 +1,11 @@
+[Unit]
+Description=Kiosk internal USB remount-ro health check
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+Environment=APP_ROOT=/opt/kiosk
+Environment=INTERNAL_USB_PATH=/media/usb_internal
+Environment=INTERNAL_USB_PARTITION=/dev/sda1
+ExecStart=/bin/bash /opt/kiosk/scripts/kiosk_usb_health_watchdog.sh
