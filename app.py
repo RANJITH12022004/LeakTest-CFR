@@ -2742,7 +2742,24 @@ def login_biometric():
         template_id = identified.get("templateId")
         member = data_service.get_member_by_fingerprint_template(template_id)
         if not member:
-            return jsonify({"error": "Fingerprint is not linked to any member account"}), 404
+            # After power-loss remount-ro the bridge may be on empty SD storage.
+            # Re-seed from USB (if readable) and re-resolve storage, then retry once.
+            try:
+                data_service._seed_storage_from_readonly_usb(data_service._sd_storage_dir())
+            except Exception:
+                pass
+            try:
+                data_service._refresh_storage_dir()
+            except Exception:
+                pass
+            member = data_service.get_member_by_fingerprint_template(template_id)
+        if not member:
+            return jsonify({
+                "error": (
+                    "Fingerprint template {} is not linked to any member on the current account. "
+                    "Use password login, or re-enroll the fingerprint for this user."
+                ).format(template_id)
+            }), 404
 
         username = member.get("username") or ""
         status = str(member.get("status") or "active").strip().lower()
@@ -2938,6 +2955,12 @@ def approval_verify():
             template_id = identified.get("templateId")
             member = data_service.get_member_by_fingerprint_template(template_id)
             if not member:
+                try:
+                    data_service._refresh_storage_dir()
+                except Exception:
+                    pass
+                member = data_service.get_member_by_fingerprint_template(template_id)
+            if not member:
                 _audit_event(
                     action="Approval verification",
                     outcome="failed",
@@ -2947,7 +2970,10 @@ def approval_verify():
                     target_user="--",
                     extra={"purpose": purpose, "method": "biometric", "templateId": template_id},
                 )
-                return jsonify({"ok": False, "error": "Fingerprint is not linked to any member account"}), 404
+                return jsonify({
+                    "ok": False,
+                    "error": "Fingerprint is not linked to any member account (template {}).".format(template_id)
+                }), 404
             status = str(member.get("status") or "active").strip().lower()
             if status != "active":
                 _audit_event(

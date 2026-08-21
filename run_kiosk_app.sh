@@ -38,10 +38,27 @@ else
   export AUDIT_DB_DIR="$APP_ROOT/db"
   mkdir -p "$STORAGE_DIR" "$REPORTS_DIR" "$AUDIT_DB_DIR"
   # Seed critical files from USB if readable but RO (so login still works).
+  # Treat empty JSON placeholders ([] / {}) as missing — "[ ! -s ]" is NOT enough.
   if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
-    for f in members.json factorySettings.json recipes.json; do
-      if [ -f "$INTERNAL_USB_PATH/storage/$f" ] && [ ! -s "$STORAGE_DIR/$f" ]; then
-        cp -a "$INTERNAL_USB_PATH/storage/$f" "$STORAGE_DIR/$f" 2>/dev/null || true
+    _needs_seed() {
+      local f="$1"
+      if [ ! -f "$f" ]; then return 0; fi
+      local sz
+      sz="$(wc -c < "$f" 2>/dev/null || echo 0)"
+      if [ "${sz:-0}" -le 4 ]; then
+        local raw
+        raw="$(tr -d '[:space:]' < "$f" 2>/dev/null || true)"
+        case "$raw" in
+          ''|'[]'|'{}'|'null') return 0 ;;
+        esac
+      fi
+      return 1
+    }
+    for f in members.json factorySettings.json recipes.json reports.json roles.json; do
+      src="$INTERNAL_USB_PATH/storage/$f"
+      dst="$STORAGE_DIR/$f"
+      if [ -f "$src" ] && _needs_seed "$dst"; then
+        cp -a "$src" "$dst" 2>/dev/null || true
       fi
     done
   fi
