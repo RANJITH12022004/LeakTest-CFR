@@ -172,9 +172,9 @@ def main() -> int:
     flag = STORAGE / "app_clean_stop.flag"
     if flag.exists():
         flag.unlink()
-    flag.touch()
+    # Leave flag absent → unclean shutdown path
 
-    before_ids = {r.get("id") for r in (data_service.list_reports("all", include_pending=True) or [])}
+    before_ids = {r.get("id") for r in (data_service.list_reports("all") or [])}
     since_ms = int(time.time() * 1000) - 2000
     if not _checkpoint_is_mid_test(data_service.get_test_run_data()):
         res.fail("checkpoint not detected as mid-test before startup recovery")
@@ -183,17 +183,14 @@ def main() -> int:
 
     _startup_session_power_audit()
 
-    after = data_service.list_reports("all", include_pending=True) or []
+    after = data_service.list_reports("all") or []
     new_reports = [r for r in after if r.get("id") not in before_ids]
     power_rep = None
     for r in new_reports:
         td = r.get("testData") if isinstance(r.get("testData"), dict) else {}
         remarks = str(td.get("remarks") or r.get("remarks") or "").lower()
-        if "power interruption" in remarks or str(r.get("reportApprovalStatus") or "").lower() in (
-            "aborted",
-            "approved",
-        ):
-            if "power interruption" in remarks or str(r.get("status") or "").lower() == "failed":
+        if "power interruption" in remarks or str(r.get("reportApprovalStatus") or "").lower() == "aborted":
+            if "power interruption" in remarks or str(r.get("status") or "").lower() == "aborted":
                 power_rep = r
                 break
     if not power_rep and after:
@@ -207,15 +204,33 @@ def main() -> int:
         td = power_rep.get("testData") if isinstance(power_rep.get("testData"), dict) else {}
         st = str(power_rep.get("reportApprovalStatus") or "").lower()
         status = str(power_rep.get("status") or td.get("status") or "").lower()
-        if st == "approved" and status == "failed" and "power interruption" in str(
-            td.get("remarks") or power_rep.get("remarks") or ""
-        ).lower():
-            res.ok(
-                f"power-cut Fail report system-approved id={power_rep.get('id')} "
-                f"by={power_rep.get('approvedByUsername') or power_rep.get('approvedBy')}"
+        remarks = str(td.get("remarks") or power_rep.get("remarks") or "").lower()
+        if st == "aborted" and status == "aborted" and "power interruption" in remarks:
+            dur = td.get("durationSeconds")
+            if dur is None:
+                dur = power_rep.get("durationSeconds")
+            try:
+                dur_n = int(dur)
+            except (TypeError, ValueError):
+                dur_n = -1
+            start_s = td.get("testStartTime") or power_rep.get("testStartTime")
+            end_s = td.get("testEndTime") or power_rep.get("testEndTime")
+            if dur_n >= 90 and start_s and end_s and start_s != end_s:
+                res.ok(
+                    f"power-cut Aborted report id={power_rep.get('id')} "
+                    f"duration={dur_n}s start≠end"
+                )
+            else:
+                res.ok(
+                    f"power-cut Aborted report id={power_rep.get('id')} "
+                    f"approval={st} status={status}"
+                )
+        elif st == "approved" and status == "failed" and "power interruption" in remarks:
+            res.fail(
+                "legacy Fail+system-approved power-cut path still active "
+                f"(id={power_rep.get('id')})"
             )
         else:
-            # Legacy timing checks still useful when duration fields exist
             dur = td.get("durationSeconds")
             if dur is None:
                 dur = power_rep.get("durationSeconds")

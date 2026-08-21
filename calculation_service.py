@@ -36,22 +36,25 @@ def validate_recipe(recipe_data: Dict[str, Any]) -> Dict[str, Any]:
     product_type = str(recipe_data.get("productType") or "").strip()
     if not product_type:
         errors.append("Product type is required")
+    # noOfSamples is collected at Load Recipe time, not stored on the recipe
+    raw_samples = recipe_data.get("noOfSamples")
+    if raw_samples not in (None, ""):
+        try:
+            samples = int(raw_samples)
+            if samples < 1 or samples > 100:
+                errors.append("No. of samples must be between 1 and 100 when provided")
+        except (TypeError, ValueError):
+            errors.append("No. of samples must be a whole number when provided")
     try:
-        raw_samples = recipe_data.get("noOfSamples")
-        if raw_samples in (None, ""):
+        raw_batch = recipe_data.get("batchSize")
+        if raw_batch in (None, ""):
             pass  # optional
         else:
-            samples = int(raw_samples)
-            if samples < 1:
-                errors.append("No. of samples must be 1 or more when provided")
+            batch_size = int(raw_batch)
+            if batch_size < 1:
+                errors.append("Batch size must be 1 or more when provided")
     except (TypeError, ValueError):
-        errors.append("No. of samples must be a whole number when provided")
-    try:
-        batch_size = int(recipe_data.get("batchSize"))
-        if batch_size < 1 or batch_size > 999:
-            errors.append("Batch size must be between 1 and 999")
-    except (TypeError, ValueError):
-        errors.append("Batch size is required")
+        errors.append("Batch size must be a whole number when provided")
 
     method = str(recipe_data.get("method") or recipe_data.get("testMethod") or "").strip().upper()
     if method and method not in VALID_METHODS:
@@ -107,18 +110,16 @@ def validate_recipe(recipe_data: Dict[str, Any]) -> Dict[str, Any]:
 
 def process_recipe_form_data(form_data: Dict[str, Any]) -> Dict[str, Any]:
     recipe = dict(form_data)
-    raw_samples = recipe.get("noOfSamples")
-    if raw_samples in (None, ""):
-        recipe["noOfSamples"] = None
+    # Samples are entered when loading a recipe for a test run — do not persist on recipe.
+    recipe.pop("noOfSamples", None)
+    raw_batch = recipe.get("batchSize")
+    if raw_batch in (None, ""):
+        recipe["batchSize"] = None
     else:
         try:
-            recipe["noOfSamples"] = int(raw_samples)
+            recipe["batchSize"] = int(raw_batch)
         except (TypeError, ValueError):
-            recipe["noOfSamples"] = None
-    try:
-        recipe["batchSize"] = int(recipe.get("batchSize"))
-    except (TypeError, ValueError):
-        pass
+            recipe["batchSize"] = None
     if "createdAt" not in recipe:
         recipe["createdAt"] = datetime.utcnow().isoformat() + "Z"
     if "lastUsed" not in recipe:

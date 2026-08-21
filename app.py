@@ -14,7 +14,8 @@ import subprocess
 import sys
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Optional
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 
 try:
@@ -368,62 +369,231 @@ POWER_INTERRUPTION_REMARKS = "Power interruption"
 POWER_INTERRUPTION_SYSTEM_APPROVER = "System"
 
 
-def _apply_power_loss_abort_to_report(report: dict) -> dict:
-    """Mark a report Fail + system-approved after power loss (only this path may system-approve)."""
+def _parse_report_dt(raw):
+    """Parse ISO-ish timestamps from reports/checkpoints into datetime (best-effort)."""
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _format_duration_hms(seconds) -> str:
+    try:
+        total = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return "00:00:00"
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return "{:02d}:{:02d}:{:02d}".format(h, m, s)
+
+
+def _power_loss_end_iso(checkpoint: dict = None, report: dict = None) -> str:
+    """Last known live test time: checkpoint stamp beats post-boot wall clock."""
+    cp = checkpoint if isinstance(checkpoint, dict) else {}
+    rp = report if isinstance(report, dict) else {}
+    td = rp.get("testData") if isinstance(rp.get("testData"), dict) else {}
+    cp_td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+    for raw in (
+        cp.get("_checkpointAt"),
+        cp.get("testEndTime"),
+        cp_td.get("testEndTime"),
+        cp.get("_espCommandSentAt"),
+        td.get("testEndTime"),
+        rp.get("testEndTime"),
+        rp.get("completedAt"),
+    ):
+        if raw:
+            return str(raw).strip()
+    return _utc_now_iso()
+
+
+def _read_duration_seconds_candidate(*dicts) -> Optional[int]:
+    for d in dicts:
+        if not isinstance(d, dict):
+            continue
+        for key in ("durationSeconds", "actualDurationSec", "elapsedSeconds", "durationSec"):
+            raw = d.get(key)
+            if raw is None:
+                continue
+            try:
+                return max(0, int(raw))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _apply_power_loss_duration(report: dict, checkpoint: dict = None) -> dict:
+    """Stamp exact duration of the test that ran before power loss onto the report."""
     report = dict(report or {})
+    td = report.get("testData")
+    td = dict(td) if isinstance(td, dict) else {}
+    cp = checkpoint if isinstance(checkpoint, dict) else {}
+    cp_td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+
+    elapsed = _read_duration_seconds_candidate(cp, cp_td, td, report)
+
+    start_raw = (
+        cp.get("testStartTime")
+        or cp_td.get("testStartTime")
+        or td.get("testStartTime")
+        or report.get("testStartTime")
+    )
+    end_raw = _power_loss_end_iso(cp, report)
+    start_dt = _parse_report_dt(start_raw)
+    end_dt = _parse_report_dt(end_raw)
+
+    duration = None
+    if start_dt is not None and end_dt is not None:
+        if start_dt.tzinfo and not end_dt.tzinfo:
+            end_dt = end_dt.replace(tzinfo=start_dt.tzinfo)
+        elif end_dt.tzinfo and not start_dt.tzinfo:
+            start_dt = start_dt.replace(tzinfo=end_dt.tzinfo)
+        delta = int((end_dt - start_dt).total_seconds())
+        if abs(delta) <= 2 and elapsed is not None and elapsed > 2:
+            try:
+                start_dt = end_dt - timedelta(seconds=elapsed)
+                start_raw = start_dt.isoformat().replace("+00:00", "Z")
+                duration = elapsed
+            except Exception:
+                duration = elapsed
+        else:
+            duration = elapsed if (elapsed is not None and elapsed >= 0) else max(0, delta)
+            if elapsed is not None and elapsed > max(0, delta) + 2:
+                duration = elapsed
+                if abs(delta) <= 2:
+                    try:
+                        start_dt = end_dt - timedelta(seconds=elapsed)
+                        start_raw = start_dt.isoformat().replace("+00:00", "Z")
+                    except Exception:
+                        pass
+    elif elapsed is not None:
+        duration = elapsed
+        if end_dt is not None and start_dt is None and elapsed > 0:
+            try:
+                start_dt = end_dt - timedelta(seconds=elapsed)
+                start_raw = start_dt.isoformat().replace("+00:00", "Z")
+            except Exception:
+                pass
+        elif start_dt is not None and end_dt is None and elapsed > 0:
+            try:
+                end_dt = start_dt + timedelta(seconds=elapsed)
+                end_raw = end_dt.isoformat().replace("+00:00", "Z")
+            except Exception:
+                pass
+
+    if start_raw:
+        start_iso = str(start_raw).strip()
+        td["testStartTime"] = start_iso
+        report["testStartTime"] = start_iso
+    end_iso = str(end_raw).strip() if end_raw else _utc_now_iso()
+    td["testEndTime"] = end_iso
+    report["testEndTime"] = end_iso
+    if duration is not None:
+        td["durationSeconds"] = duration
+        td["actualDurationSec"] = duration
+        report["durationSeconds"] = duration
+        # Display Hold/Total as actual elapsed for aborted power-cut reports
+        td["holdDurationSec"] = duration
+        td["totalDurationSec"] = duration
+    report["testData"] = td
+    return report
+
+
+def _apply_power_loss_abort_to_report(report: dict, checkpoint: dict = None) -> dict:
+    """Mark a report aborted after power loss (no Pass/Fail, no system auto-approve)."""
+    report = _apply_power_loss_duration(dict(report or {}), checkpoint)
     td = report.get("testData")
     if not isinstance(td, dict):
         td = {}
     else:
         td = dict(td)
-    now = _utc_now_iso()
-    td["status"] = "failed"
+    td["status"] = "aborted"
     td["remarks"] = POWER_INTERRUPTION_REMARKS
-    td["result"] = "Fail"
-    td["passFail"] = "Fail"
+    for k in ("approvalPassFail", "passFail", "result", "drumPassFail"):
+        td.pop(k, None)
     report["testData"] = td
     report["remarks"] = POWER_INTERRUPTION_REMARKS
-    report["status"] = "failed"
-    report["result"] = "Fail"
-    report["passFail"] = "Fail"
-    report["approvalPassFail"] = "Fail"
-    report["reportApprovalStatus"] = "approved"
-    report["approvedBy"] = POWER_INTERRUPTION_SYSTEM_APPROVER
-    report["approvedByName"] = POWER_INTERRUPTION_SYSTEM_APPROVER
-    report["approvedByUsername"] = POWER_INTERRUPTION_SYSTEM_APPROVER
-    report["approvalRemarks"] = "Auto-approved — Power interruption"
-    report["approvedAt"] = now
+    report["status"] = "aborted"
+    report["reportApprovalStatus"] = "aborted"
+    for k in (
+        "approvalPassFail",
+        "passFail",
+        "result",
+        "approvedBy",
+        "approvedByName",
+        "approvedByUsername",
+        "approvalRemarks",
+        "approvedAt",
+    ):
+        report.pop(k, None)
     if not report.get("completedAt"):
-        report["completedAt"] = now
+        report["completedAt"] = report.get("testEndTime") or _utc_now_iso()
     return report
 
 
 def _audit_power_loss_aborted_report(report: dict) -> None:
-    """Generate PDF and audit rows for a power-loss system auto-approved Fail report."""
+    """Generate PDF and audit rows for a power-loss aborted report."""
     rid = report.get("id")
     if rid is None:
         return
     ctx = _format_report_audit_details(int(rid), report)
+    td = report.get("testData") if isinstance(report.get("testData"), dict) else {}
+    duration = td.get("durationSeconds")
+    if duration is None:
+        duration = report.get("durationSeconds")
+    try:
+        duration_i = int(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration_i = None
+    dur_txt = _format_duration_hms(duration_i) if duration_i is not None else "--"
     try:
         pdf_ok = _generate_report_pdf_file(int(rid), write_audit=False)
     except Exception:
         pdf_ok = False
         app.logger.exception("Power-loss report PDF failed for id %s", rid)
-    pl_detail = "{} | unclean shutdown | remarks: {} | approved by System".format(
-        ctx, POWER_INTERRUPTION_REMARKS
-    )
+    pl_detail = (
+        "{} | unclean shutdown | duration: {} | status: aborted | remarks: {}"
+    ).format(ctx, dur_txt, POWER_INTERRUPTION_REMARKS)
     if pdf_ok:
         pl_detail = "{} | PDF saved".format(pl_detail)
-    _audit("System", "System", "Report auto-approved (power interruption)", pl_detail)
+    _audit("System", "System", "Report aborted (power loss)", pl_detail)
     if pdf_ok:
         _audit_report_pdf_generated(int(rid), report)
 
 
+def _checkpoint_is_mid_test(cp) -> bool:
+    """True when an in-progress / awaiting-approval checkpoint should recover on boot."""
+    if not isinstance(cp, dict) or not cp:
+        return False
+    rtype = str(cp.get("type") or "").strip().lower()
+    if rtype not in ("test", "validation", "calibration"):
+        return False
+    phase = str(cp.get("_checkpointPhase") or "").strip().lower()
+    if phase in ("running", "awaiting-approval"):
+        return True
+    if cp.get("_pendingReportId") is not None:
+        return True
+    td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
+    if str(td.get("status") or "").strip().lower() in ("running", "in_progress", "hold"):
+        return True
+    return False
+
+
 def _abort_pending_reports_after_power_loss(session_username):
-    """Finalize pending reports as Fail + system-approved after unclean shutdown (power loss)."""
+    """Finalize pending reports as aborted after unclean shutdown (power loss)."""
     un = _norm_username(session_username)
     if not un:
         return 0
+    cp = data_service.get_test_run_data()
     aborted = 0
     for report in data_service.list_reports("all") or []:
         rtype = (report.get("type") or "").strip().lower()
@@ -433,7 +603,7 @@ def _abort_pending_reports_after_power_loss(session_username):
             continue
         if _report_operated_by_username(report) != un:
             continue
-        report = _apply_power_loss_abort_to_report(report)
+        report = _apply_power_loss_abort_to_report(report, cp)
         data_service.save_report(report)
         _audit_power_loss_aborted_report(report)
         aborted += 1
@@ -441,13 +611,16 @@ def _abort_pending_reports_after_power_loss(session_username):
 
 
 def _create_aborted_report_from_power_loss_checkpoint(session_username):
-    """If a run was in progress (checkpoint) but no pending report existed, save Fail + system-approved report."""
+    """If a run was in progress (checkpoint) but no pending report existed, save aborted report."""
     un = _norm_username(session_username)
     if not un:
         data_service.clear_test_run_data()
         return 0
     cp = data_service.get_test_run_data()
     if not isinstance(cp, dict) or not cp:
+        return 0
+    if not _checkpoint_is_mid_test(cp):
+        data_service.clear_test_run_data()
         return 0
     rtype = (cp.get("type") or "").strip().lower()
     if rtype not in ("test", "validation", "calibration"):
@@ -473,7 +646,7 @@ def _create_aborted_report_from_power_loss_checkpoint(session_username):
         factory_settings=report_data.get("factorySettings"),
     )
     enriched = _stamp_report_operator(enriched)
-    enriched = _apply_power_loss_abort_to_report(enriched)
+    enriched = _apply_power_loss_abort_to_report(enriched, cp)
     report_id = data_service.save_report(enriched)
     enriched["id"] = report_id
     data_service.save_report(enriched)
@@ -751,6 +924,20 @@ def _require_auth():
     if not data_service.get_current_user():
         return jsonify({"error": "Unauthorized"}), 401
     return None
+
+
+def _log_print_auth_failure(gate):
+    """Warn when print is rejected for missing session (client may still look logged in)."""
+    if not gate:
+        return
+    status = gate[1] if isinstance(gate, tuple) and len(gate) > 1 else None
+    if status != 401:
+        return
+    hdr_user = (request.headers.get("X-User-Username") or "").strip()
+    app.logger.warning(
+        "Print auth 401: empty server session (X-User-Username=%r)",
+        hdr_user or None,
+    )
 
 
 def _session_member_id():
@@ -1841,51 +2028,9 @@ def delete_member(member_id):
         target = (member.get("username") or member.get("name") or "").strip() or "--"
         actor_info = _audit_actor()
         actor = (actor_info.get("user") or "").strip() or "--"
-        verified, verify_err = _require_user_admin_verification()
-        if not verified:
-            _audit_event(
-                action="User disabled",
-                outcome="denied",
-                entity_type="member",
-                entity_id=member_id,
-                entity_name=target,
-                details="{} attempted to disable {}: {}".format(
-                    actor, target, verify_err or "Approval verification required"
-                ),
-                target_user=target,
-                before=member,
-                actor_user=actor,
-            )
-            return jsonify({"error": verify_err}), 403
-        verifier_name = (verified.get("username") or verified.get("name") or actor or "--").strip() or "--"
+        actor_role = (actor_info.get("role") or "").strip() or "--"
         before_member = dict(member)
-        template_id = member.get("fingerprintTemplateId")
-        if template_id is not None:
-            deleted = biometric_service.delete_template(template_id)
-            if not deleted.get("ok"):
-                _audit_event(
-                    action="User disabled",
-                    outcome="failed",
-                    entity_type="member",
-                    entity_id=member_id,
-                    entity_name=target,
-                    details="{} attempted to disable {}: {}".format(
-                        verifier_name,
-                        target,
-                        deleted.get("error") or "Failed to delete fingerprint template from sensor",
-                    ),
-                    target_user=target,
-                    before=before_member,
-                    signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
-                    extra={"templateId": template_id},
-                    actor_user=verifier_name,
-                    actor_role=verified.get("role"),
-                )
-                return jsonify({
-                    "error": deleted.get("error") or "Failed to delete fingerprint template from sensor",
-                    "templateId": int(template_id)
-                }), 400
-            data_service.clear_member_biometric(member_id)
+        # Soft-disable only; keep fingerprint on sensor. Disabled status blocks login.
         member = data_service.disable_member(member_id)
         _audit_event(
             action="User disabled",
@@ -1893,14 +2038,13 @@ def delete_member(member_id):
             entity_type="member",
             entity_id=member_id,
             entity_name=target,
-            details="{} disabled {}".format(verifier_name, target),
+            details="{} disabled {}".format(actor, target),
             target_user=target,
             before=before_member,
             after=member,
-            signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
-            extra={"templateIdFreed": template_id},
-            actor_user=verifier_name,
-            actor_role=verified.get("role"),
+            signature={"mode": "session", "username": actor, "role": actor_role},
+            actor_user=actor,
+            actor_role=actor_role,
         )
         return jsonify({"success": True, "member": member}), 200
     except ValueError as e:
@@ -2077,6 +2221,14 @@ def _password_strength_error(password: str) -> str:
     return ""
 
 
+def _release_esp_pressure_on_login():
+    """Best-effort ESP stop after successful login so trapped vacuum/pressure is released."""
+    try:
+        hardware_service.cmd_stop()
+    except Exception:
+        app.logger.exception("ESP stop after login failed (login still succeeds)")
+
+
 @app.route("/api/data/auth/login", methods=["POST"])
 def login():
     try:
@@ -2106,6 +2258,7 @@ def login():
                     target_user=username,
                     after={"username": user.get("username"), "role": user.get("role")},
                 )
+                _release_esp_pressure_on_login()
                 return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user}), 200
             return jsonify({"error": "Invalid username or password"}), 401
 
@@ -2188,6 +2341,7 @@ def login():
                 after={"username": user.get("username"), "role": user.get("role")},
             )
             safe_user = data_service.sanitize_member_for_client(data_service.get_current_user() or user) or user
+            _release_esp_pressure_on_login()
             return jsonify({"success": True, "user": safe_user}), 200
 
         # Wrong password: increment failedAttempts (may lock at 3)
@@ -2487,6 +2641,7 @@ def login_biometric():
             after={"username": user.get("username"), "role": user.get("role")},
             extra={"templateId": template_id, "confidence": identified.get("confidence")},
         )
+        _release_esp_pressure_on_login()
         return jsonify({"success": True, "user": data_service.sanitize_member_for_client(user) or user, "templateId": template_id, "confidence": identified.get("confidence")}), 200
     except Exception as e:
         app.logger.exception("Error during biometric login")
@@ -3905,10 +4060,12 @@ def print_a4():
                 "Forbidden. You do not have permission to print recipes.",
             )
             if gate:
+                _log_print_auth_failure(gate)
                 return gate
         else:
             gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to print reports.")
             if gate:
+                _log_print_auth_failure(gate)
                 return gate
         print_actor = _audit_actor()
         actor_user = print_actor.get("user") or "--"
@@ -3979,10 +4136,12 @@ def print_thermal():
                 "Forbidden. You do not have permission to print recipes.",
             )
             if gate:
+                _log_print_auth_failure(gate)
                 return gate
         else:
             gate = _require_session_internal("reports-view", "Forbidden. You do not have permission to print reports.")
             if gate:
+                _log_print_auth_failure(gate)
                 return gate
         print_actor = _audit_actor()
         actor_user = print_actor.get("user") or "--"
@@ -4363,6 +4522,21 @@ def hardware_leak_start():
     if gate:
         return gate
     data = request.get_json(force=True, silent=True) or {}
+    factory = data_service.get_factory_settings() or {}
+    try:
+        vacuum_mmhg = float(data.get("vacuumMmHg"))
+    except (TypeError, ValueError):
+        vacuum_mmhg = None
+    if vacuum_mmhg is not None:
+        max_vac = float(factory.get("maxVacuumMmHg") or 650)
+        max_vac = min(650.0, max(1.0, max_vac))
+        if vacuum_mmhg < 1:
+            return jsonify({"ok": False, "error": "Vacuum must be at least 1 mmHg"}), 400
+        if vacuum_mmhg > max_vac:
+            return jsonify({
+                "ok": False,
+                "error": "Vacuum exceeds factory maximum of {} mmHg".format(int(max_vac)),
+            }), 400
     result = hardware_service.cmd_start_test(data)
     return jsonify(result), (200 if result.get("ok") else 400)
 
@@ -4599,13 +4773,53 @@ def biometric_delete():
     try:
         payload = request.get_json(force=True, silent=True) or {}
         template_id = payload.get("templateId")
+        username = str(payload.get("username") or "").strip()
+        member_id = payload.get("memberId")
+        if template_id is None and not username and member_id is None:
+            return jsonify({"ok": False, "error": "templateId, username, or memberId is required"}), 400
+        member = None
+        if member_id is not None:
+            try:
+                member = data_service.get_member(int(member_id))
+            except (TypeError, ValueError):
+                member = None
+        if member is None and username:
+            member = data_service.get_member_by_username(username)
+        if template_id is None and member is not None:
+            template_id = member.get("fingerprintTemplateId")
         if template_id is None:
-            return jsonify({"ok": False, "error": "templateId is required"}), 400
+            # Nothing on sensor; still clear member link if requested
+            if member and member.get("id") is not None:
+                data_service.clear_member_biometric(int(member["id"]))
+            return jsonify({"ok": True, "templateId": None, "cleared": True}), 200
         result = biometric_service.delete_template(template_id)
         if result.get("ok"):
-            _audit_event(action="Biometric template delete", outcome="success", entity_type="biometric_template", entity_id=template_id, entity_name="template {}".format(template_id), details="Template deleted from sensor", extra={"templateId": int(template_id)})
+            if member and member.get("id") is not None:
+                data_service.clear_member_biometric(int(member["id"]))
+            elif username or member_id is not None:
+                # Template deleted; clear any member still pointing at this slot
+                by_tpl = data_service.get_member_by_fingerprint_template(int(template_id))
+                if by_tpl and by_tpl.get("id") is not None:
+                    data_service.clear_member_biometric(int(by_tpl["id"]))
+            _audit_event(
+                action="Biometric template delete",
+                outcome="success",
+                entity_type="biometric_template",
+                entity_id=template_id,
+                entity_name="template {}".format(template_id),
+                details="Template deleted from sensor",
+                extra={"templateId": int(template_id)},
+            )
             return jsonify({"ok": True, "templateId": int(template_id)}), 200
-        _audit_event(action="Biometric template delete", outcome="failed", entity_type="biometric_template", entity_id=template_id, entity_name="template {}".format(template_id), details=result.get("error") or "Delete failed", extra={"templateId": int(template_id)})
+        _audit_event(
+            action="Biometric template delete",
+            outcome="failed",
+            entity_type="biometric_template",
+            entity_id=template_id,
+            entity_name="template {}".format(template_id),
+            details=result.get("error") or "Delete failed",
+            extra={"templateId": int(template_id)},
+        )
         return jsonify(result), 400
     except Exception as e:
         app.logger.exception("Error deleting biometric template")

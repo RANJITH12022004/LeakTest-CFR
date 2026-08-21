@@ -198,6 +198,7 @@
             }
             // Pi owns hold timer and sends #STOP — do not complete on ESP #IDLE.
             if (kind === 'error' || kind === 'adapter_error') {
+                if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
                 if (validationRunIntervalId != null) {
                     clearInterval(validationRunIntervalId);
                     validationRunIntervalId = null;
@@ -260,6 +261,7 @@
 
     function _startVdHoldAfterTarget() {
         if (validationRunHoldStarted || validationRunState !== 'running') return;
+        if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
         validationRunHoldStarted = true;
         validationRunElapsedSec = 0;
         setValRunEl('val-run-elapsed-time', '00:00');
@@ -344,7 +346,11 @@
         opts = opts || {};
         var p = window._vdValidationParams || {};
         var now = new Date().toISOString();
-        var status = opts.aborted ? 'aborted' : (isPass ? 'Pass' : 'Fail');
+        var status;
+        if (opts.aborted) status = 'aborted';
+        else if (isPass === true) status = 'Pass';
+        else if (isPass === false) status = 'Fail';
+        else status = 'completed';
         return {
             validationSubtype: 'distance',
             usp: 'Vacuum',
@@ -377,61 +383,17 @@
         _setValResultVisible(false);
         _resetValidationRunActionButtonToStart();
 
-        var p = window._vdValidationParams;
-        var targetVac = p.vacuumMmHg;
-        var actualVac = validationRunCurrentVacuumMmHg;
-        var actualTimeDisplay = formatMmSs(validationRunElapsedSec);
         var releaseSec = (typeof getReleasePressureLockSec === 'function') ? getReleasePressureLockSec() : 80;
         var lockFn = (typeof showReleasePressureLock === 'function')
             ? showReleasePressureLock
             : function () { return Promise.resolve(); };
 
         lockFn(releaseSec).then(function () {
-            setValRunEl('val-run-status-sub', 'Select Pass or Fail');
-            if (typeof showValidationPassFailModal !== 'function') {
-                validationSessionResults.distance = buildValidationRunSnapshot(true);
-                validationCompletion.distance = true;
-                saveCombinedValidationReport();
-                return;
-            }
-
-            showValidationPassFailModal({
-                setVacuumMmHg: targetVac,
-                actualVacuumMmHg: actualVac,
-                setDurationDisplay: p.durationDisplay,
-                actualDurationSec: validationRunElapsedSec,
-                actualDurationDisplay: actualTimeDisplay
-            }).then(function (choice) {
-                if (choice === 'pass') {
-                    logAuditEvent('Validation marked Pass', 'Operator marked vacuum validation Pass', {
-                        eventType: 'lifecycle',
-                        entityType: 'validation',
-                        extra: {
-                            validationType: 'distance',
-                            status: 'Pass',
-                            setVacuumMmHg: targetVac,
-                            actualVacuumMmHg: actualVac
-                        }
-                    });
-                    validationSessionResults.distance = buildValidationRunSnapshot(true);
-                    validationCompletion.distance = true;
-                    saveCombinedValidationReport();
-                    return;
-                }
-                logAuditEvent('Validation marked Fail', 'Operator marked vacuum validation Fail', {
-                    eventType: 'lifecycle',
-                    entityType: 'validation',
-                    extra: {
-                        validationType: 'distance',
-                        status: 'Fail',
-                        setVacuumMmHg: targetVac,
-                        actualVacuumMmHg: actualVac
-                    }
-                });
-                validationSessionResults.distance = buildValidationRunSnapshot(false);
-                validationCompletion.distance = true;
-                saveCombinedValidationReport();
-            });
+            setValRunEl('val-run-status-sub', 'Saving report');
+            // Pass/Fail is set only on the report approval screen — no modal here.
+            validationSessionResults.distance = buildValidationRunSnapshot(null);
+            validationCompletion.distance = true;
+            saveCombinedValidationReport();
         });
     };
 
@@ -454,6 +416,7 @@
 
         function _performVdAbort() {
             _vdAbortSaveInFlight = true;
+            if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
             if (validationRunIntervalId != null) {
                 clearInterval(validationRunIntervalId);
                 validationRunIntervalId = null;
@@ -575,6 +538,7 @@
             setValRunEl('val-run-status-sub', 'Starting hardware…');
 
             function _vdStartFailed(err) {
+                if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
                 validationRunState = 'idle';
                 applyValidationRunLockUi(false);
                 _closeValidationRunHardwareEs();
@@ -610,6 +574,38 @@
                 _setValRunStatusStyle('running');
                 _setValResultVisible(false);
                 _startVdPressurePoll();
+                if (typeof startPressureBuildWatchdog === 'function') {
+                    startPressureBuildWatchdog({
+                        getSetTarget: function () {
+                            var p = window._vdValidationParams;
+                            return p ? p.vacuumMmHg : null;
+                        },
+                        getLive: function () { return validationRunCurrentVacuumMmHg; },
+                        isActive: function () {
+                            return validationRunState === 'running' && !validationRunHoldStarted;
+                        },
+                        onFail: function () {
+                            if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
+                            if (validationRunIntervalId != null) {
+                                clearInterval(validationRunIntervalId);
+                                validationRunIntervalId = null;
+                            }
+                            validationRunState = 'idle';
+                            validationRunHoldStarted = false;
+                            var stopP = (typeof hardwareLeakStopAwait === 'function')
+                                ? hardwareLeakStopAwait()
+                                : stopValidationOnBackend();
+                            Promise.resolve(stopP).catch(function () {}).then(function () {
+                                _closeValidationRunHardwareEs();
+                                _stopVdPressurePoll();
+                                _resetValidationRunActionButtonToStart();
+                                setValRunEl('val-run-status', 'Error');
+                                setValRunEl('val-run-status-sub', 'Pressure not building');
+                                showAppModal('Check for leaks. Pressure not building', 'Validation');
+                            });
+                        }
+                    });
+                }
                 logAuditEvent('Validation started', 'Vacuum validation run started', {
                     eventType: 'lifecycle',
                     entityType: 'validation',
@@ -760,6 +756,7 @@
 
     function _startCalibrationHoldAfterTarget(run) {
         if (!run || run.phase !== 'evacuating') return;
+        if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
         // Holding starts at TARGET_REACHED; after 1.20 s enable actual-pressure entry.
         run.phase = 'holding';
         _clearVacuumCalTimers();
@@ -918,6 +915,7 @@
     }
 
     function _stopVacuumCalibrationHardware() {
+        if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
         _clearVacuumCalTimers();
         _stopCalPressurePoll();
         _closeVacuumCalEs();
@@ -1178,6 +1176,33 @@
                 _setCalRunEl('cal-run-status', 'Evacuating to ' + settings.targetVacuumMmHg + ' mmHg (START)');
                 _setCalRunEl('cal-live-vacuum', '0.0');
                 _startCalPressurePoll();
+                if (typeof startPressureBuildWatchdog === 'function') {
+                    startPressureBuildWatchdog({
+                        getSetTarget: function () {
+                            var r = window._vacuumCalRun;
+                            return r ? r.targetVacuumMmHg : null;
+                        },
+                        getLive: function () {
+                            var r = window._vacuumCalRun;
+                            return r ? r.liveVacuumMmHg : null;
+                        },
+                        isActive: function () {
+                            var r = window._vacuumCalRun;
+                            return !!(r && r.phase === 'evacuating');
+                        },
+                        onFail: function () {
+                            var startBtnFail = document.getElementById('btn-calibration-start');
+                            var backBtnFail = document.getElementById('btn-calibration-back');
+                            Promise.resolve(_stopVacuumCalibrationHardware()).catch(function () {}).then(function () {
+                                if (window._vacuumCalRun) window._vacuumCalRun.phase = 'idle';
+                                if (startBtnFail) startBtnFail.disabled = false;
+                                if (backBtnFail) backBtnFail.textContent = 'Back';
+                                _setCalRunEl('cal-run-status', 'Pressure not building');
+                                showAppModal('Check for leaks. Pressure not building', 'Calibration');
+                            });
+                        }
+                    });
+                }
                 // Persist in-progress calibration so power loss can synthesize a Fail report.
                 try {
                     var u = window.currentUser || {};
@@ -1212,6 +1237,7 @@
                 } catch (cpErr) { /* ignore */ }
             }
         }).catch(function (err) {
+            if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
             _closeVacuumCalEs();
             if (typeof apiRequest === 'function') {
                 apiRequest(API_BASE + '/api/hardware/calibration/stop', { method: 'POST' }).catch(function () {});

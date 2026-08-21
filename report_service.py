@@ -913,12 +913,6 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         appr_name = "N/A"
         appr_id = "N/A"
 
-    pts = _report_print_timestamp()
-    pdate = _normalize_display_date_slash(
-        (preview.get("reportDerived") or {}).get("printDate") or pts.get("printDate")
-    )
-    ptime = (preview.get("reportDerived") or {}).get("printTime") or pts.get("printTime")
-
     if rtype == "validation":
         val_section = (
             '<h3>VALIDATION DETAILS</h3>'
@@ -930,7 +924,6 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         set_vac = td.get("setVacuumMmHg")
         if set_vac in (None, ""):
             set_vac = recipe.get("vacuumMmHg")
-        result_val = td.get("result") or "--"
 
         vacuum_samples = td.get("vacuumSamples") or []
         samples_html = ""
@@ -1007,7 +1000,6 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
                 '<table class="ident">'
                 '<tr><th>Set Vacuum (mmHg)</th><td colspan="3">{set_vac}</td></tr>'
                 '<tr><th>Total Duration (mm:ss)</th><td>{total}</td><th>Hold Duration (mm:ss)</th><td>{hold}</td></tr>'
-                '<tr><th>Result</th><td colspan="3">{result}</td></tr>'
                 '</table>'
                 '{samples}'
                 '<div class="remarks"><strong>{remarks_heading}:</strong> {remarks}</div>'
@@ -1026,7 +1018,6 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
                 set_vac=_html_esc(set_vac if set_vac not in (None, "") else "--"),
                 total=_html_esc(dur_fields.get("total") or "--"),
                 hold=_html_esc(dur_fields.get("hold") or "--"),
-                result=_html_esc(result_val),
                 samples=samples_html,
                 remarks=_html_esc(remarks),
             )
@@ -1048,17 +1039,12 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         '<tr><th>Approval Result</th><td>{appr}</td><th>Approver Name</th><td>{appr_name}</td></tr>'
         '<tr><th>Approver User ID</th><td>{appr_id}</td><th>Approval Remarks</th><td>{appr_rem}</td></tr>'
         '</table>'
-        '<table class="ident" style="margin-top:12px;">'
-        '<tr><th>Print Date</th><td>{pdate}</td><th>Print Time</th><td>{ptime}</td></tr>'
-        '</table>'
         '</div>'
     ).format(
         title=_html_esc(title),
         company=_html_esc(fs.get("companyName")),
         model=_html_esc(fs.get("modelNo")),
         serial=_html_esc(fs.get("serialNo")),
-        pdate=_html_esc(pdate),
-        ptime=_html_esc(ptime),
         loc=_html_esc(fs.get("companyLocation") or fs.get("location")),
         inst=_html_esc(fs.get("instrumentId")),
         lastv=_html_esc(_normalize_display_date_slash(fs.get("lastValidationDate"))),

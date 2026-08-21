@@ -104,14 +104,14 @@
                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
             </div>
             <div class="form-group">
-                <label for="load-recipe-batch-size-input">Batch Size <span class="required">*</span></label>
-                <input type="number" id="load-recipe-batch-size-input" class="input-field" min="1" max="999"
-                    inputmode="numeric" value="1"
+                <label for="load-recipe-batch-size-input">Batch Size (optional)</label>
+                <input type="number" id="load-recipe-batch-size-input" class="input-field" min="1"
+                    inputmode="numeric" value=""
                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
             </div>
             <div class="form-group">
-                <label for="load-recipe-samples-input">No. of Samples (optional)</label>
-                <input type="number" id="load-recipe-samples-input" class="input-field" min="1"
+                <label for="load-recipe-samples-input">No. of Samples <span class="required">*</span></label>
+                <input type="number" id="load-recipe-samples-input" class="input-field" min="1" max="100"
                     inputmode="numeric" value=""
                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
             </div>
@@ -651,16 +651,9 @@
                                 <div class="qt-zone-label">Test parameters</div>
                                 <div class="qt-param-grid qt-meta-grid">
                                     <div class="qt-param-block qt-meta-block">
-                                        <label class="qt-field-label" for="recipe-no-of-samples">No. of Samples (optional)</label>
-                                        <input type="number" id="recipe-no-of-samples" class="input-field qt-input-samples" min="1"
+                                        <label class="qt-field-label" for="recipe-batch-size">Batch Size (optional)</label>
+                                        <input type="number" id="recipe-batch-size" class="input-field qt-input-samples" min="1"
                                             inputmode="numeric" value=""
-                                            oninput="if(typeof updateCreateRecipeContinueButton==='function') updateCreateRecipeContinueButton();"
-                                            onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                                    </div>
-                                    <div class="qt-param-block qt-meta-block">
-                                        <label class="qt-field-label" for="recipe-batch-size">Batch Size</label>
-                                        <input type="number" id="recipe-batch-size" class="input-field qt-input-samples" min="1" max="999"
-                                            inputmode="numeric" value="1"
                                             oninput="if(typeof updateCreateRecipeContinueButton==='function') updateCreateRecipeContinueButton();"
                                             onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                                     </div>
@@ -727,7 +720,6 @@
                                     <tr>
                                         <th>Product</th>
                                         <th>Type</th>
-                                        <th>Samples</th>
                                         <th>Batch Size</th>
                                         <th>Vacuum</th>
                                         <th>Time</th>
@@ -982,10 +974,6 @@
                                         <th>HOLD DURATION (mm:ss)</th>
                                         <td id="report-hold-duration"></td>
                                     </tr>
-                                    <tr>
-                                        <th>RESULT</th>
-                                        <td id="report-leak-result" colspan="3"></td>
-                                    </tr>
                                 </table>
                                 <div id="report-vacuum-samples-wrap" style="display: none;">
                                     <h3>HOLD VACUUM SAMPLES</h3>
@@ -1022,7 +1010,7 @@
                                     <td id="report-approval-remarks"></td>
                                 </tr>
                             </table>
-                            <table class="report-ident-table report-print-footer-table" style="margin-top: 16px;">
+                            <table class="report-ident-table report-print-footer-table" style="margin-top: 16px; display: none;" aria-hidden="true">
                                 <tr>
                                     <th>Print Date</th>
                                     <td id="report-print-date"></td>
@@ -2152,9 +2140,9 @@
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=3"></script>
     <script src="rbac.js?v=8"></script>
-    <script src="script.js?v=89"></script>
+    <script src="script.js?v=95"></script>
     <script src="leaktest_patch.js?v=2"></script>
-    <script src="validation_vd.js?v=22"></script>
+    <script src="validation_vd.js?v=25"></script>
 </body>
 
 </html>

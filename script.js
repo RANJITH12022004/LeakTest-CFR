@@ -250,7 +250,8 @@ function showAppModal(message, title, onClose) {
     overlay.style.display = 'flex';
 }
 
-function showConfirmModal(message, title) {
+function showConfirmModal(message, title, options) {
+    options = options || {};
     return new Promise(function (resolve) {
         var overlay = document.getElementById('app-modal-overlay');
         var titleEl = document.getElementById('app-modal-title');
@@ -268,7 +269,7 @@ function showConfirmModal(message, title) {
         var cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
         cancelBtn.className = 'btn-role-select btn-confirm-cancel';
-        cancelBtn.textContent = 'Cancel';
+        cancelBtn.textContent = options.cancelLabel || 'Cancel';
         cancelBtn.onclick = function () {
             overlay.style.display = 'none';
             if (appModalResolve) {
@@ -280,7 +281,8 @@ function showConfirmModal(message, title) {
         okBtn.type = 'button';
         okBtn.className = 'btn-role-select btn-confirm-ok';
         var t = String(title || '').trim().toLowerCase();
-        okBtn.textContent = (t === 'test running') ? 'Abort Test' : (t === 'operation in progress') ? 'Abort' : 'OK';
+        okBtn.textContent = options.okLabel
+            || ((t === 'test running') ? 'Abort Test' : (t === 'operation in progress') ? 'Abort' : 'OK');
         okBtn.onclick = function () {
             overlay.style.display = 'none';
             if (appModalResolve) {
@@ -1831,11 +1833,15 @@ function goToPage(pageName) {
         if (isTestRunActive() && pageName !== 'test-run') {
             showConfirmModal('Test is running. Do you want to abort and exit?', 'Operation in progress').then(function (ok) {
                 if (!ok) return;
-                // Abort current test run
-                if (typeof toggleTestRunState === 'function' && testRunButtonState === 'abort') {
-                    toggleTestRunState();
+                if (typeof abortTestRunAndSave === 'function') {
+                    abortTestRunAndSave().then(function (result) {
+                        if (result && result.openedPreview) return;
+                        _suppressTestRunNavGuardOnce = true;
+                        goToPage(pageName);
+                    });
+                    return;
                 }
-                // Re-run navigation after abort (guard will no longer apply)
+                _suppressTestRunNavGuardOnce = true;
                 goToPage(pageName);
             });
             return;
@@ -2050,8 +2056,13 @@ function goBack() {
         if (isTestRunActive && typeof isTestRunActive === 'function' && isTestRunActive()) {
             showConfirmModal('Test is running. Do you want to abort and exit?', 'Operation in progress').then(function (ok) {
                 if (!ok) return;
-                if (typeof toggleTestRunState === 'function' && testRunButtonState === 'abort') {
-                    toggleTestRunState();
+                if (typeof abortTestRunAndSave === 'function') {
+                    abortTestRunAndSave().then(function (result) {
+                        if (result && result.openedPreview) return;
+                        _suppressTestRunNavGuardOnce = true;
+                        goToPage('home');
+                    });
+                    return;
                 }
                 _suppressTestRunNavGuardOnce = true;
                 goToPage('home');
@@ -2394,6 +2405,7 @@ function submitMandatoryPasswordReset() {
             showAppContainer();
             refreshActiveQaCount();
             goToPage('home');
+            showAppModal('Password updated.', 'Reset Password');
             return;
         }
         var msg = (data && data.error) ? String(data.error) : ('Password reset failed (HTTP ' + result.status + ').');
@@ -2997,6 +3009,9 @@ function enrollMemberBiometric() {
     }
     _biometricEnrollUsername = username;
     _biometricEnrollCancelled = false;
+    var returnPage = window._biometricEnrollReturnPage || 'user-profile';
+    var successTitle = window._biometricEnrollSuccessTitle || 'Register Fingerprint';
+    var successMsg = window._biometricEnrollSuccessMessage || 'Fingerprint enrolled successfully.';
 
     showBiometricEnrollUi({
         enrollMode: true,
@@ -3075,12 +3090,72 @@ function enrollMemberBiometric() {
         if (_biometricEnrollCancelled) return;
         hideBiometricProgressOverlay();
         _addMemberLastSavedId = null;
-        showAppModal('Fingerprint enrolled successfully.', 'Register Fingerprint');
-        goToPage('user-profile');
+        window._biometricEnrollReturnPage = null;
+        window._biometricEnrollSuccessTitle = null;
+        window._biometricEnrollSuccessMessage = null;
+        showAppModal(successMsg, successTitle);
+        goToPage(returnPage);
     }).catch(function (err) {
         if (_biometricEnrollCancelled) return;
         hideBiometricProgressOverlay();
         showAppModal('Fingerprint enrollment failed: ' + (err && err.message ? err.message : 'Network error'), 'Register Fingerprint');
+    });
+}
+
+/**
+ * After enable / password change: optional biometric reset (delete old + 2-capture enroll).
+ * Cancel / Keep Current leaves the existing template unchanged.
+ */
+function offerOptionalBiometricReset(opts) {
+    opts = opts || {};
+    if (!biometricEnabledSetting) {
+        if (typeof opts.onSkip === 'function') opts.onSkip();
+        return Promise.resolve(false);
+    }
+    var username = String(opts.username || '').trim();
+    if (!username) {
+        if (typeof opts.onSkip === 'function') opts.onSkip();
+        return Promise.resolve(false);
+    }
+    var memberId = opts.memberId != null ? opts.memberId : null;
+    var returnPage = opts.returnPage || 'manage-members';
+    return showConfirmModal(
+        'Reset biometric fingerprint for ' + username + '? The old template will be deleted from the sensor and you will capture a new one (2 scans). Choose Keep Current to leave the existing fingerprint unchanged.',
+        'Biometric Reset',
+        { okLabel: 'Reset Biometric', cancelLabel: 'Keep Current' }
+    ).then(function (doReset) {
+        if (!doReset) {
+            if (typeof opts.onSkip === 'function') opts.onSkip();
+            return false;
+        }
+        var body = { username: username };
+        if (memberId != null) body.memberId = memberId;
+        return apiRequest(API_BASE + '/api/biometric/delete', {
+            method: 'POST',
+            body: body
+        }).then(function () {
+            window._biometricEnrollReturnPage = returnPage;
+            window._biometricEnrollSuccessTitle = 'Biometric Reset';
+            window._biometricEnrollSuccessMessage = 'Fingerprint re-enrolled successfully.';
+            _populateMemberBiometricSummary({
+                id: memberId,
+                username: username,
+                name: opts.name || username
+            });
+            goToPage('member-biometric');
+            // Auto-start capture after page paint
+            setTimeout(function () {
+                enrollMemberBiometric();
+            }, 200);
+            return true;
+        }).catch(function (err) {
+            showAppModal(
+                'Failed to clear old fingerprint: ' + (err && err.message ? err.message : 'Unknown error'),
+                'Biometric Reset'
+            );
+            if (typeof opts.onSkip === 'function') opts.onSkip();
+            return false;
+        });
     });
 }
 
@@ -4096,10 +4171,8 @@ function onRecipeProductTypeChange() {
 function resetCreateRecipeStep1Form() {
     var nameEl = document.getElementById('recipe-product-name');
     if (nameEl) nameEl.value = '';
-    var samplesEl = document.getElementById('recipe-no-of-samples');
-    if (samplesEl) samplesEl.value = '1';
     var batchSizeEl = document.getElementById('recipe-batch-size');
-    if (batchSizeEl) batchSizeEl.value = '1';
+    if (batchSizeEl) batchSizeEl.value = '';
     var typeRadios = document.querySelectorAll('input[name="recipe-product-type"]');
     typeRadios.forEach(function (el, idx) {
         el.checked = idx === 0;
@@ -4479,7 +4552,22 @@ function enableMember(id) {
             .then(function (res) {
                 if (!res.ok) throw new Error((res.body && res.body.error) ? res.body.error : ('HTTP ' + res.status));
                 loadMembersAndRender();
+                var member = (res.body && res.body.member) ? res.body.member : null;
+                var username = member
+                    ? String(member.username || member.name || '').trim()
+                    : '';
                 showAppModal('Account enabled.', 'Enable');
+                if (biometricEnabledSetting && member && typeof canEditMembers === 'function' && canEditMembers()) {
+                    _addMemberLastSavedId = id;
+                    window._biometricEnrollReturnPage = 'manage-members';
+                    _populateMemberBiometricSummary({
+                        id: id,
+                        username: username,
+                        name: member.name || username,
+                        role: member.role
+                    });
+                    goToPage('member-biometric');
+                }
             })
             .catch(function (err) {
                 showAppModal('Failed to enable: ' + (err && err.message ? err.message : 'Unknown error'), 'Enable');
@@ -4908,6 +4996,37 @@ function _printRequestHeaders() {
     return headers;
 }
 
+/** Shared print POST: maps 401 → session expired login, 403 → server message. */
+function _printFetch(url, body, successMsg, failFallback) {
+    return fetch((API_BASE || '') + url, {
+        method: 'POST',
+        headers: _printRequestHeaders(),
+        body: JSON.stringify(body || {})
+    }).then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (result) {
+            return { status: r.status, ok: r.ok, result: result || {} };
+        });
+    }).then(function (pack) {
+        var result = pack.result || {};
+        if (pack.status === 401) {
+            showAppModal('Your session has expired. Please log in again.', 'Print');
+            if (typeof showLoginScreen === 'function') showLoginScreen();
+            return;
+        }
+        if (pack.status === 403) {
+            showAppModal(result.error || 'You do not have permission to print.', 'Print');
+            return;
+        }
+        if (result.success !== false && !result.error) {
+            showAppModal(successMsg, 'Print');
+        } else {
+            showAppModal(result.error || failFallback, 'Print');
+        }
+    }).catch(function (e) {
+        showAppModal('Print failed: ' + (e && e.message ? e.message : 'Check printer connection.'), 'Print');
+    });
+}
+
 function handlePrintReport() {
     if (!userCanPrintReports()) {
         showAppModal('You do not have permission to print reports.', 'Print');
@@ -4926,19 +5045,7 @@ function handlePrintReport() {
             showAppModal('Could not load report data. Please try again.', 'Print');
             return;
         }
-        fetch((API_BASE || '') + '/api/print/a4', {
-            method: 'POST',
-            headers: _printRequestHeaders(),
-            body: JSON.stringify({ report_data: reportData })
-        }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (result) {
-            if (result.success !== false && !result.error) {
-                showAppModal('Sent to A4 printer.', 'Print');
-            } else {
-                showAppModal(result.error || 'A4 print failed. Check printer connection.', 'Print');
-            }
-        }).catch(function (e) {
-            showAppModal('Print failed: ' + (e && e.message ? e.message : 'Check printer connection.'), 'Print');
-        });
+        _printFetch('/api/print/a4', { report_data: reportData }, 'Sent to A4 printer.', 'A4 print failed. Check printer connection.');
     });
 }
 
@@ -4960,19 +5067,7 @@ function handlePrintThermal() {
             showAppModal('Could not load report data. Please try again.', 'Print');
             return;
         }
-        fetch((API_BASE || '') + '/api/print/thermal', {
-            method: 'POST',
-            headers: _printRequestHeaders(),
-            body: JSON.stringify({ report_data: reportData })
-        }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (result) {
-            if (result.success !== false && !result.error) {
-                showAppModal('Sent to thermal printer.', 'Print');
-            } else {
-                showAppModal(result.error || 'Thermal print failed. Check printer connection.', 'Print');
-            }
-        }).catch(function (e) {
-            showAppModal('Print failed: ' + (e && e.message ? e.message : 'Check printer connection.'), 'Print');
-        });
+        _printFetch('/api/print/thermal', { report_data: reportData }, 'Sent to thermal printer.', 'Thermal print failed. Check printer connection.');
     });
 }
 
@@ -5067,19 +5162,7 @@ function handlePrintRecipeA4() {
         doPrintA4();
     }
     function doPrintA4() {
-        fetch((API_BASE || '') + '/api/print/a4', {
-            method: 'POST',
-            headers: _printRequestHeaders(),
-            body: JSON.stringify(payload)
-        }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (result) {
-            if (result.success !== false && !result.error) {
-                showAppModal('Sent to A4 printer.', 'Print');
-            } else {
-                showAppModal(result.error || 'A4 print failed. Check printer connection.', 'Print');
-            }
-        }).catch(function (e) {
-            showAppModal('Print failed: ' + (e && e.message ? e.message : 'Check printer connection.'), 'Print');
-        });
+        _printFetch('/api/print/a4', payload, 'Sent to A4 printer.', 'A4 print failed. Check printer connection.');
     }
 }
 
@@ -5099,19 +5182,7 @@ function handlePrintRecipeThermal() {
         doPrintThermal();
     }
     function doPrintThermal() {
-        fetch((API_BASE || '') + '/api/print/thermal', {
-            method: 'POST',
-            headers: _printRequestHeaders(),
-            body: JSON.stringify(payload)
-        }).then(function (r) { return r.json().catch(function () { return {}; }); }).then(function (result) {
-            if (result.success !== false && !result.error) {
-                showAppModal('Sent to thermal printer.', 'Print');
-            } else {
-                showAppModal(result.error || 'Thermal print failed. Check printer connection.', 'Print');
-            }
-        }).catch(function (e) {
-            showAppModal('Print failed: ' + (e && e.message ? e.message : 'Check printer connection.'), 'Print');
-        });
+        _printFetch('/api/print/thermal', payload, 'Sent to thermal printer.', 'Thermal print failed. Check printer connection.');
     }
 }
 function scrollReportPreviewActionsIntoView() {
@@ -5138,16 +5209,16 @@ function hideReportPreviewLoadingOverlayAfterRender() {
 function openReportPreview(reportId, options) {
     if (!reportId) {
         _postRunSessionHold = false;
-        return;
+        return Promise.resolve();
     }
     if (!userCanViewReports()) {
         _postRunSessionHold = false;
         denyPermission('view reports');
-        return;
+        return Promise.resolve();
     }
     options = options || {};
     showLoadingOverlay('Report Preview', 'Loading report preview...', { cancellable: false });
-    apiRequest(API_BASE + '/api/reports/' + reportId + '/preview').then(function (data) {
+    return apiRequest(API_BASE + '/api/reports/' + reportId + '/preview').then(function (data) {
         if (data.preview) {
             currentReportId = reportId;
             currentReportData = null;
@@ -5169,11 +5240,18 @@ function openReportPreview(reportId, options) {
                     scrollReportPreviewActionsIntoView();
                 }
             }, 250);
-        } else {
-            showAppModal('Report preview is not available.', 'Reports');
+            return data.preview;
         }
-    }).catch(function () {
-        showAppModal('Could not open report preview. Check your connection and try again from Reports.', 'Reports');
+        showAppModal('Report preview is not available.', 'Reports');
+        return null;
+    }).catch(function (err) {
+        var detail = (err && err.message) ? String(err.message) : '';
+        showAppModal(
+            'Could not open report preview. Check your connection and try again from Reports.'
+                + (detail ? ('\n\n' + detail) : ''),
+            'Reports'
+        );
+        return null;
     }).finally(function () {
         _postRunSessionHold = false;
         hideReportPreviewLoadingOverlayAfterRender();
@@ -5423,6 +5501,17 @@ function _reportDurationFieldsFromPreview(td, recipe, fs) {
     if ((total == null || isNaN(parseInt(total, 10))) && !isNaN(holdN) && !isNaN(releaseN)) {
         total = holdN + releaseN;
     }
+    // Aborted / power-cut: show actual elapsed, not full set hold/total
+    var statusLow = String(td.status || '').trim().toLowerCase();
+    var remarksLow = String(td.remarks || '').trim().toLowerCase();
+    var isAborted = statusLow === 'aborted' || remarksLow.indexOf('power interruption') >= 0;
+    if (isAborted) {
+        var actual = td.actualDurationSec != null ? td.actualDurationSec : td.durationSeconds;
+        if (actual != null && !isNaN(parseInt(actual, 10))) {
+            hold = actual;
+            total = actual;
+        }
+    }
     function fmt(v) {
         if (v == null || v === '' || isNaN(parseInt(v, 10))) return '--';
         return (typeof formatMmSs === 'function') ? formatMmSs(parseInt(v, 10)) : String(v);
@@ -5445,13 +5534,18 @@ function _approverFieldsFromPreview(preview, td) {
 function reportStatusDisplayLabel(preview, td) {
     preview = preview || {};
     td = td || preview.testData || {};
+    var approvalSt = String(preview.reportApprovalStatus || '').trim().toLowerCase();
+    var remarks = String(td.remarks || preview.remarks || '').trim().toLowerCase();
     var raw = String(td.status != null && td.status !== '' ? td.status : (preview.status || '')).trim();
     var low = raw.toLowerCase();
     var rtype = String(preview.type || 'test').trim().toLowerCase();
-    if (low === 'aborted') return 'Aborted';
+    if (low === 'aborted' || approvalSt === 'aborted' || remarks.indexOf('abort') >= 0) {
+        return 'Aborted';
+    }
     if (rtype === 'validation') {
         if (low === 'pass') return 'Pass';
         if (low === 'fail') return 'Fail';
+        if (low === 'completed') return 'Completed';
         return raw || '--';
     }
     if (rtype === 'calibration') {
@@ -5510,7 +5604,7 @@ function buildClientThermalPreviewText(preview) {
         'TEST RESULT',
         dash,
         padPair('Set Vacuum (mmHg)', setVac != null && setVac !== '' ? setVac : '--', 'Total Duration (mm:ss)', durs.total),
-        padPair('Hold Duration (mm:ss)', durs.hold, 'Result', td.result || '--')
+        padPair('Hold Duration (mm:ss)', durs.hold, '', '')
     ];
     var samples = Array.isArray(td.vacuumSamples) ? td.vacuumSamples : [];
     if (samples.length) {
@@ -5532,9 +5626,7 @@ function buildClientThermalPreviewText(preview) {
         padPair('Operated by', preview.operatorName || td.operatorName || '--', 'Employee ID', preview.employeeId || td.employeeId || '--'),
         padPair('Approval Result', preview.approvalPassFail || '--', 'Approver Name', appr.name),
         padPair('Approver User ID', appr.id, 'Approval Remarks', (preview.approvalRemarks != null && String(preview.approvalRemarks).trim() !== '')
-            ? preview.approvalRemarks : 'N/A'),
-        '',
-        padPair('Print Date', derived.printDate || '--', 'Print Time', derived.printTime || '--')
+            ? preview.approvalRemarks : 'N/A')
     );
     return lines.join('\n');
 }
@@ -5620,8 +5712,8 @@ function _populateLegacyReportPreview(preview) {
     if (!derived || typeof derived !== 'object') {
         derived = buildTestReportDerived(td, recipe, preview.id != null ? preview.id : currentReportId);
     }
-    setReportEl('report-print-date', derived.printDate || '--');
-    setReportEl('report-print-time', derived.printTime || '--');
+    setReportEl('report-print-date', '');
+    setReportEl('report-print-time', '');
     setReportEl('report-test-number', derived.testNumber || '--');
     setReportEl('report-test-operator', preview.operatorName || td.operatorName || '--');
     setReportEl('report-product-name', recipe.productName || td.productName);
@@ -5661,7 +5753,6 @@ function _populateLegacyReportPreview(preview) {
         setReportEl('report-set-vacuum', setVac != null ? String(setVac) : '');
         setReportEl('report-total-duration', durs.total || '');
         setReportEl('report-hold-duration', durs.hold || '');
-        setReportEl('report-leak-result', td.result || '');
 
         var arDisp = (typeof resolveAnalysisReportNo === 'function')
             ? resolveAnalysisReportNo(recipe, td)
@@ -6152,6 +6243,87 @@ function _startTestRunPressurePoll() {
 function hardwareLeakStopSilently() {
     return apiRequest(API_BASE + '/api/hardware/leak/stop', { method: 'POST' }).catch(function () {});
 }
+
+/** Await leak/stop so ESP motor actually stops before UI continues; never rejects. */
+function hardwareLeakStopAwait() {
+    return apiRequest(API_BASE + '/api/hardware/leak/stop', { method: 'POST' })
+        .then(function (res) {
+            if (res && res.ok === false) {
+                console.error('leak/stop failed', res.error || res);
+            }
+            return res;
+        })
+        .catch(function (err) {
+            console.error('leak/stop error', err);
+            return null;
+        });
+}
+window.hardwareLeakStopAwait = hardwareLeakStopAwait;
+
+/** Pressure-build leak guard (test / validation / calibration). Absolute mmHg scale rising toward set. */
+var PRESSURE_BUILD_WATCH_MS = 60000;
+var PRESSURE_BUILD_DEEP_SETPOINT = 100;
+var PRESSURE_BUILD_DEEP_MILESTONE = 95;
+
+function pressureBuildMilestoneReached(setTarget, liveMmHg) {
+    var setN = parseFloat(setTarget);
+    var liveN = parseFloat(liveMmHg);
+    if (isNaN(setN) || isNaN(liveN)) return false;
+    if (setN > PRESSURE_BUILD_DEEP_SETPOINT) return liveN >= PRESSURE_BUILD_DEEP_MILESTONE;
+    return liveN >= setN;
+}
+
+function clearPressureBuildWatchdog() {
+    if (window._pressureBuildWatchdogPollId != null) {
+        clearInterval(window._pressureBuildWatchdogPollId);
+        window._pressureBuildWatchdogPollId = null;
+    }
+    window._pressureBuildWatchdogOpts = null;
+    window._pressureBuildWatchdogStartedAt = null;
+}
+
+/**
+ * After START: within 60s, live must reach milestone.
+ * set > 100 → live >= 95; set <= 100 → live >= set.
+ * Clears automatically when hold starts / inactive / milestone reached.
+ */
+function startPressureBuildWatchdog(opts) {
+    clearPressureBuildWatchdog();
+    opts = opts || {};
+    if (opts.getSetTarget == null || opts.getLive == null || typeof opts.onFail !== 'function') return;
+    window._pressureBuildWatchdogOpts = opts;
+    window._pressureBuildWatchdogStartedAt = Date.now();
+    window._pressureBuildWatchdogPollId = setInterval(function () {
+        var o = window._pressureBuildWatchdogOpts;
+        if (!o) {
+            clearPressureBuildWatchdog();
+            return;
+        }
+        if (typeof o.isActive === 'function' && !o.isActive()) {
+            clearPressureBuildWatchdog();
+            return;
+        }
+        var setT = o.getSetTarget();
+        var live = o.getLive();
+        if (pressureBuildMilestoneReached(setT, live)) {
+            clearPressureBuildWatchdog();
+            return;
+        }
+        var started = window._pressureBuildWatchdogStartedAt || 0;
+        if (Date.now() - started < PRESSURE_BUILD_WATCH_MS) return;
+        clearPressureBuildWatchdog();
+        if (typeof o.isActive === 'function' && !o.isActive()) return;
+        if (pressureBuildMilestoneReached(o.getSetTarget(), o.getLive())) return;
+        try {
+            o.onFail();
+        } catch (e) {
+            console.error('pressure build watchdog onFail', e);
+        }
+    }, 1000);
+}
+window.clearPressureBuildWatchdog = clearPressureBuildWatchdog;
+window.startPressureBuildWatchdog = startPressureBuildWatchdog;
+window.pressureBuildMilestoneReached = pressureBuildMilestoneReached;
 
 function recipeExpectedAdapterKind(recipe) {
     if (!recipe) return null;
@@ -7134,6 +7306,7 @@ function _parseTestRunSseLine(data) {
 
 function _startTestRunHoldAfterTarget() {
     if (testRunHoldStarted || testRunButtonState !== 'abort') return;
+    if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
     testRunHoldStarted = true;
     testRunElapsedSec = 0;
     testRunVacuumSamples = [];
@@ -7248,6 +7421,10 @@ function _testRunTimerTick() {
     testRunElapsedSec++;
     setRunCard('run-elapsed-time', formatMmSs(testRunElapsedSec));
     _maybeRecordHoldVacuumSample();
+    // Refresh checkpoint every 5s so power-cut recovery has accurate elapsed time
+    if (testRunElapsedSec > 0 && (testRunElapsedSec % 5) === 0) {
+        syncTestRunCheckpoint();
+    }
     if (testRunSetDurationSec != null && testRunElapsedSec >= testRunSetDurationSec) {
         _finishTestRunVacuumHold();
     }
@@ -7260,6 +7437,7 @@ function _computeTestRunResult() {
 }
 
 function _abortTestRunVacuumHoldWithError(msg) {
+    if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
     if (testRunIntervalId != null) {
         clearInterval(testRunIntervalId);
         testRunIntervalId = null;
@@ -7274,8 +7452,30 @@ function _abortTestRunVacuumHoldWithError(msg) {
     showAppModal('Hardware error during test: ' + msg, 'Test Run');
 }
 
+function _abortTestRunPressureNotBuilding() {
+    if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
+    if (testRunIntervalId != null) {
+        clearInterval(testRunIntervalId);
+        testRunIntervalId = null;
+    }
+    testRunButtonState = 'start';
+    testRunHoldStarted = false;
+    var stopP = (typeof hardwareLeakStopAwait === 'function')
+        ? hardwareLeakStopAwait()
+        : hardwareLeakStopSilently();
+    return Promise.resolve(stopP).then(function () {
+        _closeTestRunHardwareEs();
+        if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
+        setRunCard('run-status-text', 'Error');
+        setRunCard('run-status-subtext', 'Pressure not building');
+        _resetTestRunButtonToStart();
+        showAppModal('Check for leaks. Pressure not building', 'Test Run');
+    });
+}
+
 function _finishTestRunVacuumHold() {
     if (testRunButtonState !== 'abort') return;
+    if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
     if (testRunIntervalId != null) {
         clearInterval(testRunIntervalId);
         testRunIntervalId = null;
@@ -7728,6 +7928,8 @@ function syncTestRunCheckpoint() {
     var body = buildTestRunCheckpointPayload();
     if (!body) return Promise.resolve();
     body.type = 'test';
+    body._checkpointPhase = 'running';
+    body._checkpointAt = new Date().toISOString();
     return apiRequest(API_BASE + '/api/data/test-run/checkpoint', { method: 'PUT', body: body }).catch(function () {});
 }
 
@@ -7887,6 +8089,7 @@ function confirmTestRunAbortRemarks() {
 function abortTestRunAndSave() {
     if (_abortSaveInFlight) return Promise.resolve();
 
+    if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
     if (testRunIntervalId != null) {
         clearInterval(testRunIntervalId);
         testRunIntervalId = null;
@@ -7894,14 +8097,31 @@ function abortTestRunAndSave() {
     testRunHoldStarted = false;
     stopTestRunAdapterPoll();
     testRunStepTapsBase = 0;
-    hardwareLeakStopSilently();
+    var stopP = (typeof hardwareLeakStopAwait === 'function')
+        ? hardwareLeakStopAwait()
+        : hardwareLeakStopSilently();
     _closeTestRunHardwareEs();
     closeTestRunStepCompleteModal();
     cancelTestRunVolume();
 
-    return openTestRunAbortRemarksModal().then(function (remarks) {
+    return Promise.resolve(stopP).then(function () {
+        return openTestRunAbortRemarksModal();
+    }).then(function (remarks) {
         if (!remarks || !String(remarks).trim()) return Promise.resolve();
-        return _abortTestRunAndSaveWithRemarks(String(remarks).trim());
+        _postRunSessionHold = true;
+        markAutoLogoutActivity();
+        setRunCard('run-status-text', 'Aborted');
+        setRunCard('run-status-subtext', 'Releasing pressure');
+        var releaseSec = (typeof getReleasePressureLockSec === 'function')
+            ? getReleasePressureLockSec()
+            : 80;
+        var lockFn = (typeof showReleasePressureLock === 'function')
+            ? showReleasePressureLock
+            : function () { return Promise.resolve(); };
+        return lockFn(releaseSec).then(function () {
+            setRunCard('run-status-subtext', 'Saving report');
+            return _abortTestRunAndSaveWithRemarks(String(remarks).trim());
+        });
     });
 }
 
@@ -7925,6 +8145,7 @@ function _abortTestRunAndSaveWithRemarks(remarks) {
     var payload = buildTestRunReportPayload();
     if (!payload) {
         _abortSaveInFlight = false;
+        _postRunSessionHold = false;
         goToPage('reports');
         return Promise.resolve();
     }
@@ -7932,6 +8153,7 @@ function _abortTestRunAndSaveWithRemarks(remarks) {
     // Override status + completed steps to reflect actual recorded steps
     var completedSteps = (testRunStepResults && testRunStepResults.length) ? testRunStepResults.length : 0;
     payload.testData = payload.testData || {};
+    payload.status = 'aborted';
     payload.testData.status = 'aborted';
     payload.testData.completedSteps = completedSteps;
     payload.testData.stepCount = completedSteps;
@@ -7939,6 +8161,12 @@ function _abortTestRunAndSaveWithRemarks(remarks) {
     payload.remarks = remarks;
     payload.completedAt = new Date().toISOString();
     payload.testData.completedAt = payload.completedAt;
+    // Display Hold/Total as actual elapsed for aborted mid-run stops
+    if (payload.testData.actualDurationSec != null) {
+        payload.testData.holdDurationSec = payload.testData.actualDurationSec;
+        payload.testData.totalDurationSec = payload.testData.actualDurationSec;
+        payload.testData.durationSeconds = payload.testData.actualDurationSec;
+    }
     stampOperatorOnTestReportPayload(payload);
 
     return apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: payload })
@@ -7949,17 +8177,26 @@ function _abortTestRunAndSaveWithRemarks(remarks) {
             var reportId = (result && result.id) ? result.id : null;
             if (reportId) {
                 _saveReportPdfSilent(reportId);
-                openReportPreview(reportId);
-            } else {
-                goToPage('reports');
-                if (typeof loadReports === 'function') loadReports();
+                return openReportPreview(reportId).then(function (preview) {
+                    return { openedPreview: !!preview, reportId: reportId };
+                });
             }
+            _postRunSessionHold = false;
+            goToPage('reports');
+            if (typeof loadReports === 'function') loadReports();
+            return { openedPreview: false };
         })
         .catch(function (err) {
             _abortSaveInFlight = false;
+            _postRunSessionHold = false;
             console.error('Abort save report failed', err);
-            showAppModal('Failed to save aborted report.', 'Report');
+            showAppModal(
+                'Failed to save aborted report.'
+                    + ((err && err.message) ? ('\n\n' + err.message) : ''),
+                'Report'
+            );
             goToPage('reports');
+            return { openedPreview: false };
         });
 }
 
@@ -8101,9 +8338,13 @@ function toggleTestRunState() {
         var resultCard = document.getElementById('test-run-result-card');
         if (resultCard) resultCard.hidden = true;
 
-        apiRequest(API_BASE + '/api/hardware/validation/vacuum/start', {
+        apiRequest(API_BASE + '/api/hardware/leak/start', {
             method: 'POST',
-            body: { vacuumMmHg: testRunSetVacuumMmHg, durationSec: testRunSetDurationSec }
+            body: {
+                vacuumMmHg: testRunSetVacuumMmHg,
+                durationSec: testRunSetDurationSec,
+                cycles: [{ holdSeconds: testRunSetDurationSec }]
+            }
         }).then(function () {
             testRunButtonState = 'abort';
             if (btn) {
@@ -8114,6 +8355,18 @@ function toggleTestRunState() {
             if (statusText) statusText.textContent = 'Evacuating';
             if (statusSubtext) statusSubtext.textContent = 'Waiting for set vacuum';
             _openTestRunHardwareStream();
+            if (typeof startPressureBuildWatchdog === 'function') {
+                startPressureBuildWatchdog({
+                    getSetTarget: function () { return testRunSetVacuumMmHg; },
+                    getLive: function () { return testRunCurrentVacuumMmHg; },
+                    isActive: function () {
+                        return testRunButtonState === 'abort' && !testRunHoldStarted;
+                    },
+                    onFail: function () {
+                        _abortTestRunPressureNotBuilding();
+                    }
+                });
+            }
             if (testRunIntervalId != null) {
                 clearInterval(testRunIntervalId);
                 testRunIntervalId = null;
@@ -8121,6 +8374,7 @@ function toggleTestRunState() {
             // Persist in-progress run immediately so power loss can synthesize a Fail report.
             syncTestRunCheckpoint();
         }).catch(function (err) {
+            if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
             if (btn) btn.disabled = false;
             _resetTestRunButtonToStart();
             showAppModal('Test run failed to start: ' + (err && err.message ? err.message : 'Error'), 'Test Run');
@@ -8128,7 +8382,7 @@ function toggleTestRunState() {
     } else {
         showConfirmModal('Test is running. Do you want to stop and save the report?', 'Operation in progress').then(function (ok) {
             if (!ok) return;
-            _finishTestRunVacuumHold();
+            abortTestRunAndSave();
         });
     }
 }
@@ -8261,17 +8515,11 @@ function loadRecipeForEdit() {
         if (!r) return;
         var nameEl = document.getElementById('recipe-product-name');
         if (nameEl) nameEl.value = r.productName || r.name || '';
-        var samplesEl = document.getElementById('recipe-no-of-samples');
-        if (samplesEl) {
-            samplesEl.value = (r.noOfSamples != null && !isNaN(parseInt(r.noOfSamples, 10)))
-                ? String(parseInt(r.noOfSamples, 10))
-                : '1';
-        }
         var batchSizeEl = document.getElementById('recipe-batch-size');
         if (batchSizeEl) {
             batchSizeEl.value = (r.batchSize != null && !isNaN(parseInt(r.batchSize, 10)))
                 ? String(parseInt(r.batchSize, 10))
-                : '1';
+                : '';
         }
         var productType = String(r.productType || 'Blister').trim();
         var typeRadios = document.querySelectorAll('input[name="recipe-product-type"]');
@@ -8377,13 +8625,13 @@ function openBatchNumberModal() {
     var arEl = document.getElementById('load-recipe-analysis-no');
     var errEl = document.getElementById('load-recipe-batch-error');
     if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
-    // Samples optional — leave blank; do not prefill recipe default.
+    // Samples mandatory — leave blank so operator must enter 1–100.
     if (samplesEl) samplesEl.value = '';
     if (arEl) arEl.value = '';
     if (batchSizeEl) {
         var pref = pendingRecipeToLoad && pendingRecipeToLoad.batchSize != null
             ? parseInt(pendingRecipeToLoad.batchSize, 10) : NaN;
-        batchSizeEl.value = (!isNaN(pref) && pref >= 1 && pref <= 999) ? String(pref) : '1';
+        batchSizeEl.value = (!isNaN(pref) && pref >= 1) ? String(pref) : '';
     }
     if (overlay) overlay.style.display = 'flex';
     if (input) {
@@ -8398,9 +8646,9 @@ function closeBatchNumberModal() {
     var input = document.getElementById('load-recipe-batch-input');
     if (input) input.value = '';
     var batchSizeEl = document.getElementById('load-recipe-batch-size-input');
-    if (batchSizeEl) batchSizeEl.value = '1';
+    if (batchSizeEl) batchSizeEl.value = '';
     var samplesEl = document.getElementById('load-recipe-samples-input');
-    if (samplesEl) samplesEl.value = '0';
+    if (samplesEl) samplesEl.value = '';
     var arEl = document.getElementById('load-recipe-analysis-no');
     if (arEl) arEl.value = '';
     var errEl = document.getElementById('load-recipe-batch-error');
@@ -8436,17 +8684,17 @@ function confirmBatchNumberAndLoad() {
         if (input) input.focus();
         return;
     }
-    var batchSize = parseInt(batchSizeEl && batchSizeEl.value ? batchSizeEl.value : '', 10);
-    if (isNaN(batchSize) || batchSize < 1 || batchSize > 999) {
-        setBatchErr('Enter batch size (1–999).');
-        if (batchSizeEl) batchSizeEl.focus();
+    var samples = parseInt(samplesEl && samplesEl.value ? samplesEl.value : '', 10);
+    if (isNaN(samples) || samples < 1 || samples > 100) {
+        setBatchErr('Enter number of samples (1–100).');
+        if (samplesEl) samplesEl.focus();
         return;
     }
-    var samplesRaw = samplesEl ? String(samplesEl.value || '').trim() : '';
-    var samples = samplesRaw === '' ? null : parseInt(samplesRaw, 10);
-    if (samplesRaw !== '' && (isNaN(samples) || samples < 1)) {
-        setBatchErr('No. of samples must be a whole number of 1 or more, or leave blank.');
-        if (samplesEl) samplesEl.focus();
+    var batchSizeRaw = batchSizeEl ? String(batchSizeEl.value || '').trim() : '';
+    var batchSize = batchSizeRaw === '' ? null : parseInt(batchSizeRaw, 10);
+    if (batchSizeRaw !== '' && (isNaN(batchSize) || batchSize < 1)) {
+        setBatchErr('Batch size must be a whole number of 1 or more, or leave blank.');
+        if (batchSizeEl) batchSizeEl.focus();
         return;
     }
     // Analysis Report No. / PR is optional
@@ -8467,15 +8715,14 @@ function confirmBatchNumberAndLoad() {
     var overlay = document.getElementById('batch-number-modal');
     if (overlay) overlay.style.display = 'none';
     if (input) input.value = '';
-    if (batchSizeEl) batchSizeEl.value = '1';
+    if (batchSizeEl) batchSizeEl.value = '';
     if (arEl) arEl.value = '';
-    if (samplesEl) samplesEl.value = '0';
+    if (samplesEl) samplesEl.value = '';
     startTestRun(recipe);
 }
 
 function updateCreateRecipeContinueButton() {
     var nameEl = document.getElementById('recipe-product-name');
-    var samplesEl = document.getElementById('recipe-no-of-samples');
     var batchSizeEl = document.getElementById('recipe-batch-size');
     var vacEl = document.getElementById('recipe-vacuum-mmhg');
     var timeEl = document.getElementById('recipe-duration');
@@ -8485,17 +8732,15 @@ function updateCreateRecipeContinueButton() {
     var productType = (typeof getResolvedRecipeProductType === 'function')
         ? getResolvedRecipeProductType()
         : '';
-    var samples = parseInt(samplesEl && samplesEl.value ? samplesEl.value : '', 10);
     var batchSize = parseInt(batchSizeEl && batchSizeEl.value ? batchSizeEl.value : '', 10);
     var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
     var vacuum = parseFloat(vacEl && vacEl.value ? vacEl.value : '');
     var durationSec = (typeof parseMmSs === 'function') ? parseMmSs(timeEl && timeEl.value ? timeEl.value : '') : null;
 
     var vacuumOk = !isNaN(vacuum) && vacuum >= 1 && vacuum <= maxVac;
-    var samplesRaw = samplesEl ? String(samplesEl.value || '').trim() : '';
-    var samplesOk = samplesRaw === '' || (!isNaN(samples) && samples >= 1);
-    var batchSizeOk = !isNaN(batchSize) && batchSize >= 1 && batchSize <= 999;
-    var canContinue = !!(recipeName && productType && samplesOk && batchSizeOk && vacuumOk && durationSec);
+    var batchSizeRaw = batchSizeEl ? String(batchSizeEl.value || '').trim() : '';
+    var batchSizeOk = batchSizeRaw === '' || (!isNaN(batchSize) && batchSize >= 1);
+    var canContinue = !!(recipeName && productType && batchSizeOk && vacuumOk && durationSec);
     if (btn) {
         btn.disabled = !canContinue;
     }
@@ -8631,7 +8876,6 @@ function loadManageRecipes() {
                     headRow.innerHTML =
                         '<th>Product</th>' +
                         '<th>Type</th>' +
-                        '<th>Samples</th>' +
                         '<th>Batch Size</th>' +
                         '<th>Vacuum</th>' +
                         '<th>Time</th>' +
@@ -8640,7 +8884,6 @@ function loadManageRecipes() {
                     headRow.innerHTML =
                         '<th>Product</th>' +
                         '<th>Type</th>' +
-                        '<th>Samples</th>' +
                         '<th>Batch Size</th>' +
                         '<th>Vacuum</th>' +
                         '<th>Time</th>' +
@@ -8671,9 +8914,6 @@ function loadManageRecipes() {
             var tr = document.createElement('tr');
             var name = r.productName || r.name || '--';
             var pType = r.productType || '--';
-            var samples = (r.noOfSamples != null && !isNaN(parseInt(r.noOfSamples, 10)))
-                ? String(parseInt(r.noOfSamples, 10))
-                : '--';
             var batchSize = (r.batchSize != null && !isNaN(parseInt(r.batchSize, 10)))
                 ? String(parseInt(r.batchSize, 10))
                 : '--';
@@ -8688,7 +8928,6 @@ function loadManageRecipes() {
                 tr.innerHTML =
                     '<td>' + name + '</td>' +
                     '<td>' + pType + '</td>' +
-                    '<td>' + samples + '</td>' +
                     '<td>' + batchSize + '</td>' +
                     '<td>' + vacStr + '</td>' +
                     '<td>' + timeStr + '</td>' +
@@ -8702,7 +8941,6 @@ function loadManageRecipes() {
                 tr.innerHTML =
                     '<td>' + name + '</td>' +
                     '<td>' + pType + '</td>' +
-                    '<td>' + samples + '</td>' +
                     '<td>' + batchSize + '</td>' +
                     '<td>' + vacStr + '</td>' +
                     '<td>' + timeStr + '</td>' +
@@ -8762,7 +9000,6 @@ function completeRecipeFromStep2() {
 
     // Read from the simplified recipe form
     var nameEl = document.getElementById('recipe-product-name');
-    var samplesEl = document.getElementById('recipe-no-of-samples');
     var batchSizeEl = document.getElementById('recipe-batch-size');
     var vacEl = document.getElementById('recipe-vacuum-mmhg');
     var timeEl = document.getElementById('recipe-duration');
@@ -8773,9 +9010,8 @@ function completeRecipeFromStep2() {
     var productType = (typeof getResolvedRecipeProductType === 'function')
         ? getResolvedRecipeProductType()
         : '';
-    var samplesRaw = samplesEl ? String(samplesEl.value || '').trim() : '';
-    var noOfSamples = samplesRaw === '' ? null : parseInt(samplesRaw, 10);
-    var batchSize = parseInt(batchSizeEl && batchSizeEl.value ? batchSizeEl.value : '', 10);
+    var batchSizeRaw = batchSizeEl ? String(batchSizeEl.value || '').trim() : '';
+    var batchSize = batchSizeRaw === '' ? null : parseInt(batchSizeRaw, 10);
     var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
     var vacuumMmHg = parseFloat(vacEl && vacEl.value ? vacEl.value : '');
     var durationSec = (typeof parseMmSs === 'function') ? parseMmSs(timeEl && timeEl.value ? timeEl.value : '') : null;
@@ -8805,12 +9041,8 @@ function completeRecipeFromStep2() {
         setRecipeInputError('Select a product type.');
         return;
     }
-    if (samplesRaw !== '' && (isNaN(noOfSamples) || noOfSamples < 1)) {
-        setRecipeInputError('No. of samples must be a whole number of 1 or more, or leave blank.');
-        return;
-    }
-    if (isNaN(batchSize) || batchSize < 1 || batchSize > 999) {
-        setRecipeInputError('Enter a valid batch size (1–999).');
+    if (batchSizeRaw !== '' && (isNaN(batchSize) || batchSize < 1)) {
+        setRecipeInputError('Batch size must be a whole number of 1 or more, or leave blank.');
         return;
     }
     if (isNaN(vacuumMmHg) || vacuumMmHg < 1) {
@@ -8831,7 +9063,6 @@ function completeRecipeFromStep2() {
         productName: productName,
         name: productName,
         productType: productType,
-        noOfSamples: noOfSamples,
         batchSize: batchSize,
         vacuumMmHg: vacuumMmHg,
         durationSec: durationSec,
@@ -9033,13 +9264,21 @@ function buildCombinedValidationReportPayload() {
     if (!runs.length) return null;
     var overallPass = true;
     var hasAborted = false;
+    var hasPassFail = false;
     for (var i = 0; i < runs.length; i++) {
         var st = String(runs[i].status || '').toLowerCase();
         if (st === 'aborted') hasAborted = true;
-        else if (st !== 'pass') overallPass = false;
+        else if (st === 'pass') hasPassFail = true;
+        else if (st === 'fail') {
+            hasPassFail = true;
+            overallPass = false;
+        }
     }
-    var overallStatus = hasAborted ? 'aborted' : (overallPass ? 'Pass' : 'Fail');
-    var overallName = hasAborted ? 'Aborted' : overallStatus;
+    // Without operator Pass/Fail (approval decides later), keep status completed
+    var overallStatus = hasAborted
+        ? 'aborted'
+        : (hasPassFail ? (overallPass ? 'Pass' : 'Fail') : 'completed');
+    var overallName = hasAborted ? 'Aborted' : (hasPassFail ? overallStatus : 'Pending Approval');
     var user = window.currentUser || {};
     var now = new Date().toISOString();
     var first = runs[0] || {};
@@ -9596,14 +9835,35 @@ function saveEditedMember() {
             return apiRequest(API_BASE + '/api/data/members/' + memberId, {
                 method: 'PUT',
                 body: member
+            }).then(function () {
+                return {
+                    username: username,
+                    name: fullName,
+                    memberId: memberId,
+                    role: role,
+                    isSelf: isSelf
+                };
             });
         })
-        .then(function () {
+        .then(function (info) {
             editingMemberId = null;
             _clearAddMemberForm();
             loadMembersAndRender();
+            var canManage = typeof canEditMembers === 'function' && canEditMembers();
+            if (info && biometricEnabledSetting && canManage && !info.isSelf) {
+                _addMemberLastSavedId = info.memberId;
+                window._biometricEnrollReturnPage = 'manage-members';
+                _populateMemberBiometricSummary({
+                    id: info.memberId,
+                    username: info.username,
+                    name: info.name,
+                    role: info.role
+                });
+                goToPage('member-biometric');
+                return;
+            }
             showAppModal('Profile updated successfully.', modalTitle);
-            goToPage('manage-members');
+            goToPage(info && info.isSelf ? 'user-profile' : 'manage-members');
         })
         .catch(function (err) {
             if (err && err.message === 'permissions') return;
@@ -9763,18 +10023,11 @@ function disableMember(id) {
     }
     showConfirmModal('Are you sure you want to disable this member?', 'Disable Member').then(function (ok) {
         if (!ok) return;
-        return openApprovalVerifyModal(_approvalVerifyModalOptionsForUserAdmin()).then(function (token) {
-            if (!token) {
-                showAppModal('Member not disabled. Admin verification is required.', 'Disable Member');
-                return;
-            }
-            return apiRequest(API_BASE + '/api/data/members/' + id, {
-                method: 'DELETE',
-                headers: { 'X-Approval-Verify-Token': token }
-            }).then(function () {
-                loadMembersAndRender();
-                showAppModal('Member disabled.', 'Members');
-            });
+        return apiRequest(API_BASE + '/api/data/members/' + id, {
+            method: 'DELETE'
+        }).then(function () {
+            loadMembersAndRender();
+            showAppModal('Member disabled.', 'Members');
         });
     }).catch(function (err) {
         console.error('Failed to disable member', err);
@@ -9915,13 +10168,17 @@ function _populateMemberBiometricSummary(member) {
 }
 
 function skipMemberBiometricEnrollment() {
+    var returnPage = window._biometricEnrollReturnPage || 'user-profile';
     _addMemberLastSavedId = null;
-    goToPage('user-profile');
+    window._biometricEnrollReturnPage = null;
+    goToPage(returnPage);
 }
 
 function backToMemberAfterBiometric() {
+    var returnPage = window._biometricEnrollReturnPage || 'user-profile';
     _addMemberLastSavedId = null;
-    goToPage('user-profile');
+    window._biometricEnrollReturnPage = null;
+    goToPage(returnPage);
 }
 
 function initializeDatetime() {
@@ -10520,10 +10777,14 @@ document.addEventListener('DOMContentLoaded', function () {
     if (recipeNameEl) {
         recipeNameEl.addEventListener('input', updateCreateRecipeContinueButton);
     }
-    ['recipe-no-of-samples', 'recipe-vacuum-mmhg', 'recipe-duration'].forEach(function (id) {
+    ['recipe-vacuum-mmhg', 'recipe-duration'].forEach(function (id) {
         var el = document.getElementById(id);
         if (el) el.addEventListener('input', updateCreateRecipeContinueButton);
     });
+    var recipeBatchSizeEl = document.getElementById('recipe-batch-size');
+    if (recipeBatchSizeEl) {
+        recipeBatchSizeEl.addEventListener('input', updateCreateRecipeContinueButton);
+    }
     document.querySelectorAll('input[name="recipe-product-type"]').forEach(function (el) {
         el.addEventListener('change', function () {
             if (typeof onRecipeProductTypeChange === 'function') onRecipeProductTypeChange();

@@ -67,11 +67,12 @@ A4_TEXT_WIDTH = 80
 THERMAL_POST_PRINT_FEED_LINES = 3
 # ESC/POS raster width for 58mm thermal (must be multiple of 8). DT-Bath-CFR21 aligned.
 THERMAL_RASTER_WIDTH = 384
-THERMAL_LOGO_PRINT_WIDTH = 384
+# Centered logo width (not full-bleed) — avoids LANCZOS upscale noise on small icons
+THERMAL_LOGO_PRINT_WIDTH = 240
 _ASSETS_DIR = pathlib.Path(__file__).resolve().parent / "assets"
 _THERMAL_LOGO_CANDIDATES = (
-    _ASSETS_DIR / "apple-touch-icon.png",
     _ASSETS_DIR / "rle_logo.png",
+    _ASSETS_DIR / "apple-touch-icon.png",
 )
 
 _PRINTER_INIT_SEQ = b"\x1b\x40"
@@ -321,13 +322,17 @@ def _pil_to_escpos_raster(img: Any, width_pixels: int) -> bytes:
     if _PILImage is None:
         raise RuntimeError("Pillow (PIL) is required for thermal logo printing")
     width_pixels = max(8, int(width_pixels) - (int(width_pixels) % 8))
-    img = img.convert("L")
+    # Prefer already-bilevel; NEAREST avoids mid-gray speckles from LANCZOS
+    if img.mode == "1":
+        img = img.convert("L")
+    else:
+        img = img.convert("L")
     w, h = img.size
     if w != width_pixels:
         new_h = max(1, int(round(h * (width_pixels / float(w)))))
-        img = img.resize((width_pixels, new_h), _PILImage.LANCZOS)
+        img = img.resize((width_pixels, new_h), _PILImage.NEAREST)
         w, h = img.size
-    # Dark pixels print (1), light stay white (0) — DT threshold 160
+    # Dark pixels print (1), light stay white (0)
     bw = img.point(lambda p: 0 if p > 160 else 1, "1")
     m = 0
     xL = (w // 8) & 0xFF
@@ -350,7 +355,7 @@ def _build_centered_thermal_logo_raster(
     paper_width: int = THERMAL_RASTER_WIDTH,
     logo_width: int = THERMAL_LOGO_PRINT_WIDTH,
 ) -> bytes:
-    """DT-Bath-CFR21 style: trim, scale to logo_width, center on paper_width canvas."""
+    """Trim, scale with NEAREST, center on paper — clean mono thermal logo."""
     if _PILImage is None:
         raise RuntimeError("Pillow (PIL) is required for thermal logo printing")
     paper_width = max(8, int(paper_width) - (int(paper_width) % 8))
@@ -387,9 +392,10 @@ def _build_centered_thermal_logo_raster(
     if bbox:
         mono = mono.crop(bbox)
 
-    new_h = max(1, int(round(mono.height * (logo_width / float(max(1, mono.width))))))
-    mono = mono.resize((logo_width, new_h), _PILImage.LANCZOS)
+    # Hard threshold before upscale so NEAREST does not invent mid-grays
     mono = mono.point(lambda p: 0 if p < 160 else 255)
+    new_h = max(1, int(round(mono.height * (logo_width / float(max(1, mono.width))))))
+    mono = mono.resize((logo_width, new_h), _PILImage.NEAREST)
 
     canvas = _PILImage.new("L", (paper_width, mono.height), 255)
     ox = max(0, (paper_width - logo_width) // 2)
@@ -1041,7 +1047,9 @@ def _report_brand_title(rtype: str) -> str:
 
 
 def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: Dict[str, Any]) -> Dict[str, str]:
-    """Hold = set hold time; Release = factory/release lock; Total = hold + release."""
+    """Hold = set hold time; Release = factory/release lock; Total = hold + release.
+    Aborted/power-interruption reports use actual elapsed for Hold and Total.
+    """
     hold = td.get("holdDurationSec")
     if hold in (None, ""):
         hold = td.get("setDurationSec")
@@ -1055,6 +1063,16 @@ def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: D
     if release in (None, ""):
         release = 80
     total = td.get("totalDurationSec")
+    status_low = str(td.get("status") or "").strip().lower()
+    remarks_low = str(td.get("remarks") or "").strip().lower()
+    is_aborted = status_low == "aborted" or "power interruption" in remarks_low
+    if is_aborted:
+        actual = td.get("actualDurationSec")
+        if actual in (None, ""):
+            actual = td.get("durationSeconds")
+        if actual not in (None, ""):
+            hold = actual
+            total = actual
     try:
         hold_i = int(round(float(hold))) if hold not in (None, "") else None
     except (TypeError, ValueError):
@@ -1063,7 +1081,7 @@ def _hold_release_total_fields(td: Dict[str, Any], recipe: Dict[str, Any], fs: D
         release_i = int(round(float(release))) if release not in (None, "") else None
     except (TypeError, ValueError):
         release_i = None
-    if total in (None, "") and hold_i is not None and release_i is not None:
+    if total in (None, "") and hold_i is not None and release_i is not None and not is_aborted:
         total = hold_i + release_i
     return {
         "hold": _fmt_mmss_value(hold_i) if hold_i is not None else "--",
@@ -1120,23 +1138,6 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             if not isinstance(recipe_hdr, dict):
                 recipe_hdr = {}
             derived_hdr = build_test_report_derived(td, recipe_hdr, report_data.get("id"))
-    print_date = derived_hdr.get("printDate", "--") if derived_hdr else "--"
-    print_time = derived_hdr.get("printTime", "--") if derived_hdr else "--"
-    if print_date in (None, "", "--") or print_time in (None, "", "--"):
-        try:
-            import rtc_service
-            payload = rtc_service.get_device_wall_datetime_payload()
-            if print_date in (None, "", "--"):
-                print_date = payload.get("date") or "--"
-            if print_time in (None, "", "--"):
-                print_time = payload.get("time") or "--"
-        except Exception:
-            now = datetime.now()
-            if print_date in (None, "", "--"):
-                print_date = now.strftime("%d/%m/%Y")
-            if print_time in (None, "", "--"):
-                print_time = now.strftime("%H:%M:%S")
-    print_date = _normalize_display_date_slash(print_date)
     last_val = _normalize_display_date_slash(fs.get("lastValidationDate", "N/A"))
     next_val = _normalize_display_date_slash(fs.get("nextValidationDate", "N/A"))
     if thermal:
@@ -1192,7 +1193,6 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             set_vac = recipe.get("vacuumMmHg")
         set_vac_disp = str(set_vac) if set_vac not in (None, "") else "--"
         dur_fields = _hold_release_total_fields(td, recipe, fs)
-        result_val = td.get("result") or "--"
 
         batch_size = td.get("batchSize")
         if batch_size in (None, ""):
@@ -1259,7 +1259,6 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 f"Set Vacuum (mmHg): {set_vac_disp}",
                 f"Total Duration (mm:ss): {dur_fields['total']}",
                 f"Hold Duration (mm:ss): {dur_fields['hold']}",
-                f"Result: {result_val}",
             ]
             _append_hold_vacuum_samples(info_lines, True)
             if comments not in (None, ""):
@@ -1293,7 +1292,6 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                     ("Set Vacuum (mmHg)", set_vac_disp),
                     ("Total Duration (mm:ss)", dur_fields["total"]),
                     ("Hold Duration (mm:ss)", dur_fields["hold"]),
-                    ("Result", result_val),
                 ],
                 width,
             )
@@ -1334,19 +1332,8 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             ],
             width,
         )
-    # Print date/time once in the footer only (not in the company header).
-    if thermal:
-        lines.extend(["", f"Print Date: {print_date}", f"Print Time: {print_time}"])
-    else:
-        lines.append("")
-        _append_two_column_pairs(
-            lines,
-            [
-                ("Print Date", print_date),
-                ("Print Time", print_time),
-            ],
-            width,
-        )
+    # Print Date/Time is appended only when sending to a physical printer
+    # (see print_thermal_report / print_a4_report), not in preview/PDF text.
     if thermal:
         lines.extend([sep, ""])
         flat: list = []
@@ -1358,14 +1345,14 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
 
 
 def format_for_a4_printer(
-    report_data: Dict[str, Any], *, include_printed_timestamp: bool = True
+    report_data: Dict[str, Any], *, include_printed_timestamp: bool = False
 ) -> str:
-    # Footer Print Date/Time is included by _format_report_text.
+    """Format report for A4. Print Date/Time is not included here (preview/PDF safe)."""
     return _format_report_text(report_data, width=A4_TEXT_WIDTH).rstrip("\n")
 
 
 def _thermal_printed_timestamp_lines() -> list:
-    """Print date/time from device RTC (legacy helper for callers that need a stamp)."""
+    """Print date/time from device RTC (physical print footer only)."""
     try:
         import rtc_service
 
@@ -1379,8 +1366,31 @@ def _thermal_printed_timestamp_lines() -> list:
     return ["", f"Print Date: {_normalize_display_date_slash(pdate)}", f"Print Time: {ptime}"]
 
 
+def _a4_printed_timestamp_block(width: int = A4_TEXT_WIDTH) -> str:
+    try:
+        import rtc_service
+
+        payload = rtc_service.get_device_wall_datetime_payload()
+        pdate = payload.get("date") or "--"
+        ptime = payload.get("time") or "--"
+    except Exception:
+        now = datetime.now()
+        pdate = now.strftime("%d/%m/%Y")
+        ptime = now.strftime("%H:%M:%S")
+    lines: list = [""]
+    _append_two_column_pairs(
+        lines,
+        [
+            ("Print Date", _normalize_display_date_slash(pdate)),
+            ("Print Time", ptime),
+        ],
+        width,
+    )
+    return "\n".join(lines)
+
+
 def format_for_thermal_printer(report_data: Dict[str, Any]) -> str:
-    # Footer Print Date/Time is included by _format_report_text.
+    """Format report for thermal. Print Date/Time is not included here (preview/PDF safe)."""
     # Trailing paper feed is applied only in _send_text_to_thermal (not here).
     return _format_report_text(report_data, width=THERMAL_WIDTH).rstrip("\n")
 
@@ -1446,7 +1456,7 @@ def print_a4_report(report_data: Dict[str, Any], printer_port: Optional[str] = N
     if not _port_exists(port):
         return {"success": False, "error": f"A4 printer port not found: {port}", "port": port}
     try:
-        text = format_for_a4_printer(report_data).rstrip() + "\r\n\x0c"
+        text = format_for_a4_printer(report_data).rstrip() + _a4_printed_timestamp_block() + "\r\n\x0c"
         ser = _open_a4_serial(port, baud)
         try:
             ser.reset_output_buffer()
@@ -1472,11 +1482,14 @@ def print_thermal_report(report_data: Dict[str, Any], printer_port: Optional[str
         return {"success": False, "error": f"Thermal printer port not found: {e.filename or port}", "port": port}
     try:
         text = format_for_thermal_printer(report_data)
+        stamp = "\n".join(_thermal_printed_timestamp_lines())
         # On-screen / file preview uses [LOGO] marker; physical print sends raster instead.
         text_body = "\n".join(
             ln for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
             if str(ln).strip() != "[LOGO]"
         )
+        if stamp:
+            text_body = text_body.rstrip("\n") + "\n" + stamp
         ser = serial.Serial(port=port, baudrate=baud, timeout=2.0)
         try:
             _send_printer_init(ser)
