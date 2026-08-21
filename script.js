@@ -1929,7 +1929,9 @@ function goToPage(pageName) {
     var title = document.getElementById('header-title');
     if (title) {
         if (pageName === 'manage-recipes') {
-            title.textContent = 'Manage Recipes';
+            title.textContent = (typeof recipeListMode !== 'undefined' && recipeListMode === 'load')
+                ? 'Load Recipe'
+                : 'Manage Recipes';
         } else if (PAGE_TITLES[pageName]) {
             title.textContent = PAGE_TITLES[pageName];
         }
@@ -8884,9 +8886,6 @@ function getRecipes() {
         method: 'GET'
     }).then(function (data) {
         return (data && data.recipes) ? data.recipes : [];
-    }).catch(function (err) {
-        console.error('Failed to fetch recipes:', err);
-        return [];
     });
 }
 
@@ -8972,17 +8971,32 @@ function recipeUspLabel(r) {
     return usp;
 }
 
+var _manageRecipesLoadGen = 0;
+
 function loadManageRecipes() {
     var msgEl = document.getElementById('manage-recipes-message');
-    var tableEl = document.querySelector('.manage-recipes-table');
+    // Scope to this page — disable-recipes also uses .manage-recipes-table.
+    var tableEl = document.querySelector('#page-manage-recipes .manage-recipes-table');
     var tbody = document.getElementById('manage-recipes-table-body');
     if (!tbody) return;
 
+    var loadGen = ++_manageRecipesLoadGen;
+    // Capture mode at request start so a later Load↔Manage switch cannot mis-filter a stale reply.
+    var mode = recipeListMode === 'load' ? 'load' : 'manage';
+
     tbody.innerHTML = '';
-    refreshActiveQaCount();
+    if (msgEl) {
+        msgEl.textContent = 'Loading recipes…';
+        msgEl.style.display = '';
+    }
+    if (tableEl) tableEl.style.display = 'none';
+
+    // Fire-and-forget QA count; do not let it gate or race the recipe list render.
+    try { refreshActiveQaCount(); } catch (eQa) { /* ignore */ }
 
     getRecipes().then(function (recipes) {
-        var mode = recipeListMode === 'load' ? 'load' : 'manage';
+        if (loadGen !== _manageRecipesLoadGen) return; // stale response — ignore
+
         var createBtn = document.querySelector('#page-manage-recipes .btn-create-recipe');
         var u = window.currentUser;
         var canManage = u && typeof canAccess === 'function' && canAccess(u, 'recipe-manage');
@@ -9018,11 +9032,13 @@ function loadManageRecipes() {
         }
 
         if (!recipes.length) {
-            if (msgEl) msgEl.style.display = '';
-            if (tableEl) tableEl.style.display = 'none';
-            if (mode === 'load' && msgEl) {
-                msgEl.textContent = 'No approved recipes available.';
+            if (msgEl) {
+                msgEl.textContent = (mode === 'load')
+                    ? 'No approved recipes available.'
+                    : 'No recipes created yet.';
+                msgEl.style.display = '';
             }
+            if (tableEl) tableEl.style.display = 'none';
             return;
         }
 
@@ -9072,6 +9088,14 @@ function loadManageRecipes() {
 
             tbody.appendChild(tr);
         });
+    }).catch(function (err) {
+        if (loadGen !== _manageRecipesLoadGen) return;
+        console.error('Failed to fetch recipes:', err);
+        if (msgEl) {
+            msgEl.textContent = 'Unable to load recipes. Go back and try again.';
+            msgEl.style.display = '';
+        }
+        if (tableEl) tableEl.style.display = 'none';
     });
 }
 

@@ -12,6 +12,8 @@ import os
 import pathlib
 import secrets
 import shutil
+import tempfile
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
@@ -22,6 +24,10 @@ _config = {}
 _storage_dir = None
 _reports_dir = None
 _current_user = None
+# Serialize session file writes; unique tmp names still protect all JSON files.
+_session_save_lock = threading.Lock()
+_json_write_locks_guard = threading.Lock()
+_json_write_locks: Dict[str, threading.Lock] = {}
 
 FACTORY_USERNAME = "RLERLT"
 FACTORY_PASSWORD = "Rahul"
@@ -252,6 +258,16 @@ def _get_storage_path(filename: str) -> pathlib.Path:
     return _storage_dir / safe_name
 
 
+def _json_write_lock_for(filepath: pathlib.Path) -> threading.Lock:
+    key = str(filepath)
+    with _json_write_locks_guard:
+        lock = _json_write_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _json_write_locks[key] = lock
+        return lock
+
+
 def _load_json_file(filepath: pathlib.Path, default=None):
     if default is None:
         default = []
@@ -266,30 +282,50 @@ def _load_json_file(filepath: pathlib.Path, default=None):
 
 
 def _save_json_file(filepath: pathlib.Path, data):
-    """Atomic JSON write with fsync to reduce corruption on sudden power loss."""
+    """Atomic JSON write with unique temp name (safe under concurrent Flask requests).
+
+    Using a fixed ``name.tmp`` races when two threads write the same file: one
+    ``os.replace`` removes the shared tmp and the other raises FileNotFoundError,
+    which can 500 recipe/member APIs and leave the UI with an empty list.
+    """
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    tmp = filepath.with_name(filepath.name + ".tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, filepath)
+    lock = _json_write_lock_for(filepath)
+    with lock:
+        fd = None
+        tmp_path = None
         try:
-            dir_fd = os.open(str(filepath.parent), os.O_RDONLY)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=filepath.name + ".",
+                suffix=".tmp",
+                dir=str(filepath.parent),
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = None  # ownership transferred to the file object
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, filepath)
+            tmp_path = None
             try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+                dir_fd = os.open(str(filepath.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
         except OSError:
-            pass
-    except OSError:
-        try:
-            if tmp.exists():
-                tmp.unlink()
-        except OSError:
-            pass
-        raise
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            raise
 
 
 # =================== RECIPE OPERATIONS ==========================
@@ -1401,9 +1437,10 @@ def save_factory_settings(settings: Dict[str, Any]):
 def save_current_user(user: Dict[str, Any]):
     """Save current logged-in user session."""
     global _current_user
-    _current_user = dict(user)
-    session_path = _get_storage_path("current_user.json")
-    _save_json_file(session_path, _current_user)
+    with _session_save_lock:
+        _current_user = dict(user)
+        session_path = _get_storage_path("current_user.json")
+        _save_json_file(session_path, _current_user)
 
 
 def get_current_user() -> Optional[Dict[str, Any]]:
@@ -1411,13 +1448,16 @@ def get_current_user() -> Optional[Dict[str, Any]]:
     global _current_user
     if _current_user:
         return _current_user
-    session_path = _get_storage_path("current_user.json")
-    loaded = _load_json_file(session_path, default=None)
-    if loaded is None and session_path.exists():
-        time.sleep(0.05)
+    with _session_save_lock:
+        if _current_user:
+            return _current_user
+        session_path = _get_storage_path("current_user.json")
         loaded = _load_json_file(session_path, default=None)
-    _current_user = loaded
-    return _current_user
+        if loaded is None and session_path.exists():
+            time.sleep(0.05)
+            loaded = _load_json_file(session_path, default=None)
+        _current_user = loaded
+        return _current_user
 
 
 def refresh_current_user_from_member() -> Optional[Dict[str, Any]]:
@@ -1439,6 +1479,15 @@ def refresh_current_user_from_member() -> Optional[Dict[str, Any]]:
     updated["role"] = member.get("role", cur.get("role"))
     updated["featureOverrides"] = member.get("featureOverrides")
     updated["permissionsVersion"] = member.get("permissionsVersion")
+    # Skip disk write when nothing changed — avoids stampeding current_user.json on every API call.
+    if (
+        updated.get("id") == cur.get("id")
+        and updated.get("name") == cur.get("name")
+        and updated.get("role") == cur.get("role")
+        and updated.get("featureOverrides") == cur.get("featureOverrides")
+        and updated.get("permissionsVersion") == cur.get("permissionsVersion")
+    ):
+        return cur
     save_current_user(updated)
     return updated
 
@@ -1446,13 +1495,14 @@ def refresh_current_user_from_member() -> Optional[Dict[str, Any]]:
 def clear_current_user():
     """Clear current user session."""
     global _current_user
-    _current_user = None
-    session_path = _get_storage_path("current_user.json")
-    if session_path.exists():
-        try:
-            session_path.unlink()
-        except Exception:
-            pass
+    with _session_save_lock:
+        _current_user = None
+        session_path = _get_storage_path("current_user.json")
+        if session_path.exists():
+            try:
+                session_path.unlink()
+            except Exception:
+                pass
 
 
 _SESSION_POWER_AUDIT_PENDING = "session_power_audit_pending.json"
