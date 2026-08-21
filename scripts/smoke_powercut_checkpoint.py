@@ -97,10 +97,18 @@ def main() -> int:
             "testStartTime": start_iso,
             "testEndTime": end_iso,
             "durationSeconds": 94,
+            "wallElapsedSec": 94,
+            "buildDurationSec": 14,
+            "holdDurationSec": 80,
+            "releaseDurationSec": 0,
+            "totalDurationSec": 94,
+            "setDurationSec": 120,
             "stepResults": [{"stepIndex": 0, "resultText": "Pass"}],
             "isQuickTest": True,
             "recipe": {"productName": "SMOKE-PWR", "batchNumber": "BATCH1", "steps": []},
         },
+        "wallElapsedSec": 94,
+        "_wallElapsedSec": 94,
         "_checkpointAt": end_iso,
         "_checkpointPhase": "running",
         "_testStartedAudited": True,
@@ -165,6 +173,56 @@ def main() -> int:
     else:
         res.fail(f"reconstruction failed start={s} end={e} dur={d}")
 
+    # Mid-build poison: planned set/release must not inflate total.
+    mid_build = {
+        "type": "test",
+        "testStartTime": start_iso,
+        "testEndTime": start_iso,
+        "testData": {
+            "testStartTime": start_iso,
+            "testEndTime": start_iso,
+            "durationSeconds": 0,
+            "setDurationSec": 120,
+            "holdDurationSec": 120,
+            "releaseDurationSec": 80,
+            "releaseTimeSec": 80,
+            "totalDurationSec": 200,
+            "buildDurationSec": 0,
+            "status": "running",
+        },
+    }
+    mid_cp = {
+        "testStartTime": start_iso,
+        "testEndTime": start_iso,
+        "_checkpointAt": end_iso,
+        "wallElapsedSec": 15,
+        "durationSeconds": 15,
+        "testData": {
+            "testStartTime": start_iso,
+            "testEndTime": end_iso,
+            "wallElapsedSec": 15,
+            "durationSeconds": 15,
+            "buildDurationSec": 15,
+            "holdDurationSec": 0,
+            "releaseDurationSec": 0,
+            "totalDurationSec": 15,
+            "setDurationSec": 120,
+        },
+    }
+    mid_fixed = _apply_power_loss_duration(mid_build, mid_cp)
+    mid_td = mid_fixed.get("testData") or {}
+    mid_total = mid_td.get("totalDurationSec")
+    mid_rel = mid_td.get("releaseDurationSec")
+    mid_s = mid_td.get("testStartTime")
+    mid_e = mid_td.get("testEndTime")
+    if mid_total == 15 and mid_rel == 0 and mid_s and mid_e and mid_s != mid_e:
+        res.ok(f"mid-build power-cut total=15 release=0 start≠end")
+    else:
+        res.fail(
+            f"mid-build duration wrong total={mid_total} release={mid_rel} "
+            f"start={mid_s} end={mid_e}"
+        )
+
     data_service.save_test_run_data(cp)
     data_service.write_session_power_audit_pending(
         {"username": "SMOKE_OP", "name": "SMOKE_OP", "role": "User"}
@@ -221,10 +279,27 @@ def main() -> int:
             and appr_pf == "FAIL"
             and "power interruption" in remarks
         ):
-            res.ok(
-                f"power-cut aborted/FAIL system-approved report id={power_rep.get('id')} "
-                f"duration={dur_n}s"
-            )
+            total = td.get("totalDurationSec")
+            release = td.get("releaseDurationSec")
+            start_s = td.get("testStartTime") or power_rep.get("testStartTime")
+            end_s = td.get("testEndTime") or power_rep.get("testEndTime")
+            if (
+                dur_n >= 90
+                and total == dur_n
+                and release == 0
+                and start_s
+                and end_s
+                and start_s != end_s
+            ):
+                res.ok(
+                    f"power-cut aborted/FAIL system-approved report id={power_rep.get('id')} "
+                    f"duration={dur_n}s total={total} release=0 start≠end"
+                )
+            else:
+                res.fail(
+                    f"power-cut timing wrong id={power_rep.get('id')} "
+                    f"dur={dur_n} total={total} release={release} start={start_s} end={end_s}"
+                )
         elif st == "aborted" and status == "aborted" and "power interruption" in remarks:
             res.fail(
                 "power-cut report still using legacy approval=aborted "

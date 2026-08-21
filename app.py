@@ -417,12 +417,20 @@ def _power_loss_end_iso(checkpoint: dict = None, report: dict = None) -> str:
 
 
 def _read_duration_seconds_candidate(*dicts) -> Optional[int]:
+    """Prefer wall-clock elapsed keys used by mid-test heartbeats."""
     for d in dicts:
         if not isinstance(d, dict):
             continue
-        for key in ("durationSeconds", "actualDurationSec", "elapsedSeconds", "durationSec"):
+        for key in (
+            "wallElapsedSec",
+            "_wallElapsedSec",
+            "durationSeconds",
+            "actualDurationSec",
+            "elapsedSeconds",
+            "durationSec",
+        ):
             raw = d.get(key)
-            if raw is None:
+            if raw is None or raw == "":
                 continue
             try:
                 return max(0, int(raw))
@@ -432,14 +440,35 @@ def _read_duration_seconds_candidate(*dicts) -> Optional[int]:
 
 
 def _apply_power_loss_duration(report: dict, checkpoint: dict = None) -> dict:
-    """Stamp exact duration of the test that ran before power loss onto the report."""
+    """Stamp actual Start→power-cut wall time onto the report.
+
+    Power interruption must NOT use planned hold/release (e.g. 120s / 80s).
+    Total = wall elapsed until last checkpoint heartbeat.
+    """
     report = dict(report or {})
     td = report.get("testData")
     td = dict(td) if isinstance(td, dict) else {}
     cp = checkpoint if isinstance(checkpoint, dict) else {}
     cp_td = cp.get("testData") if isinstance(cp.get("testData"), dict) else {}
 
-    elapsed = _read_duration_seconds_candidate(cp, cp_td, td, report)
+    def _read_wall_explicit(*dicts):
+        for d in dicts:
+            if not isinstance(d, dict):
+                continue
+            for key in ("wallElapsedSec", "_wallElapsedSec"):
+                raw = d.get(key)
+                if raw is None or raw == "":
+                    continue
+                try:
+                    return max(0, int(raw))
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    wall_explicit = _read_wall_explicit(cp, cp_td, td, report)
+    elapsed = wall_explicit
+    if elapsed is None:
+        elapsed = _read_duration_seconds_candidate(cp, cp_td, td, report)
 
     start_raw = (
         cp.get("testStartTime")
@@ -452,29 +481,39 @@ def _apply_power_loss_duration(report: dict, checkpoint: dict = None) -> dict:
     end_dt = _parse_report_dt(end_raw)
 
     duration = None
-    if start_dt is not None and end_dt is not None:
+    if wall_explicit is not None:
+        # Heartbeat wall clock is authoritative for power-cut reports.
+        duration = wall_explicit
+        if start_dt is not None:
+            try:
+                end_dt = start_dt + timedelta(seconds=wall_explicit)
+                end_raw = end_dt.isoformat().replace("+00:00", "Z")
+            except Exception:
+                pass
+    elif start_dt is not None and end_dt is not None:
         if start_dt.tzinfo and not end_dt.tzinfo:
             end_dt = end_dt.replace(tzinfo=start_dt.tzinfo)
         elif end_dt.tzinfo and not start_dt.tzinfo:
             start_dt = start_dt.replace(tzinfo=end_dt.tzinfo)
-        delta = int((end_dt - start_dt).total_seconds())
-        if abs(delta) <= 2 and elapsed is not None and elapsed > 2:
+        delta = max(0, int((end_dt - start_dt).total_seconds()))
+        if elapsed is not None and elapsed > delta + 2:
+            duration = elapsed
             try:
-                start_dt = end_dt - timedelta(seconds=elapsed)
-                start_raw = start_dt.isoformat().replace("+00:00", "Z")
-                duration = elapsed
+                end_dt = start_dt + timedelta(seconds=elapsed)
+                end_raw = end_dt.isoformat().replace("+00:00", "Z")
             except Exception:
-                duration = elapsed
+                pass
+        elif abs(delta) <= 2 and elapsed is not None and elapsed > 2:
+            duration = elapsed
+            try:
+                end_dt = start_dt + timedelta(seconds=elapsed)
+                end_raw = end_dt.isoformat().replace("+00:00", "Z")
+            except Exception:
+                pass
         else:
-            duration = elapsed if (elapsed is not None and elapsed >= 0) else max(0, delta)
-            if elapsed is not None and elapsed > max(0, delta) + 2:
+            duration = delta if delta > 0 else (elapsed if elapsed is not None else 0)
+            if elapsed is not None and elapsed > 0 and delta <= 0:
                 duration = elapsed
-                if abs(delta) <= 2:
-                    try:
-                        start_dt = end_dt - timedelta(seconds=elapsed)
-                        start_raw = start_dt.isoformat().replace("+00:00", "Z")
-                    except Exception:
-                        pass
     elif elapsed is not None:
         duration = elapsed
         if end_dt is not None and start_dt is None and elapsed > 0:
@@ -489,6 +528,8 @@ def _apply_power_loss_duration(report: dict, checkpoint: dict = None) -> dict:
                 end_raw = end_dt.isoformat().replace("+00:00", "Z")
             except Exception:
                 pass
+    else:
+        duration = 0
 
     if start_raw:
         start_iso = str(start_raw).strip()
@@ -497,25 +538,56 @@ def _apply_power_loss_duration(report: dict, checkpoint: dict = None) -> dict:
     end_iso = str(end_raw).strip() if end_raw else _utc_now_iso()
     td["testEndTime"] = end_iso
     report["testEndTime"] = end_iso
-    if duration is not None:
-        td["durationSeconds"] = duration
-        td["actualDurationSec"] = duration
-        report["durationSeconds"] = duration
-        # Hold = actual hold elapsed. Total = build + hold (+ release if already on report).
-        td["holdDurationSec"] = duration
+    report["completedAt"] = end_iso
+
+    duration_i = max(0, int(duration) if duration is not None else 0)
+    td["durationSeconds"] = duration_i
+    td["actualDurationSec"] = duration_i
+    td["wallElapsedSec"] = duration_i
+    report["durationSeconds"] = duration_i
+
+    # Actual phase times from checkpoint (not planned set/release).
+    hold_actual = None
+    for src in (cp_td, td, cp):
+        if not isinstance(src, dict):
+            continue
+        raw_h = src.get("holdDurationSec")
+        if raw_h in (None, ""):
+            continue
         try:
-            build_i = int(round(float(td.get("buildDurationSec") or 0)))
+            hold_actual = max(0, int(round(float(raw_h))))
+            break
         except (TypeError, ValueError):
-            build_i = 0
+            continue
+    build_actual = None
+    for src in (cp_td, td, cp):
+        if not isinstance(src, dict):
+            continue
+        raw_b = src.get("buildDurationSec")
+        if raw_b in (None, ""):
+            continue
         try:
-            release_i = td.get("releaseDurationSec")
-            if release_i in (None, ""):
-                release_i = td.get("releaseTimeSec")
-            release_i = int(round(float(release_i))) if release_i not in (None, "") else 0
+            build_actual = max(0, int(round(float(raw_b))))
+            break
         except (TypeError, ValueError):
-            release_i = 0
-        # Power-cut mid-run usually never finishes release lock — keep 0 unless already stamped.
-        td["totalDurationSec"] = build_i + int(duration) + release_i
+            continue
+
+    if hold_actual is None:
+        hold_actual = 0
+    if build_actual is None:
+        build_actual = max(0, duration_i - hold_actual) if hold_actual > 0 else duration_i
+    if build_actual + hold_actual > duration_i + 2:
+        if hold_actual > duration_i:
+            hold_actual = duration_i
+            build_actual = 0
+        else:
+            build_actual = max(0, duration_i - hold_actual)
+
+    td["buildDurationSec"] = build_actual
+    td["holdDurationSec"] = hold_actual
+    td["releaseDurationSec"] = 0
+    td["releaseTimeSec"] = 0
+    td["totalDurationSec"] = duration_i
     report["testData"] = td
     return report
 
