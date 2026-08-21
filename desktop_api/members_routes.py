@@ -180,65 +180,9 @@ def register_members_routes(bp, kiosk):
                 return jsonify({"error": "Member not found"}), 404
             target = (member.get("username") or member.get("name") or "").strip() or "--"
             actor = (user.get("username") or user.get("name") or "--").strip() or "--"
-            verified, verify_err = auth_store.consume_approval_verify_token("user_admin")
-            if not verified:
-                audit_event(
-                    kiosk,
-                    user,
-                    action="User disabled",
-                    outcome="denied",
-                    entity_type="member",
-                    entity_id=member_id,
-                    entity_name=target,
-                    details="{} attempted to disable {}: {}".format(
-                        actor, target, verify_err or "Approval verification required"
-                    ),
-                    target_user=target,
-                    before=member,
-                )
-                return jsonify({"error": verify_err}), 403
-            verifier_name = (verified.get("username") or verified.get("name") or actor or "--").strip() or "--"
+            actor_role = (user.get("role") or "--").strip() or "--"
             before_member = dict(member)
-            template_id = member.get("fingerprintTemplateId")
-            if template_id is not None:
-                try:
-                    import biometric_service
-
-                    deleted = biometric_service.delete_template(template_id)
-                    if not deleted.get("ok"):
-                        audit_event(
-                            kiosk,
-                            user,
-                            action="User disabled",
-                            outcome="failed",
-                            entity_type="member",
-                            entity_id=member_id,
-                            entity_name=target,
-                            details="{} attempted to disable {}: {}".format(
-                                verifier_name,
-                                target,
-                                deleted.get("error")
-                                or "Failed to delete fingerprint template from sensor",
-                            ),
-                            target_user=target,
-                            before=before_member,
-                            signature={
-                                "mode": "password_reconfirm",
-                                "username": verified.get("username"),
-                                "role": verified.get("role"),
-                            },
-                            extra={"templateId": template_id},
-                        )
-                        return jsonify(
-                            {
-                                "error": deleted.get("error")
-                                or "Failed to delete fingerprint template from sensor",
-                                "templateId": int(template_id),
-                            }
-                        ), 400
-                    data_service.clear_member_biometric(member_id)
-                except ImportError:
-                    pass
+            # Soft-disable only; keep fingerprint on sensor. Disabled status blocks login.
             member = data_service.disable_member(member_id)
             audit_event(
                 kiosk,
@@ -248,16 +192,15 @@ def register_members_routes(bp, kiosk):
                 entity_type="member",
                 entity_id=member_id,
                 entity_name=target,
-                details="{} disabled {}".format(verifier_name, target),
+                details="{} disabled {}".format(actor, target),
                 target_user=target,
                 before=before_member,
                 after=member,
                 signature={
-                    "mode": "password_reconfirm",
-                    "username": verified.get("username"),
-                    "role": verified.get("role"),
+                    "mode": "session",
+                    "username": actor,
+                    "role": actor_role,
                 },
-                extra={"templateIdFreed": template_id},
             )
             return jsonify({"success": True, "member": member}), 200
         except ValueError as e:

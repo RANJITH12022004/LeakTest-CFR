@@ -10,21 +10,42 @@ INTERNAL_USB_PATH="${INTERNAL_USB_PATH:-/media/usb_internal}"
 
 cd "$APP_ROOT"
 
-# Internal pendrive: JSON storage, PDF reports, audit DB.
-# Only use USB paths if the USB is actually mounted (not just if /media/usb_internal dir exists).
-# If USB is absent or write-protected, the app falls back to /opt/kiosk/storage on the SD card.
-if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
+_dir_writable() {
+  local d="$1"
+  local probe
+  mkdir -p "$d" 2>/dev/null || return 1
+  probe="${d}/.kiosk_write_probe"
+  if touch "$probe" 2>/dev/null; then
+    rm -f "$probe" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
+# Prefer internal USB when mounted AND writable.
+# After power-loss FAT may remount-ro; repair script should heal it, but if not, use SD.
+if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null && _dir_writable "$INTERNAL_USB_PATH/storage"; then
   export INTERNAL_USB_PATH
   export STORAGE_DIR="${STORAGE_DIR:-$INTERNAL_USB_PATH/storage}"
   export REPORTS_DIR="${REPORTS_DIR:-$INTERNAL_USB_PATH/reports}"
   export AUDIT_DB_DIR="${AUDIT_DB_DIR:-$INTERNAL_USB_PATH/db}"
   export INTERNAL_USB_UUIDS="${INTERNAL_USB_UUIDS:-D444-057C}"
+  echo "run_kiosk_app: using USB storage at $STORAGE_DIR" >&2
 else
-  # USB not available — clear env vars so data_service uses SD-card defaults
   unset STORAGE_DIR REPORTS_DIR AUDIT_DB_DIR 2>/dev/null || true
   export STORAGE_DIR="$APP_ROOT/storage"
   export REPORTS_DIR="$APP_ROOT/reports"
   export AUDIT_DB_DIR="$APP_ROOT/db"
+  mkdir -p "$STORAGE_DIR" "$REPORTS_DIR" "$AUDIT_DB_DIR"
+  # Seed critical files from USB if readable but RO (so login still works).
+  if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
+    for f in members.json factorySettings.json recipes.json; do
+      if [ -f "$INTERNAL_USB_PATH/storage/$f" ] && [ ! -s "$STORAGE_DIR/$f" ]; then
+        cp -a "$INTERNAL_USB_PATH/storage/$f" "$STORAGE_DIR/$f" 2>/dev/null || true
+      fi
+    done
+  fi
+  echo "run_kiosk_app: USB unavailable/RO — using SD storage at $STORAGE_DIR" >&2
 fi
 
 if [ -f "$APP_ROOT/config/internal_usb.env" ]; then

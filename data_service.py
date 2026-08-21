@@ -11,6 +11,8 @@ import json
 import os
 import pathlib
 import secrets
+import shutil
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
@@ -170,19 +172,78 @@ def _storage_dir_score(path: pathlib.Path) -> int:
     return 1
 
 
+def _path_is_writable(path: pathlib.Path) -> bool:
+    """True if we can create the dir and write a probe file (USB remount-ro fails here)."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".kiosk_write_probe"
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def _sd_storage_dir() -> pathlib.Path:
+    app_root = None
+    if _config:
+        app_root = _config.get("APP_ROOT")
+    if not app_root:
+        app_root = os.environ.get("APP_ROOT", "/opt/kiosk")
+    return pathlib.Path(app_root) / "storage"
+
+
+def _seed_storage_from_readonly_usb(dest: pathlib.Path) -> None:
+    """If USB is readable but RO, copy critical JSON so login still works on SD."""
+    usb_storage = _internal_usb_storage_dir()
+    if usb_storage is None or not usb_storage.is_dir():
+        return
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    for name in ("members.json", "factorySettings.json", "recipes.json", "roles.json"):
+        src = usb_storage / name
+        dst = dest / name
+        if not src.is_file():
+            continue
+        if dst.is_file() and dst.stat().st_size > 0:
+            continue
+        try:
+            shutil.copy2(src, dst)
+        except OSError:
+            pass
+
+
 def _refresh_storage_dir() -> None:
-    """Re-resolve STORAGE_DIR after boot (internal USB may mount after bridge starts)."""
+    """Re-resolve STORAGE_DIR after boot; skip USB when remounted read-only."""
     global _storage_dir
     configured = _configured_storage_dir()
+    sd_fallback = _sd_storage_dir()
     if configured is not None:
-        _storage_dir = configured
+        if _path_is_writable(configured):
+            _storage_dir = configured
+            return
+        # Configured USB/path not writable (typical after power-cut remount-ro).
+        _seed_storage_from_readonly_usb(sd_fallback)
+        _storage_dir = sd_fallback
         return
     candidates = _storage_dir_candidates()
-    if len(candidates) == 1:
-        _storage_dir = candidates[0]
+    writable = [p for p in candidates if _path_is_writable(p)]
+    if writable:
+        if len(writable) == 1:
+            _storage_dir = writable[0]
+        else:
+            _storage_dir = max(writable, key=_storage_dir_score)
         return
-    best = max(candidates, key=_storage_dir_score)
-    _storage_dir = best
+    _seed_storage_from_readonly_usb(sd_fallback)
+    _storage_dir = sd_fallback
 
 
 def _get_storage_path(filename: str) -> pathlib.Path:
@@ -205,9 +266,30 @@ def _load_json_file(filepath: pathlib.Path, default=None):
 
 
 def _save_json_file(filepath: pathlib.Path, data):
+    """Atomic JSON write with fsync to reduce corruption on sudden power loss."""
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    tmp = filepath.with_name(filepath.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, filepath)
+        try:
+            dir_fd = os.open(str(filepath.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    except OSError:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 # =================== RECIPE OPERATIONS ==========================
@@ -1325,12 +1407,16 @@ def save_current_user(user: Dict[str, Any]):
 
 
 def get_current_user() -> Optional[Dict[str, Any]]:
-    """Get current logged-in user."""
+    """Get current logged-in user. Reloads from disk when memory is empty; one retry on USB flake."""
     global _current_user
     if _current_user:
         return _current_user
     session_path = _get_storage_path("current_user.json")
-    _current_user = _load_json_file(session_path, default=None)
+    loaded = _load_json_file(session_path, default=None)
+    if loaded is None and session_path.exists():
+        time.sleep(0.05)
+        loaded = _load_json_file(session_path, default=None)
+    _current_user = loaded
     return _current_user
 
 

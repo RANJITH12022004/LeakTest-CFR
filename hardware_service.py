@@ -582,10 +582,15 @@ def cmd_start_test(params: Dict[str, Any]):
     if vac is None:
         return {"ok": False, "error": "vacuumMmHg target is required (1–999 mmHg)"}
     hold_sec = 30
-    cycles = (params or {}).get("cycles") or [{"holdSeconds": 30}]
+    cycles = (params or {}).get("cycles") or []
     if cycles and isinstance(cycles[0], dict):
         try:
             hold_sec = max(1, int(cycles[0].get("holdSeconds", 30)))
+        except (TypeError, ValueError):
+            hold_sec = 30
+    elif (params or {}).get("durationSec") not in (None, ""):
+        try:
+            hold_sec = max(1, int(float((params or {}).get("durationSec"))))
         except (TypeError, ValueError):
             hold_sec = 30
     if _simulate_enabled():
@@ -607,6 +612,7 @@ def cmd_start_test(params: Dict[str, Any]):
 
 
 def cmd_stop():
+    """Send #STOP* and wait for #STOP_ACK* (or legacy stopped). Retry up to 3 times with 1s gaps."""
     global _sim_active
     stop_pressure_poll()
     if _simulate_enabled():
@@ -614,7 +620,14 @@ def cmd_stop():
             _sim_active = False
         _broadcast_line("#STOP_ACK*")
         return {"ok": True, "simulated": True}
-    return send_command("#STOP*", timeout=COMMAND_TIMEOUT)
+    last = None
+    for attempt in range(3):
+        last = send_command("#STOP*", timeout=COMMAND_TIMEOUT, max_retries=1)
+        if last.get("ok"):
+            return last
+        if attempt < 2:
+            time.sleep(1.0)
+    return last or {"ok": False, "error": "Timeout", "cmd": "#STOP*"}
 
 
 def cmd_status():
@@ -778,7 +791,7 @@ def cmd_esp_start_calib():
 
 
 def cmd_esp_stop_calib():
-    """End ESP calibration mode (#STOP_CALIB*) and wait for #STOP_CALIB_ACK*."""
+    """End ESP calibration mode (#STOP_CALIB*) and wait for #STOP_CALIB_ACK*. Retry up to 3 times with 1s gaps."""
     stop_pressure_poll()
     if _simulate_enabled():
         global _sim_active
@@ -786,12 +799,17 @@ def cmd_esp_stop_calib():
             _sim_active = False
         _broadcast_line("#STOP_CALIB_ACK*")
         return {"ok": True, "simulated": True, "response": "#STOP_CALIB_ACK*"}
-    result = send_command("#STOP_CALIB*", timeout=COMMAND_TIMEOUT)
-    if result.get("ok"):
-        norm = str(result.get("normalized") or "").lower()
-        if "stop_calib_ack" not in norm and "error" not in norm:
-            result["ack"] = norm or "STOP_CALIB_ACK"
-    return result
+    last = None
+    for attempt in range(3):
+        last = send_command("#STOP_CALIB*", timeout=COMMAND_TIMEOUT, max_retries=1)
+        if last.get("ok"):
+            norm = str(last.get("normalized") or "").lower()
+            if "stop_calib_ack" not in norm and "error" not in norm:
+                last["ack"] = norm or "STOP_CALIB_ACK"
+            return last
+        if attempt < 2:
+            time.sleep(1.0)
+    return last or {"ok": False, "error": "Timeout", "cmd": "#STOP_CALIB*"}
 
 
 def cmd_apply_calibration(calib_value: float, release_time_sec: int = None, gauge_value: float = None, set_vacuum_mmhg: float = None):
