@@ -1242,6 +1242,13 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         batch_size = td.get("batchSize")
         if batch_size in (None, ""):
             batch_size = recipe.get("batchSize")
+        sample_size = td.get("noOfSamples")
+        if sample_size in (None, ""):
+            sample_size = td.get("sampleSize")
+        if sample_size in (None, ""):
+            sample_size = recipe.get("noOfSamples")
+        if sample_size in (None, ""):
+            sample_size = recipe.get("sampleSize")
         ar_no = td.get("analysisReportNo") or recipe.get("analysisReportNo")
         if ar_no in (None, ""):
             legacy_ar = td.get("arNumbers") or recipe.get("arNumbers") or []
@@ -1292,6 +1299,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                 f"Product: {recipe.get('productName', td.get('productName', 'N/A'))}",
                 f"Batch: {recipe.get('batchNumber', td.get('batchNumber', 'N/A'))}",
                 f"Batch Size: {batch_size if batch_size not in (None, '') else 'N/A'}",
+                f"Sample Size: {sample_size if sample_size not in (None, '') else 'N/A'}",
                 f"A.R. No: {ar_no if ar_no not in (None, '') else 'N/A'}",
                 f"Operator: {operator}",
                 f"Start Date: {start_date}",
@@ -1320,6 +1328,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
                     ("Product", recipe.get("productName", td.get("productName", "N/A"))),
                     ("Batch", recipe.get("batchNumber", td.get("batchNumber", "N/A"))),
                     ("Batch Size", batch_size if batch_size not in (None, "") else "N/A"),
+                    ("Sample Size", sample_size if sample_size not in (None, "") else "N/A"),
                     ("A.R. No", ar_no if ar_no not in (None, "") else "N/A"),
                     ("Operator", operator),
                     ("Start Date", start_date),

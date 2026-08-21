@@ -1562,23 +1562,81 @@ def touch_app_clean_stop_flag():
 # =================== TEST RUN DATA ==========================
 
 
-def save_test_run_data(test_data: Dict[str, Any]):
-    """Save quick test run data."""
-    test_path = _get_storage_path("test_run.json")
-    _save_json_file(test_path, test_data)
+def _test_run_mirror_path() -> pathlib.Path:
+    """SD-card mirror of the mid-test checkpoint (survives USB 0-byte wipe after power loss)."""
+    return _app_root_path() / "storage" / "test_run.json"
 
+
+def _is_usable_checkpoint(data) -> bool:
+    return isinstance(data, dict) and bool(data)
+
+
+def _load_checkpoint_candidate(path: pathlib.Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        if path.stat().st_size < 3:
+            return {}
+    except OSError:
+        return {}
+    data = _load_json_file(path, default={})
+    return data if _is_usable_checkpoint(data) else {}
+
+
+def save_test_run_data(test_data: Dict[str, Any]):
+    """Save in-progress test checkpoint to USB storage and SD mirror."""
+    if not isinstance(test_data, dict):
+        return
+    payload = dict(test_data)
+    test_path = _get_storage_path("test_run.json")
+    try:
+        _save_json_file(test_path, payload)
+    except Exception:
+        pass
+    # Always mirror to APP_ROOT so a VFAT power-cut wipe of USB still recovers the run.
+    try:
+        mirror = _test_run_mirror_path()
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        # Skip duplicate write when STORAGE_DIR already is APP_ROOT/storage.
+        if mirror.resolve() != test_path.resolve():
+            _save_json_file(mirror, payload)
+    except Exception:
+        pass
 
 def get_test_run_data() -> Dict[str, Any]:
-    """Get last test run data."""
-    test_path = _get_storage_path("test_run.json")
-    return _load_json_file(test_path, default={})
+    """Get last mid-test checkpoint (USB primary, then .bak, then SD mirror)."""
+    primary = _get_storage_path("test_run.json")
+    data = _load_checkpoint_candidate(primary)
+    if _is_usable_checkpoint(data):
+        return data
+    bak = primary.with_name(primary.name + ".bak")
+    data = _load_checkpoint_candidate(bak)
+    if _is_usable_checkpoint(data):
+        return data
+    mirror = _test_run_mirror_path()
+    # Avoid treating primary and mirror as the same path when STORAGE_DIR is APP_ROOT/storage.
+    try:
+        if mirror.resolve() != primary.resolve():
+            data = _load_checkpoint_candidate(mirror)
+            if _is_usable_checkpoint(data):
+                return data
+    except OSError:
+        data = _load_checkpoint_candidate(mirror)
+        if _is_usable_checkpoint(data):
+            return data
+    return {}
 
 
 def clear_test_run_data() -> None:
     """Remove in-progress test run checkpoint (after normal complete/abort save)."""
     test_path = _get_storage_path("test_run.json")
-    if test_path.exists():
+    for path in (
+        test_path,
+        test_path.with_name(test_path.name + ".bak"),
+        _test_run_mirror_path(),
+    ):
         try:
-            test_path.unlink()
+            if path.exists():
+                path.unlink()
         except Exception:
             pass

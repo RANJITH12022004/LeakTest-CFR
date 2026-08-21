@@ -567,6 +567,7 @@
                 validationRunHoldStarted = false;
                 validationRunCurrentVacuumMmHg = null;
                 window._vdStartPressureMmHg = null;
+                window._validationLeakAbortInFlight = false;
                 setValRunEl('val-run-elapsed-time', '00:00');
                 setValRunEl('val-run-current-vacuum', '0.0');
                 setValRunEl('val-run-status', 'Evacuating');
@@ -586,6 +587,16 @@
                         },
                         onFail: function () {
                             if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
+                            if (window._validationLeakAbortInFlight) {
+                                var stopFnDup = (typeof hardwareLeakStopUntilAck === 'function')
+                                    ? hardwareLeakStopUntilAck
+                                    : (typeof hardwareLeakStopAwait === 'function')
+                                        ? hardwareLeakStopAwait
+                                        : stopValidationOnBackend;
+                                Promise.resolve(stopFnDup()).catch(function () {});
+                                return;
+                            }
+                            window._validationLeakAbortInFlight = true;
                             if (validationRunIntervalId != null) {
                                 clearInterval(validationRunIntervalId);
                                 validationRunIntervalId = null;
@@ -599,12 +610,29 @@
                             setValRunEl('val-run-status-sub', 'Pressure not building');
                             // Modal + STOP until STOP_ACK (backend retries until ACK).
                             showAppModal('Check for leaks. Pressure not building', 'Validation');
+                            try {
+                                var pFail = window._vdValidationParams || {};
+                                if (typeof auditValidationAbortedLeaksFound === 'function') {
+                                    auditValidationAbortedLeaksFound({
+                                        setVacuumMmHg: pFail.vacuumMmHg,
+                                        liveVacuumMmHg: validationRunCurrentVacuumMmHg
+                                    });
+                                } else if (typeof logAuditEvent === 'function') {
+                                    logAuditEvent(
+                                        'Validation aborted - leaks found',
+                                        'Check for leaks. Pressure not building',
+                                        { eventType: 'lifecycle', entityType: 'validation', outcome: 'failed' }
+                                    );
+                                }
+                            } catch (auditErr) { /* keep abort path alive */ }
                             var stopFn = (typeof hardwareLeakStopUntilAck === 'function')
                                 ? hardwareLeakStopUntilAck
                                 : (typeof hardwareLeakStopAwait === 'function')
                                     ? hardwareLeakStopAwait
                                     : stopValidationOnBackend;
-                            Promise.resolve(stopFn()).catch(function () {});
+                            Promise.resolve(stopFn()).catch(function () {}).finally(function () {
+                                window._validationLeakAbortInFlight = false;
+                            });
                         }
                     });
                 }
@@ -1175,6 +1203,7 @@
             }
             if (window._vacuumCalRun) {
                 window._vacuumCalRun.phase = 'evacuating';
+                window._calibrationLeakAbortInFlight = false;
                 _setCalRunEl('cal-run-status', 'Evacuating to ' + settings.targetVacuumMmHg + ' mmHg (START)');
                 _setCalRunEl('cal-live-vacuum', '0.0');
                 _startCalPressurePoll();
@@ -1195,13 +1224,40 @@
                         onFail: function () {
                             var startBtnFail = document.getElementById('btn-calibration-start');
                             var backBtnFail = document.getElementById('btn-calibration-back');
-                            if (window._vacuumCalRun) window._vacuumCalRun.phase = 'idle';
+                            if (window._calibrationLeakAbortInFlight) {
+                                Promise.resolve(_stopVacuumCalibrationHardware()).catch(function () {});
+                                return;
+                            }
+                            window._calibrationLeakAbortInFlight = true;
+                            var setVac = null;
+                            var liveVac = null;
+                            if (window._vacuumCalRun) {
+                                setVac = window._vacuumCalRun.targetVacuumMmHg;
+                                liveVac = window._vacuumCalRun.liveVacuumMmHg;
+                                window._vacuumCalRun.phase = 'idle';
+                            }
                             if (startBtnFail) startBtnFail.disabled = false;
                             if (backBtnFail) backBtnFail.textContent = 'Back';
                             _setCalRunEl('cal-run-status', 'Pressure not building');
                             // Modal + STOP_CALIB until ACK (same time).
                             showAppModal('Check for leaks. Pressure not building', 'Calibration');
-                            Promise.resolve(_stopVacuumCalibrationHardware()).catch(function () {});
+                            try {
+                                if (typeof auditCalibrationAbortedLeaksFound === 'function') {
+                                    auditCalibrationAbortedLeaksFound({
+                                        setVacuumMmHg: setVac,
+                                        liveVacuumMmHg: liveVac
+                                    });
+                                } else if (typeof logAuditEvent === 'function') {
+                                    logAuditEvent(
+                                        'Calibration aborted - leaks found',
+                                        'Check for leaks. Pressure not building',
+                                        { eventType: 'lifecycle', entityType: 'calibration', outcome: 'failed' }
+                                    );
+                                }
+                            } catch (auditErr) { /* keep abort path alive */ }
+                            Promise.resolve(_stopVacuumCalibrationHardware()).catch(function () {}).finally(function () {
+                                window._calibrationLeakAbortInFlight = false;
+                            });
                         }
                     });
                 }

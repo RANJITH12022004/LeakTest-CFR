@@ -395,8 +395,8 @@ function openProfilePasswordChange() {
         : ((typeof currentUser !== 'undefined' && currentUser) ? currentUser : null);
     if (!user) {
         if (typeof showAppModal === 'function') showAppModal('No user logged in.', 'User Profile');
-        return;
-    }
+            return;
+        }
     var memberId = user.id;
     var role = String(user.role || '').toLowerCase();
     var uname = String(user.username || '').trim().toUpperCase();
@@ -408,8 +408,8 @@ function openProfilePasswordChange() {
         if (typeof showAppModal === 'function') {
             showAppModal('Factory password cannot be changed from Profile.', 'User Profile');
         }
-        return;
-    }
+            return;
+        }
     showProfilePasswordChangeScreen(user.username || user.name || '');
 }
 
@@ -1581,9 +1581,9 @@ function auditTestRunFinished(reportId) {
         isQuickTestRecipe(recipe) ? 'Quick test finished' : 'Recipe test finished',
         formatTestAuditDetails(recipe, { reportId: reportId, result: result }),
         {
-            eventType: 'lifecycle',
-            entityType: 'report',
-            entityId: reportId || '',
+        eventType: 'lifecycle',
+        entityType: 'report',
+        entityId: reportId || '',
             entityName: recipe && recipe.productName ? recipe.productName : '',
             extra: testAuditExtra(recipe, { reportId: reportId, result: result })
         }
@@ -1596,8 +1596,8 @@ function auditTestRunAborted(reason) {
         isQuickTestRecipe(recipe) ? 'Quick test aborted' : 'Recipe test aborted',
         formatTestAuditDetails(recipe, { reason: reason || 'User aborted test run' }),
         {
-            eventType: 'lifecycle',
-            entityType: 'test',
+        eventType: 'lifecycle',
+        entityType: 'test',
             entityName: recipe && recipe.productName ? recipe.productName : '',
             extra: testAuditExtra(recipe, { reason: reason || '' })
         }
@@ -1610,10 +1610,10 @@ function auditTestRunAutoAborted(reason, stepIndex) {
         isQuickTestRecipe(recipe) ? 'Quick test auto-aborted' : 'Recipe test auto-aborted',
         formatTestAuditDetails(recipe, { reason: reason || 'Hardware stopped the test run' }),
         {
-            eventType: 'lifecycle',
-            entityType: 'test',
+        eventType: 'lifecycle',
+        entityType: 'test',
             entityName: recipe && recipe.productName ? recipe.productName : '',
-            outcome: 'failed',
+        outcome: 'failed',
             extra: testAuditExtra(recipe, {
                 stepIndex: stepIndex != null ? stepIndex : testRunCurrentStepIndex,
                 reason: reason || ''
@@ -1621,6 +1621,83 @@ function auditTestRunAutoAborted(reason, stepIndex) {
         }
     );
 }
+
+/** Audit when pressure-build leak guard stops a run (Check for leaks modal). */
+function auditTestRunAbortedLeaksFound(extraInfo) {
+    var recipe = lastTestRunRecipe;
+    var reason = 'Check for leaks. Pressure not building';
+    var details = formatTestAuditDetails(recipe, { reason: reason });
+    if (extraInfo && typeof extraInfo === 'object') {
+        var bits = [];
+        if (extraInfo.setVacuumMmHg != null) bits.push('set: ' + extraInfo.setVacuumMmHg + ' mmHg');
+        if (extraInfo.liveVacuumMmHg != null) bits.push('live: ' + extraInfo.liveVacuumMmHg + ' mmHg');
+        if (bits.length) details = details + ' | ' + bits.join(' | ');
+    }
+    logAuditEvent(
+        isQuickTestRecipe(recipe) ? 'Quick test aborted - leaks found' : 'Recipe test aborted - leaks found',
+        details,
+        {
+            eventType: 'lifecycle',
+            entityType: 'test',
+            entityName: recipe && recipe.productName ? recipe.productName : '',
+            outcome: 'failed',
+            extra: testAuditExtra(recipe, {
+                reason: reason,
+                setVacuumMmHg: extraInfo && extraInfo.setVacuumMmHg,
+                liveVacuumMmHg: extraInfo && extraInfo.liveVacuumMmHg,
+                leakAbort: true
+            })
+        }
+    );
+}
+window.auditTestRunAbortedLeaksFound = auditTestRunAbortedLeaksFound;
+
+function auditValidationAbortedLeaksFound(extraInfo) {
+    var reason = 'Check for leaks. Pressure not building';
+    var details = validationAdapterLabel() + ' validation aborted - leaks found | ' + reason;
+    if (extraInfo && typeof extraInfo === 'object') {
+        var bits = [];
+        if (extraInfo.setVacuumMmHg != null) bits.push('set: ' + extraInfo.setVacuumMmHg + ' mmHg');
+        if (extraInfo.liveVacuumMmHg != null) bits.push('live: ' + extraInfo.liveVacuumMmHg + ' mmHg');
+        if (bits.length) details = details + ' | ' + bits.join(' | ');
+    }
+    logAuditEvent('Validation aborted - leaks found', details, {
+        eventType: 'lifecycle',
+        entityType: 'validation',
+        outcome: 'failed',
+        extra: {
+            reason: reason,
+            validationType: lastValidationType || '',
+            setVacuumMmHg: extraInfo && extraInfo.setVacuumMmHg,
+            liveVacuumMmHg: extraInfo && extraInfo.liveVacuumMmHg,
+            leakAbort: true
+        }
+    });
+}
+window.auditValidationAbortedLeaksFound = auditValidationAbortedLeaksFound;
+
+function auditCalibrationAbortedLeaksFound(extraInfo) {
+    var reason = 'Check for leaks. Pressure not building';
+    var details = 'Calibration aborted - leaks found | ' + reason;
+    if (extraInfo && typeof extraInfo === 'object') {
+        var bits = [];
+        if (extraInfo.setVacuumMmHg != null) bits.push('set: ' + extraInfo.setVacuumMmHg + ' mmHg');
+        if (extraInfo.liveVacuumMmHg != null) bits.push('live: ' + extraInfo.liveVacuumMmHg + ' mmHg');
+        if (bits.length) details = details + ' | ' + bits.join(' | ');
+    }
+    logAuditEvent('Calibration aborted - leaks found', details, {
+        eventType: 'lifecycle',
+        entityType: 'calibration',
+        outcome: 'failed',
+        extra: {
+            reason: reason,
+            setVacuumMmHg: extraInfo && extraInfo.setVacuumMmHg,
+            liveVacuumMmHg: extraInfo && extraInfo.liveVacuumMmHg,
+            leakAbort: true
+        }
+    });
+}
+window.auditCalibrationAbortedLeaksFound = auditCalibrationAbortedLeaksFound;
 
 async function fetchDateTimeFromBackend() {
     try {
@@ -3407,9 +3484,12 @@ function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
         'Test finished', 'Quick test finished', 'Recipe test finished',
         'Test aborted', 'Quick test aborted', 'Recipe test aborted',
         'Test auto-aborted', 'Quick test auto-aborted', 'Recipe test auto-aborted',
+        'Test aborted - leaks found', 'Quick test aborted - leaks found', 'Recipe test aborted - leaks found',
         'Test performed', 'Quick test performed',
         'Validation started', 'Validation finished', 'Validation aborted',
+        'Validation aborted - leaks found',
         'Calibration started', 'Calibration completed', 'Calibration aborted', 'Calibration performed',
+        'Calibration aborted - leaks found',
         'holder error', 'Holder check error',
         'Validation performed', 'Report saved', 'Report generated', 'Report approved',
         'Report aborted', 'Report aborted (power loss)', 'Report auto-approved (power interruption)', 'Report PDF generated',
@@ -3675,11 +3755,11 @@ function _exportReportsWithFlow(reportIds, opts) {
                 return _gatherPdfHtmlByIdSequentialWithProgress(ids, titleText).then(function (pdfHtmlByIdNeeded) {
                     // Phase 3: stream the export (real percentage per report).
                     setLoadingProgress(0, 'Starting export...', 'Step 2 of 2: mounting + uploading');
-                    var payload = { report_ids: ids, device_path: devicePath };
+                var payload = { report_ids: ids, device_path: devicePath };
                     if (pdfHtmlByIdNeeded && Object.keys(pdfHtmlByIdNeeded).length) {
                         payload.pdf_html_by_id = pdfHtmlByIdNeeded;
                     }
-                    return _streamExportReports(payload, titleText, exportHeaders);
+                return _streamExportReports(payload, titleText, exportHeaders);
                 });
             });
         });
@@ -3856,7 +3936,7 @@ function _saveReportPdfSilent(reportId) {
         return apiRequest(API_BASE + '/api/reports/' + id + '/pdf', {
             method: 'POST',
             body: { html: html }
-        }).then(function () { return true; }).catch(function () { return false; });
+    }).then(function () { return true; }).catch(function () { return false; });
     }).catch(function () { return false; });
 }
 
@@ -4811,7 +4891,7 @@ function initAuditReportsVisibility() {
     var auditBtn = document.querySelector('.reports-filter-audit');
     if (!auditBtn) return;
     // Must set both show and hide — one-way hide left the button stuck after login swap.
-    auditBtn.style.display = canViewAuditLog() ? '' : 'none';
+        auditBtn.style.display = canViewAuditLog() ? '' : 'none';
 }
 
 function filterReports(type) {
@@ -5373,7 +5453,7 @@ function buildTestReportDerived(td, recipe, reportId) {
         var vf = parseFloat(results[results.length - 1].volumeMl);
         if (!isNaN(v0)) initialVol = v0;
         if (!isNaN(vf)) finalVol = vf;
-    }
+        }
     if (initialVol == null && td.initialVolumeMl != null) {
         var iv = parseFloat(td.initialVolumeMl);
         if (!isNaN(iv)) initialVol = iv;
@@ -5519,6 +5599,27 @@ function _releaseDurationSecFromSettings() {
     return sec;
 }
 
+/** Resolve sample size (No. of Samples) for report display from testData / recipe. */
+function resolveReportSampleSize(td, recipe) {
+    td = td || {};
+    recipe = recipe || {};
+    var nested = (recipe && typeof recipe === 'object') ? recipe : {};
+    var candidates = [
+        td.noOfSamples,
+        td.sampleSize,
+        nested.noOfSamples,
+        nested.sampleSize
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+        var raw = candidates[i];
+        if (raw == null || raw === '') continue;
+        var n = parseInt(raw, 10);
+        if (!isNaN(n) && n >= 1) return n;
+    }
+    return null;
+}
+window.resolveReportSampleSize = resolveReportSampleSize;
+
 function _reportDurationFieldsFromPreview(td, recipe, fs) {
     td = td || {};
     recipe = recipe || {};
@@ -5633,6 +5734,9 @@ function buildClientThermalPreviewText(preview) {
         arNo = td.analysisReportNo || recipe.analysisReportNo || '';
     }
     var batchSize = (td.batchSize != null && td.batchSize !== '') ? td.batchSize : recipe.batchSize;
+    var sampleSize = (typeof resolveReportSampleSize === 'function')
+        ? resolveReportSampleSize(td, recipe)
+        : ((td.noOfSamples != null && td.noOfSamples !== '') ? td.noOfSamples : recipe.noOfSamples);
     var setVac = (td.setVacuumMmHg != null) ? td.setVacuumMmHg : recipe.vacuumMmHg;
     var durs = _reportDurationFieldsFromPreview(td, recipe, fs);
     var appr = _approverFieldsFromPreview(preview, td);
@@ -5659,8 +5763,9 @@ function buildClientThermalPreviewText(preview) {
         'TEST INFORMATION',
         dash,
         padPair('Product', recipe.productName || td.productName || 'N/A', 'Batch', recipe.batchNumber || td.batchNumber || 'N/A'),
-        padPair('Batch Size', (batchSize != null && batchSize !== '' ? batchSize : 'N/A'), 'A.R. No', arNo || 'N/A'),
-        padPair('Operator', preview.operatorName || td.operatorName || '--', 'Test Status', statusLabel),
+        padPair('Batch Size', (batchSize != null && batchSize !== '' ? batchSize : 'N/A'), 'Sample Size', (sampleSize != null && sampleSize !== '' ? sampleSize : 'N/A')),
+        padPair('A.R. No', arNo || 'N/A', 'Operator', preview.operatorName || td.operatorName || '--'),
+        padPair('Test Status', statusLabel, '', ''),
         padPair('Start Date', _fmtPreviewDateOnly(td.testStartTime || preview.createdAt), 'Start Time', _fmtPreviewTimeOnly(td.testStartTime || preview.createdAt)),
         padPair('Test Completed Date', _fmtPreviewDateOnly(td.testEndTime || preview.completedAt || preview.createdAt), 'Test Completed Time', _fmtPreviewTimeOnly(td.testEndTime || preview.completedAt || preview.createdAt)),
         '',
@@ -5824,6 +5929,11 @@ function _populateLegacyReportPreview(preview) {
         var batchSizeVal = (td.batchSize != null) ? td.batchSize : recipe.batchSize;
         setReportEl('report-batch-size', (batchSizeVal != null && !isNaN(parseInt(batchSizeVal, 10)))
             ? String(parseInt(batchSizeVal, 10)) : '--');
+        var sampleSizeVal = (typeof resolveReportSampleSize === 'function')
+            ? resolveReportSampleSize(td, recipe)
+            : ((td.noOfSamples != null) ? td.noOfSamples : recipe.noOfSamples);
+        setReportEl('report-sample-size', (sampleSizeVal != null && !isNaN(parseInt(sampleSizeVal, 10)))
+            ? String(parseInt(sampleSizeVal, 10)) : '--');
 
         var samplesBody = document.getElementById('report-vacuum-samples-body');
         var samplesWrap = document.getElementById('report-vacuum-samples-wrap');
@@ -6021,9 +6131,9 @@ function verifyReportApproverInline(method) {
     return apiRequest(API_BASE + '/api/data/auth/approval-verify', {
         method: 'POST',
         body: {
-            method: 'credentials',
-            username: username,
-            password: password,
+        method: 'credentials',
+        username: username,
+        password: password,
             purpose: 'report',
             reportType: reportType
         }
@@ -7364,10 +7474,10 @@ function startTestRun(recipe) {
         isQuick ? 'Quick test loaded' : 'Recipe test loaded',
         formatTestAuditDetails(recipe),
         {
-            eventType: 'lifecycle',
-            entityType: 'recipe',
-            entityName: recipe.productName || '',
-            entityId: recipeId,
+        eventType: 'lifecycle',
+        entityType: 'recipe',
+        entityName: recipe.productName || '',
+        entityId: recipeId,
             extra: testAuditExtra(recipe)
         }
     );
@@ -7616,6 +7726,14 @@ function _abortTestRunVacuumHoldWithError(msg) {
 
 function _abortTestRunPressureNotBuilding() {
     if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
+    // Idempotent: watchdog / STOP path must not spam audits if called twice.
+    if (window._testRunLeakAbortInFlight) {
+        var stopFnEarly = (typeof hardwareLeakStopUntilAck === 'function')
+            ? hardwareLeakStopUntilAck
+            : hardwareLeakStopAwait;
+        return Promise.resolve(stopFnEarly()).catch(function () { return null; });
+    }
+    window._testRunLeakAbortInFlight = true;
     if (testRunIntervalId != null) {
         clearInterval(testRunIntervalId);
         testRunIntervalId = null;
@@ -7629,10 +7747,22 @@ function _abortTestRunPressureNotBuilding() {
     _resetTestRunButtonToStart();
     // Show modal immediately and keep sending STOP until ESP STOP_ACK.
     showAppModal('Check for leaks. Pressure not building', 'Test Run');
+    try {
+        if (typeof auditTestRunAbortedLeaksFound === 'function') {
+            auditTestRunAbortedLeaksFound({
+                setVacuumMmHg: testRunSetVacuumMmHg,
+                liveVacuumMmHg: testRunCurrentVacuumMmHg
+            });
+        }
+    } catch (auditErr) {
+        console.error('leak abort audit failed', auditErr);
+    }
     var stopFn = (typeof hardwareLeakStopUntilAck === 'function')
         ? hardwareLeakStopUntilAck
         : hardwareLeakStopAwait;
-    return Promise.resolve(stopFn()).catch(function () { return null; });
+    return Promise.resolve(stopFn()).catch(function () { return null; }).finally(function () {
+        window._testRunLeakAbortInFlight = false;
+    });
 }
 
 function _finishTestRunVacuumHold() {
@@ -8299,7 +8429,7 @@ function abortTestRunAndSave() {
             : function () { return Promise.resolve(); };
         return lockFn(releaseSec).then(function () {
             setRunCard('run-status-subtext', 'Saving report');
-            return _abortTestRunAndSaveWithRemarks(String(remarks).trim());
+        return _abortTestRunAndSaveWithRemarks(String(remarks).trim());
         });
     });
 }
@@ -8371,8 +8501,8 @@ function _abortTestRunAndSaveWithRemarks(remarks) {
                 });
             }
             _postRunSessionHold = false;
-            goToPage('reports');
-            if (typeof loadReports === 'function') loadReports();
+                goToPage('reports');
+                if (typeof loadReports === 'function') loadReports();
             return { openedPreview: false };
         })
         .catch(function (err) {
@@ -8524,6 +8654,7 @@ function toggleTestRunState() {
         testRunVacuumSamples = [];
         testRunNextSamplePercent = 10;
         window._testRunStartPressureMmHg = null;
+        window._testRunLeakAbortInFlight = false;
         setRunCard('run-current-vacuum', '--');
         setRunCard('run-elapsed-time', '00:00');
         var resultCard = document.getElementById('test-run-result-card');
@@ -8535,11 +8666,11 @@ function toggleTestRunState() {
                 vacuumMmHg: testRunSetVacuumMmHg,
                 durationSec: testRunSetDurationSec,
                 cycles: [{ holdSeconds: testRunSetDurationSec }]
-            }
-        }).then(function () {
-            testRunButtonState = 'abort';
-            if (btn) {
-                btn.disabled = false;
+                }
+            }).then(function () {
+                testRunButtonState = 'abort';
+                if (btn) {
+                    btn.disabled = false;
                 btn.className = 'btn btn-primary val-run-start-btn danger';
                 btn.innerHTML = '<span class="ctrl-icon" aria-hidden="true">&#9726;</span><span id="btn-test-run-label">Stop</span>';
             }
@@ -9182,29 +9313,29 @@ function loadDisableRecipes() {
         if (raw) disabled = JSON.parse(raw) || [];
     } catch (e) {}
 
-    if (!disabled || !disabled.length) {
-        if (msgEl) {
-            msgEl.textContent = 'No disabled recipes.';
-            msgEl.style.display = '';
+        if (!disabled || !disabled.length) {
+            if (msgEl) {
+                msgEl.textContent = 'No disabled recipes.';
+                msgEl.style.display = '';
+            }
+            if (tableEl) tableEl.style.display = 'none';
+            return;
         }
-        if (tableEl) tableEl.style.display = 'none';
-        return;
-    }
 
-    if (msgEl) msgEl.style.display = 'none';
-    if (tableEl) tableEl.style.display = '';
+        if (msgEl) msgEl.style.display = 'none';
+        if (tableEl) tableEl.style.display = '';
 
-    disabled.forEach(function (r) {
-        var tr = document.createElement('tr');
+        disabled.forEach(function (r) {
+            var tr = document.createElement('tr');
         var name = r.name || '--';
         var cylVol = r.cylinderVolume != null ? (r.cylinderVolume + ' ml') : '--';
         var stepsCount = r.stepsCount || '--';
-        tr.innerHTML =
-            '<td>' + name + '</td>' +
-            '<td>' + cylVol + '</td>' +
+            tr.innerHTML =
+                '<td>' + name + '</td>' +
+                '<td>' + cylVol + '</td>' +
             '<td>' + stepsCount + '</td>';
 
-        tbody.appendChild(tr);
+            tbody.appendChild(tr);
     });
 }
 
@@ -9556,7 +9687,7 @@ function saveCombinedValidationReport() {
             if (reportId) {
                 if (typeof openReportPreview === 'function') {
                     openReportPreview(reportId, isAborted ? {} : { setGate: true });
-                } else {
+            } else {
                     _postRunSessionHold = false;
                     goToPage('reports');
                 }
@@ -10239,12 +10370,12 @@ function disableMember(id) {
         return apiRequest(API_BASE + '/api/data/members/' + id, {
             method: 'DELETE'
         }).then(function () {
-            loadMembersAndRender();
+                loadMembersAndRender();
             showAppModal('Member disabled.', 'Members');
         });
     }).catch(function (err) {
-        console.error('Failed to disable member', err);
-        showAppModal('Failed to disable member: ' + (err && err.message ? err.message : 'Unknown error'), 'Members');
+                console.error('Failed to disable member', err);
+                showAppModal('Failed to disable member: ' + (err && err.message ? err.message : 'Unknown error'), 'Members');
     });
 }
 
@@ -10528,7 +10659,7 @@ function applyDateTime() {
                 }
             }
             showAppModal(msg, 'Success', function () {
-                goBack();
+            goBack();
             });
         }).catch(function () {
             showAppModal('Date and time updated. Top bar and RTC now match what you set.', 'Success', function () {
@@ -10935,8 +11066,8 @@ function loadBiometricSetting() {
             applyBiometricSetting(settings.biometricEnabled);
             applyFactoryAutoLogoutSetting(settings);
         } catch (e) {
-            applyBiometricSetting(true);
-            applyFactoryAutoLogoutSetting({});
+        applyBiometricSetting(true);
+        applyFactoryAutoLogoutSetting({});
         }
     });
 }
@@ -11049,19 +11180,19 @@ document.addEventListener('DOMContentLoaded', function () {
     if (typeof applyQuickUspModeToSpeedHeight === 'function') applyQuickUspModeToSpeedHeight();
 
     function resetKioskSessionAndShowLogin() {
-        try { localStorage.removeItem('currentUser'); } catch (e) {}
-        window.currentUser = null;
-        if (typeof currentUser !== 'undefined') currentUser = null;
-        if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
-        window._lastReportPreview = null;
-        var app = document.querySelector('.app-container');
-        if (app) app.classList.remove('report-approval-locked');
-        var resetUrl = (API_BASE || '') + '/api/data/auth/session-ui-reset';
-        fetch(resetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-            .catch(function () {})
-            .finally(function () {
-                showLoginScreen();
-            });
-    }
+    try { localStorage.removeItem('currentUser'); } catch (e) {}
+    window.currentUser = null;
+    if (typeof currentUser !== 'undefined') currentUser = null;
+    if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+    window._lastReportPreview = null;
+    var app = document.querySelector('.app-container');
+    if (app) app.classList.remove('report-approval-locked');
+    var resetUrl = (API_BASE || '') + '/api/data/auth/session-ui-reset';
+    fetch(resetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .catch(function () {})
+        .finally(function () {
+            showLoginScreen();
+        });
+}
     resetKioskSessionAndShowLogin();
 });             

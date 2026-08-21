@@ -36,6 +36,8 @@ def generate_report(
             "name": recipe.get("name") or recipe.get("productName"),
             "productName": recipe.get("productName"),
             "batchNumber": recipe.get("batchNumber"),
+            "batchSize": recipe.get("batchSize"),
+            "noOfSamples": recipe.get("noOfSamples") if recipe.get("noOfSamples") not in (None, "") else recipe.get("sampleSize"),
             "unit": recipe.get("unit"),
         }
     if not factory_settings:
@@ -978,6 +980,13 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
         batch_size = td.get("batchSize")
         if batch_size in (None, ""):
             batch_size = recipe.get("batchSize")
+        sample_size = td.get("noOfSamples")
+        if sample_size in (None, ""):
+            sample_size = td.get("sampleSize")
+        if sample_size in (None, ""):
+            sample_size = recipe.get("noOfSamples")
+        if sample_size in (None, ""):
+            sample_size = recipe.get("sampleSize")
 
         if rtype == "calibration":
             test_section = (
@@ -999,7 +1008,8 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
                 '<h3>TEST INFORMATION</h3>'
                 '<table class="ident">'
                 '<tr><th>Product Name</th><td>{prod}</td><th>Batch No</th><td>{batch}</td></tr>'
-                '<tr><th>Batch Size</th><td>{bsize}</td><th>Analysis Report No.</th><td>{ar}</td></tr>'
+                '<tr><th>Batch Size</th><td>{bsize}</td><th>Sample Size</th><td>{ssize}</td></tr>'
+                '<tr><th>Analysis Report No.</th><td colspan="3">{ar}</td></tr>'
                 '<tr><th>Operator</th><td>{op}</td><th>Test Status</th><td>{status}</td></tr>'
                 '<tr><th>Start Date</th><td>{start_date}</td><th>Start Time</th><td>{start_time}</td></tr>'
                 '<tr><th>Test Completed Date</th><td>{end_date}</td><th>Test Completed Time</th><td>{end_time}</td></tr>'
@@ -1017,6 +1027,7 @@ def build_report_pdf_html(report: Dict[str, Any]) -> str:
                 prod=_html_esc(recipe.get("productName") or td.get("productName")),
                 batch=_html_esc(recipe.get("batchNumber") or td.get("batchNumber")),
                 bsize=_html_esc(batch_size if batch_size not in (None, "") else "--"),
+                ssize=_html_esc(sample_size if sample_size not in (None, "") else "--"),
                 ar=_html_esc(ar_disp or "--"),
                 start_date=_html_esc(start_parts.get("date") or "--"),
                 start_time=_html_esc(start_parts.get("time") or "--"),
