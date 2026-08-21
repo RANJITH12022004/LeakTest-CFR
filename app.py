@@ -7,6 +7,7 @@ Serves static files and REST API for data, auth, audit, reports, and print.
 import json
 import os
 import pathlib
+import re
 import secrets
 import atexit
 import signal
@@ -1037,6 +1038,51 @@ def _report_requires_approval(report):
     return rtype in ("test", "validation", "calibration")
 
 
+def _validation_report_name_for_outcome(report, outcome_label):
+    """Stable validation list/title name. Never embeds 'Pending Approval'."""
+    raw = str((report or {}).get("name") or "").strip()
+    base = "Validation - Vacuum"
+    low = raw.lower()
+    if "pressure decay" in low or str((report or {}).get("validationSubtype") or "").strip().lower() == "load":
+        base = "Validation - Pressure Decay"
+    elif "vacuum decay" in low:
+        base = "Validation - Vacuum Decay"
+    elif raw.startswith("Validation - ") and " - " in raw[len("Validation - "):]:
+        # Keep method segment before a known outcome suffix.
+        rest = raw[len("Validation - "):]
+        for suffix in ("Pending Approval", "Pass", "Fail", "Aborted", "PASS", "FAIL"):
+            marker = " - " + suffix
+            if rest.endswith(marker):
+                rest = rest[: -len(marker)]
+                break
+        if rest.strip():
+            base = "Validation - " + rest.strip()
+    label = str(outcome_label or "").strip()
+    if not label:
+        return base
+    return "{} - {}".format(base, label)
+
+
+def _apply_validation_name_after_approval(report, pf):
+    """When a validation report is approved, replace any Pending Approval name with Pass/Fail."""
+    if not isinstance(report, dict):
+        return report
+    if (report.get("type") or "").strip().lower() != "validation":
+        return report
+    pf_u = str(pf or "").strip().upper()
+    if pf_u not in ("PASS", "FAIL"):
+        return report
+    label = "Pass" if pf_u == "PASS" else "Fail"
+    report["name"] = _validation_report_name_for_outcome(report, label)
+    report["status"] = label
+    td = report.get("testData")
+    if isinstance(td, dict):
+        td = dict(td)
+        td["status"] = label
+        report["testData"] = td
+    return report
+
+
 def _check_report_approved_for_print_export(report=None, report_id=None, report_data=None):
     """Return (json_response, status_code) if blocked, else None."""
     if report is None and report_id is not None:
@@ -1783,10 +1829,17 @@ def create_report():
             run_status = str(td.get("status") or enriched.get("status") or "").strip().lower()
             if run_status == "aborted":
                 enriched["reportApprovalStatus"] = "aborted"
+                if (enriched.get("type") or "").strip().lower() == "validation":
+                    enriched["name"] = _validation_report_name_for_outcome(enriched, "Aborted")
             else:
                 enriched["reportApprovalStatus"] = "pending"
                 for k in ("approvalPassFail", "approvalRemarks", "approvedBy", "approvedAt", "approvedByUsername"):
                     enriched.pop(k, None)
+                # Never persist "Pending Approval" inside the report title — approval is a separate field.
+                if (enriched.get("type") or "").strip().lower() == "validation":
+                    nm = str(enriched.get("name") or "")
+                    if re.search(r"pending\s*approval", nm, flags=re.I) or not nm.strip():
+                        enriched["name"] = _validation_report_name_for_outcome(enriched, None)
         report_id = data_service.save_report(enriched)
         enriched = report_service.enrich_report_context({**enriched, "id": report_id})
         data_service.save_report(enriched)
@@ -1900,6 +1953,7 @@ def approve_report(report_id):
         report["approvedByName"] = verified_name
         report["approvedByUsername"] = verified_username
         report["approvedAt"] = _utc_now_iso()
+        report = _apply_validation_name_after_approval(report, pf)
         data_service.save_report(report)
         pdf_ok = False
         try:
