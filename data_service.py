@@ -513,22 +513,40 @@ def _save_json_file(filepath: pathlib.Path, data):
 # =================== RECIPE OPERATIONS ==========================
 
 
-def list_recipes(filter_type=None):
-    """List all recipes, optionally filtered by type."""
+def _normalize_recipe_status(recipe: Dict[str, Any]) -> str:
+    status = str((recipe or {}).get("status") or "active").strip().lower()
+    return status if status in ("active", "disabled") else "active"
+
+
+def _normalize_recipe_record(recipe: Dict[str, Any]) -> Dict[str, Any]:
+    item = dict(recipe or {})
+    item["status"] = _normalize_recipe_status(item)
+    return item
+
+
+def list_recipes(filter_type=None, status: str = "all"):
+    """List recipes, optionally filtered by type and active/disabled status."""
     recipes = _load_critical_json("recipes.json", default=[])
     if not isinstance(recipes, list):
         recipes = []
+    recipes = [_normalize_recipe_record(r) if isinstance(r, dict) else r for r in recipes]
+    recipes = [r for r in recipes if isinstance(r, dict)]
     if filter_type:
         recipes = [r for r in recipes if r.get("type") == filter_type]
+    status_norm = str(status or "all").strip().lower()
+    if status_norm == "disabled":
+        recipes = [r for r in recipes if r.get("status") == "disabled"]
+    elif status_norm == "active":
+        recipes = [r for r in recipes if r.get("status") != "disabled"]
     return recipes
 
 
-def get_recipe(recipe_id: int):
+def get_recipe(recipe_id: int, include_disabled: bool = False):
     """Get recipe by ID."""
     want = _norm_recipe_id(recipe_id)
     if want is None:
         return None
-    recipes = list_recipes()
+    recipes = list_recipes(status="all" if include_disabled else "active")
     for recipe in recipes:
         if _norm_recipe_id(recipe.get("id")) == want:
             return recipe
@@ -548,7 +566,7 @@ def _norm_recipe_id(recipe_id) -> Optional[int]:
 def save_recipe(recipe_data: Dict[str, Any]) -> int:
     """Save recipe (create or update). Enforces maxRecipes from factory settings."""
     recipes_path = _get_storage_path("recipes.json")
-    recipes = list_recipes()
+    recipes = list_recipes(status="all")
     recipe_id = _norm_recipe_id(recipe_data.get("id"))
     if recipe_id is not None:
         recipe_data["id"] = recipe_id
@@ -559,12 +577,21 @@ def save_recipe(recipe_data: Dict[str, Any]) -> int:
     if not is_update:
         fs = get_factory_settings()
         max_recipes = int(fs.get("maxRecipes") or 150)
-        if len(recipes) >= max_recipes:
+        active_recipes = [r for r in recipes if _normalize_recipe_status(r) != "disabled"]
+        if len(active_recipes) >= max_recipes:
             raise ValueError("Your limit for recipes reached. Contact support for upgrade.")
+
+    incoming_had_status = "status" in recipe_data
+    recipe_data = _normalize_recipe_record(recipe_data)
 
     if recipe_id and is_update:
         for i, r in enumerate(recipes):
-            if r.get("id") == recipe_id:
+            if _norm_recipe_id(r.get("id")) == recipe_id:
+                if not incoming_had_status and r.get("status"):
+                    recipe_data["status"] = _normalize_recipe_status(r)
+                if recipe_data.get("status") != "disabled":
+                    for key in ("disabledAt", "disabledBy", "disabledByUsername"):
+                        recipe_data.pop(key, None)
                 recipes[i] = recipe_data
                 _save_json_file(recipes_path, recipes)
                 return recipe_id
@@ -583,15 +610,43 @@ def save_recipe(recipe_data: Dict[str, Any]) -> int:
 
 
 def delete_recipe(recipe_id: int) -> bool:
-    """Delete recipe by ID."""
+    """Backward-compatible alias for disable_recipe()."""
+    return disable_recipe(recipe_id) is not None
+
+
+def disable_recipe(recipe_id: int, disabled_by: Optional[str] = None, disabled_by_username: Optional[str] = None):
+    """Soft-disable recipe by ID and keep it in storage for re-enable."""
     recipes_path = _get_storage_path("recipes.json")
-    recipes = list_recipes()
-    original_len = len(recipes)
-    recipes = [r for r in recipes if r.get("id") != recipe_id]
-    if len(recipes) < original_len:
-        _save_json_file(recipes_path, recipes)
-        return True
-    return False
+    recipes = list_recipes(status="all")
+    for i, recipe in enumerate(recipes):
+        if _norm_recipe_id(recipe.get("id")) == _norm_recipe_id(recipe_id):
+            updated = _normalize_recipe_record(recipe)
+            updated["status"] = "disabled"
+            updated["disabledAt"] = datetime.utcnow().isoformat() + "Z"
+            if disabled_by is not None:
+                updated["disabledBy"] = str(disabled_by or "").strip() or "--"
+            if disabled_by_username is not None:
+                updated["disabledByUsername"] = str(disabled_by_username or "").strip() or "--"
+            recipes[i] = updated
+            _save_json_file(recipes_path, recipes)
+            return updated
+    return None
+
+
+def enable_recipe(recipe_id: int):
+    """Re-enable a previously disabled recipe."""
+    recipes_path = _get_storage_path("recipes.json")
+    recipes = list_recipes(status="all")
+    for i, recipe in enumerate(recipes):
+        if _norm_recipe_id(recipe.get("id")) == _norm_recipe_id(recipe_id):
+            updated = _normalize_recipe_record(recipe)
+            updated["status"] = "active"
+            for key in ("disabledAt", "disabledBy", "disabledByUsername"):
+                updated.pop(key, None)
+            recipes[i] = updated
+            _save_json_file(recipes_path, recipes)
+            return updated
+    return None
 
 
 # =================== REPORT OPERATIONS ==========================

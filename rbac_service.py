@@ -29,7 +29,7 @@ PERMISSION_CARD_KEYS = [
 PERM_CARD_EXPAND: Dict[str, List[str]] = {
     "perm_test_access": ["quick-test", "recipe-test"],
     "perm_test_report_approve": ["test-report-approve"],
-    "perm_recipe_manage": ["recipe-manage", "recipe-list", "recipe-edit", "settings"],
+    "perm_recipe_manage": ["recipe-manage", "recipe-list", "recipe-edit", "settings", "disable-recipes"],
     "perm_recipe_approve": ["recipe-approve"],
     "perm_profile_admin": [
         "user-manage",
@@ -198,11 +198,19 @@ def member_has_internal(member: Dict[str, Any], internal_key: str) -> bool:
     return internal_key in member_expanded_internal_keys(member)
 
 
+# Internals added to a card later; must not block v1→v2 card detection.
+PERM_CARD_EXPAND_OPTIONAL: Dict[str, Set[str]] = {
+    "perm_recipe_manage": {"disable-recipes"},
+}
+
+
 def _internal_to_perm_cards_strict(internal: Set[str]) -> List[str]:
-    """Grant a permission card only if every expanded internal key is present."""
+    """Grant a permission card only if every required expanded internal key is present."""
     cards: List[str] = []
     for card, keys in PERM_CARD_EXPAND.items():
-        if keys and all(k in internal for k in keys):
+        optional = PERM_CARD_EXPAND_OPTIONAL.get(card) or set()
+        required = [k for k in keys if k not in optional]
+        if required and all(k in internal for k in required):
             cards.append(card)
     return sorted(cards)
 
