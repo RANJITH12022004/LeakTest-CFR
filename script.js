@@ -1868,7 +1868,9 @@ function updateSettingsVisibility() {
     var disableCard = document.querySelector('.settings-disable');
     if (disableCard) {
         var show =
-            (u && typeof canAccess === 'function' && canAccess(u, 'disable-recipes')) ||
+            (u && typeof canAccess === 'function' && (
+                canAccess(u, 'recipe-manage') || canAccess(u, 'disable-recipes')
+            )) ||
             rl === 'factory';
         disableCard.style.display = show ? '' : 'none';
     }
@@ -6082,7 +6084,7 @@ function _populateLegacyReportPreview(preview) {
     setReportEl('report-approved-by', apprFields.name !== '--'
         ? (apprFields.id !== '--' ? (apprFields.name + ' / ' + apprFields.id) : apprFields.name)
         : apprFields.id);
-    setReportEl('report-approval-pass-fail', preview.approvalPassFail || '--');
+    setReportEl('report-approval-pass-fail', preview.approvalPassFail || (String(preview.reportApprovalStatus || '').toLowerCase() === 'pending' ? '' : '--'));
     var apprRem = preview.approvalRemarks;
     setReportEl('report-approval-remarks', (apprRem != null && String(apprRem).trim() !== '') ? apprRem : 'N/A');
 }
@@ -7753,6 +7755,73 @@ function _abortTestRunVacuumHoldWithError(msg) {
     showAppModal('Hardware error during test: ' + msg, 'Test Run');
 }
 
+function _applyLeakAbortReportFields(payload) {
+    var remarks = 'Check for leaks. Pressure not building';
+    if (!payload) return payload;
+    payload.testData = payload.testData || {};
+    payload.status = 'aborted';
+    payload.testData.status = 'aborted';
+    payload.remarks = remarks;
+    payload.testData.remarks = remarks;
+    payload.leakAbort = true;
+    payload.testData.leakAbort = true;
+    delete payload.result;
+    delete payload.testData.result;
+    delete payload.approvalPassFail;
+    delete payload.testData.approvalPassFail;
+    return payload;
+}
+window._applyLeakAbortReportFields = _applyLeakAbortReportFields;
+
+function _saveLeakAbortTestReportAndOpenPreview() {
+    if (typeof _freezeTestRunBuildDurationSec === 'function') {
+        _freezeTestRunBuildDurationSec({ finalize: true });
+    }
+    var payload = buildTestRunReportPayload();
+    if (!payload) {
+        if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
+        return Promise.resolve();
+    }
+    _applyLeakAbortReportFields(payload);
+    var buildA = parseInt(payload.testData.buildDurationSec, 10);
+    if (isNaN(buildA)) buildA = 0;
+    var holdA = payload.testData.actualDurationSec != null
+        ? parseInt(payload.testData.actualDurationSec, 10)
+        : 0;
+    if (isNaN(holdA)) holdA = 0;
+    var releaseA = parseInt(payload.testData.releaseDurationSec != null
+        ? payload.testData.releaseDurationSec
+        : payload.testData.releaseTimeSec, 10);
+    if (isNaN(releaseA)) releaseA = 0;
+    payload.testData.holdDurationSec = holdA;
+    payload.testData.totalDurationSec = buildA + holdA + releaseA;
+    payload.testData.durationSeconds = holdA;
+    stampOperatorOnTestReportPayload(payload);
+    _postRunSessionHold = true;
+    if (typeof markAutoLogoutActivity === 'function') markAutoLogoutActivity();
+    return apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: payload })
+        .then(function (result) {
+            if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
+            var reportId = (result && result.id) ? result.id : null;
+            if (reportId && typeof openReportPreview === 'function') {
+                return openReportPreview(reportId, { setGate: true });
+            }
+            _postRunSessionHold = false;
+            goToPage('reports');
+            return null;
+        })
+        .catch(function (err) {
+            _postRunSessionHold = false;
+            if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
+            console.error('Leak abort save report failed', err);
+            showAppModal(
+                'Failed to save leak abort report.'
+                    + ((err && err.message) ? ('\n\n' + err.message) : ''),
+                'Report'
+            );
+        });
+}
+
 function _abortTestRunPressureNotBuilding() {
     if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
     if (typeof clearTestRunCheckpointHeartbeat === 'function') clearTestRunCheckpointHeartbeat();
@@ -7764,6 +7833,9 @@ function _abortTestRunPressureNotBuilding() {
         return Promise.resolve(stopFnEarly()).catch(function () { return null; });
     }
     window._testRunLeakAbortInFlight = true;
+    if (typeof _freezeTestRunBuildDurationSec === 'function') {
+        _freezeTestRunBuildDurationSec({ finalize: true });
+    }
     if (testRunIntervalId != null) {
         clearInterval(testRunIntervalId);
         testRunIntervalId = null;
@@ -7771,12 +7843,9 @@ function _abortTestRunPressureNotBuilding() {
     testRunButtonState = 'start';
     testRunHoldStarted = false;
     _closeTestRunHardwareEs();
-    if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
     setRunCard('run-status-text', 'Error');
     setRunCard('run-status-subtext', 'Pressure not building');
     _resetTestRunButtonToStart();
-    // Show modal immediately and keep sending STOP until ESP STOP_ACK.
-    showAppModal('Check for leaks. Pressure not building', 'Test Run');
     try {
         if (typeof auditTestRunAbortedLeaksFound === 'function') {
             auditTestRunAbortedLeaksFound({
@@ -7787,6 +7856,10 @@ function _abortTestRunPressureNotBuilding() {
     } catch (auditErr) {
         console.error('leak abort audit failed', auditErr);
     }
+    // Report opens only after the leak modal is dismissed. Do not clear checkpoint until save.
+    showAppModal('Check for leaks. Pressure not building', 'Test Run', function () {
+        _saveLeakAbortTestReportAndOpenPreview();
+    });
     var stopFn = (typeof hardwareLeakStopUntilAck === 'function')
         ? hardwareLeakStopUntilAck
         : hardwareLeakStopAwait;
@@ -8979,39 +9052,58 @@ function loadRecipeForEdit() {
 }
 
 function disableRecipe(id) {
-    apiRequest(API_BASE + '/api/data/recipes/' + id, { method: 'DELETE' }).then(function () {
-        try {
-            // Keep a local list of disabled recipes so the Disable page only shows those
-            var disabled = [];
-            try {
-                var raw = localStorage.getItem('disabledRecipes');
-                if (raw) disabled = JSON.parse(raw) || [];
-            } catch (e) {}
-
-            var recipe = null;
-            if (Array.isArray(lastDisplayedRecipes)) {
-                recipe = lastDisplayedRecipes.find(function (r) { return r.id === id; }) || null;
-            }
-
-            if (recipe) {
-                var entry = {
-                    id: recipe.id,
-                    name: recipe.productName || recipe.name || '--',
-                    cylinderVolume: (recipe.cylinder && (recipe.cylinder.volume || recipe.cylinder.volumeMl)) || null,
-                    stepsCount: recipe.stepCount || (recipe.steps && recipe.steps.length) || null
-                };
-                // Avoid duplicates
-                disabled = disabled.filter(function (d) { return d.id !== entry.id; });
-                disabled.push(entry);
-                localStorage.setItem('disabledRecipes', JSON.stringify(disabled));
-            }
-        } catch (e) {}
-
-        loadManageRecipes();
-        showAppModal('Recipe disabled.', 'Disable Recipe');
+    if (window._recipeDisableEnableInFlight) return;
+    openApprovalVerifyModal(_approvalVerifyModalOptionsForRecipe()).then(function (token) {
+        if (!token) {
+            showAppModal('Recipe not disabled. Recipe approval credentials are required.', 'Disable Recipe');
+            return;
+        }
+        window._recipeDisableEnableInFlight = true;
+        return apiRequest(API_BASE + '/api/data/recipes/' + id, {
+            method: 'DELETE',
+            headers: { 'X-Approval-Verify-Token': token }
+        }).then(function () {
+            loadManageRecipes();
+            if (typeof loadDisableRecipes === 'function') loadDisableRecipes();
+            showAppModal('Recipe disabled.', 'Disable Recipe');
+        }).catch(function (err) {
+            var msg = (err && err.message) ? err.message : 'Failed to disable recipe.';
+            showAppModal(msg, 'Disable Recipe');
+        }).finally(function () {
+            window._recipeDisableEnableInFlight = false;
+        });
     }).catch(function (err) {
-        var msg = (err && err.message) ? err.message : 'Failed to disable recipe.';
-        showAppModal(msg, 'Disable Recipe');
+        if (err && err.message && err.message.indexOf('QA verification UI') >= 0) {
+            showAppModal(err.message, 'Disable Recipe');
+        }
+    });
+}
+
+function enableRecipe(id) {
+    if (window._recipeDisableEnableInFlight) return;
+    openApprovalVerifyModal(_approvalVerifyModalOptionsForRecipe()).then(function (token) {
+        if (!token) {
+            showAppModal('Recipe not re-enabled. Recipe approval credentials are required.', 'Enable Recipe');
+            return;
+        }
+        window._recipeDisableEnableInFlight = true;
+        return apiRequest(API_BASE + '/api/data/recipes/' + id + '/enable', {
+            method: 'POST',
+            headers: { 'X-Approval-Verify-Token': token }
+        }).then(function () {
+            loadDisableRecipes();
+            if (typeof loadManageRecipes === 'function') loadManageRecipes();
+            showAppModal('Recipe re-enabled.', 'Enable Recipe');
+        }).catch(function (err) {
+            var msg = (err && err.message) ? err.message : 'Failed to re-enable recipe.';
+            showAppModal(msg, 'Enable Recipe');
+        }).finally(function () {
+            window._recipeDisableEnableInFlight = false;
+        });
+    }).catch(function (err) {
+        if (err && err.message && err.message.indexOf('QA verification UI') >= 0) {
+            showAppModal(err.message, 'Enable Recipe');
+        }
     });
 }
 
@@ -9186,8 +9278,11 @@ function closeCreateRecipeContinueModal() {
     if (overlay) overlay.style.display = 'none';
 }
 
-function getRecipes() {
-    return apiRequest(API_BASE + '/api/data/recipes', {
+function getRecipes(opts) {
+    opts = opts || {};
+    var qs = '';
+    if (opts.status) qs = '?status=' + encodeURIComponent(opts.status);
+    return apiRequest(API_BASE + '/api/data/recipes' + qs, {
         method: 'GET'
     }).then(function (data) {
         return (data && data.recipes) ? data.recipes : [];
@@ -9412,12 +9507,7 @@ function loadDisableRecipes() {
 
     tbody.innerHTML = '';
 
-    var disabled = [];
-    try {
-        var raw = localStorage.getItem('disabledRecipes');
-        if (raw) disabled = JSON.parse(raw) || [];
-    } catch (e) {}
-
+    getRecipes({ status: 'disabled' }).then(function (disabled) {
         if (!disabled || !disabled.length) {
             if (msgEl) {
                 msgEl.textContent = 'No disabled recipes.';
@@ -9432,15 +9522,25 @@ function loadDisableRecipes() {
 
         disabled.forEach(function (r) {
             var tr = document.createElement('tr');
-        var name = r.name || '--';
-        var cylVol = r.cylinderVolume != null ? (r.cylinderVolume + ' ml') : '--';
-        var stepsCount = r.stepsCount || '--';
+            var name = r.productName || r.name || '--';
+            var vacStr = (r.vacuumMmHg != null && !isNaN(parseFloat(r.vacuumMmHg))) ? String(r.vacuumMmHg) : '--';
+            var durSec = parseInt(r.durationSec, 10);
+            var timeStr = (!isNaN(durSec) && durSec > 0 && typeof formatMmSs === 'function')
+                ? formatMmSs(durSec)
+                : (r.durationDisplay || '--');
             tr.innerHTML =
                 '<td>' + name + '</td>' +
-                '<td>' + cylVol + '</td>' +
-            '<td>' + stepsCount + '</td>';
-
+                '<td>' + vacStr + '</td>' +
+                '<td>' + timeStr + '</td>' +
+                '<td class="actions-cell"><button type="button" class="btn-action btn-load" onclick="enableRecipe(' + (r.id || 0) + ')">Re-enable</button></td>';
             tbody.appendChild(tr);
+        });
+    }).catch(function () {
+        if (msgEl) {
+            msgEl.textContent = 'Unable to load disabled recipes.';
+            msgEl.style.display = '';
+        }
+        if (tableEl) tableEl.style.display = 'none';
     });
 }
 

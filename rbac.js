@@ -68,7 +68,7 @@ var PERMISSION_CARD_KEYS = [
 var PERM_CARD_EXPAND = {
   perm_test_access: ['quick-test', 'recipe-test'],
   perm_test_report_approve: ['test-report-approve'],
-  perm_recipe_manage: ['recipe-manage', 'recipe-list', 'recipe-edit', 'settings'],
+  perm_recipe_manage: ['recipe-manage', 'recipe-list', 'recipe-edit', 'settings', 'disable-recipes'],
   perm_recipe_approve: ['recipe-approve'],
   perm_profile_admin: [
     'user-manage',
@@ -93,7 +93,7 @@ var PERM_CARD_EXPAND = {
 var PERMISSION_CARD_CATALOG = [
   { key: 'perm_test_access', label: 'Test access', description: 'Quick test (including step setup), recipe-based test runs, and configuring recipe steps.', accent: 0 },
   { key: 'perm_test_report_approve', label: 'Test report approval', description: 'Approve pending test and validation reports.', accent: 1 },
-  { key: 'perm_recipe_manage', label: 'Manage recipes', description: 'Create and edit recipes.', accent: 2 },
+  { key: 'perm_recipe_manage', label: 'Manage recipes', description: 'Create, edit, enable, and disable recipes.', accent: 2 },
   { key: 'perm_recipe_approve', label: 'Recipe approval', description: 'Participate in recipe approval / verification.', accent: 3 },
   { key: 'perm_profile_admin', label: 'Profile management', description: 'Add, disable, edit, lock, unlock, and change roles for profiles.', accent: 4 },
   { key: 'perm_validation_test', label: 'Validation test access', description: 'Run validation tests (Vacuum).', accent: 5 },
@@ -367,6 +367,9 @@ function checkNavigationAccess(screenId) {
   var user = window.currentUser || role;
   if (screenId === 'reports' || screenId === 'report-preview') {
     return canAccess(user, 'reports-view') || canAccess(user, 'audit-view');
+  }
+  if (screenId === 'disable-recipes') {
+    return canAccess(user, 'disable-recipes') || canAccess(user, 'recipe-manage');
   }
   return canAccess(user, featureKey);
 }

@@ -95,6 +95,23 @@ app = Flask(__name__)
 if CORS:
     CORS(app)
 
+
+@app.after_request
+def _disable_kiosk_ui_cache(response):
+    """Always reload deployed UI assets; Chromium kiosk can otherwise keep stale handlers."""
+    path = str(request.path or "").lower()
+    if request.method == "GET" and (
+        path == "/"
+        or path.endswith(".html")
+        or path.endswith(".js")
+        or path.endswith(".css")
+    ):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 try:
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1038,6 +1055,21 @@ def _report_requires_approval(report):
     return rtype in ("test", "validation", "calibration")
 
 
+def _is_leak_abort_report(data):
+    """Pressure-not-building abort: run status aborted, but QA still must Pass/Fail."""
+    if not isinstance(data, dict):
+        return False
+    def _truthy(v):
+        if v is True:
+            return True
+        return str(v or "").strip().lower() in ("1", "true", "yes")
+    td = data.get("testData") if isinstance(data.get("testData"), dict) else {}
+    if _truthy(data.get("leakAbort")) or _truthy(td.get("leakAbort")):
+        return True
+    remarks = str(data.get("remarks") or td.get("remarks") or "").strip()
+    return remarks == "Check for leaks. Pressure not building"
+
+
 def _validation_report_name_for_outcome(report, outcome_label):
     """Stable validation list/title name. Never embeds 'Pending Approval'."""
     raw = str((report or {}).get("name") or "").strip()
@@ -1360,6 +1392,14 @@ def _apply_recipe_approval_for_session_creator(processed):
         processed.pop(k, None)
 
 
+def _recipe_verifier_is_current_operator(verified):
+    """True when the purported second approver is the logged-in recipe operator."""
+    cur = data_service.get_current_user() or {}
+    operator_username = _norm_username(cur.get("username") or cur.get("name"))
+    verifier_username = _norm_username((verified or {}).get("username"))
+    return bool(operator_username and verifier_username and operator_username == verifier_username)
+
+
 def _apply_recipe_approval_verify_token(processed, remarks=""):
     """
     When X-Approval-Verify-Token is present, approve a pending recipe in the same save
@@ -1376,6 +1416,8 @@ def _apply_recipe_approval_verify_token(processed, remarks=""):
     verified_name = (verified.get("name") or verified.get("username") or "—").strip()
     verified_role = (verified.get("role") or "").strip()
     verified_username = _norm_username(verified.get("username"))
+    if _recipe_verifier_is_current_operator(verified):
+        return "A second person must approve this recipe action.", False
     by_line = verified_name
     if verified_role:
         by_line = "{} ({})".format(verified_name, _display_role_label(verified_role))
@@ -1385,6 +1427,24 @@ def _apply_recipe_approval_verify_token(processed, remarks=""):
     processed["recipeApprovedByUsername"] = verified_username
     processed["recipeApprovalRemarks"] = (remarks or "").strip()
     return None, True
+
+
+def _require_recipe_second_person_approval():
+    """Same second-person recipe-approve token used on recipe create/save."""
+    verified, verify_err = _consume_approval_verify_token("recipe")
+    if verify_err:
+        return None, (jsonify({"error": verify_err}), 401)
+    if _recipe_verifier_is_current_operator(verified):
+        return None, (jsonify({"error": "A second person must approve this recipe action."}), 403)
+    return verified, None
+
+
+def _recipe_change_verified_audit_parts(verified):
+    verified = verified or {}
+    v_name = (verified.get("name") or verified.get("username") or "--").strip() or "--"
+    v_user = verified.get("username") or v_name
+    v_role = (verified.get("role") or "").strip() or "--"
+    return v_user, v_role, v_name
 
 
 _approval_verify_tokens = {}
@@ -1524,12 +1584,25 @@ def serve_index():
 def get_recipes():
     try:
         gate = _require_any_session_internal(
-            ["recipe-list", "quick-test", "recipe-test", "recipe-edit"],
+            ["recipe-list", "quick-test", "recipe-test", "recipe-edit", "recipe-manage", "disable-recipes"],
             "Forbidden. You do not have permission to view recipes.",
         )
         if gate:
             return gate
-        recipes = data_service.list_recipes()
+        status = str(request.args.get("status") or "active").strip().lower()
+        if status not in ("active", "disabled", "all"):
+            status = "active"
+        if status in ("disabled", "all"):
+            can_manage = (
+                _session_has_internal("recipe-manage")
+                or _session_has_internal("disable-recipes")
+                or _session_has_internal("recipe-delete")
+            )
+            if not can_manage:
+                if status == "disabled":
+                    return jsonify({"error": "Forbidden. You do not have permission to view disabled recipes."}), 403
+                status = "active"
+        recipes = data_service.list_recipes(status=status)
         return jsonify({"recipes": recipes}), 200
     except Exception as e:
         app.logger.exception("Error listing recipes")
@@ -1554,7 +1627,8 @@ def create_recipe():
         remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
         tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
         if tok_err:
-            return jsonify({"error": tok_err}), 401
+            code = 403 if "second person" in str(tok_err).lower() else 401
+            return jsonify({"error": tok_err}), code
         recipe_id = data_service.save_recipe(processed)
         rd = format_recipe_audit_details(processed, recipe_id=recipe_id)
         _audit(None, None, "Recipe created", "Recipe created: {}".format(rd))
@@ -1574,7 +1648,7 @@ def create_recipe():
 def get_recipe(recipe_id):
     try:
         gate = _require_any_session_internal(
-            ["recipe-list", "quick-test", "recipe-test", "recipe-edit"],
+            ["recipe-list", "quick-test", "recipe-test", "recipe-edit", "recipe-manage", "disable-recipes"],
             "Forbidden. You do not have permission to view recipes.",
         )
         if gate:
@@ -1607,7 +1681,8 @@ def update_recipe(recipe_id):
         remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
         tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
         if tok_err:
-            return jsonify({"error": tok_err}), 401
+            code = 403 if "second person" in str(tok_err).lower() else 401
+            return jsonify({"error": tok_err}), code
         existing = data_service.get_recipe(recipe_id)
         data_service.save_recipe(processed)
         rd = diff_recipe_audit_details(existing, processed, recipe_id=recipe_id)
@@ -1628,25 +1703,71 @@ def update_recipe(recipe_id):
 def delete_recipe(recipe_id):
     try:
         gate = _require_any_session_internal(
-            ["recipe-delete", "disable-recipes"],
+            ["recipe-delete", "disable-recipes", "recipe-manage"],
             "Forbidden. You do not have permission to disable recipes.",
         )
         if gate:
             return gate
-        existing = data_service.get_recipe(recipe_id)
-        success = data_service.delete_recipe(recipe_id)
-        if success:
+        verified, gate_verify = _require_recipe_second_person_approval()
+        if gate_verify:
+            return gate_verify
+        existing = data_service.get_recipe(recipe_id, include_disabled=True)
+        session_user = data_service.get_current_user() or {}
+        updated = data_service.disable_recipe(
+            recipe_id,
+            disabled_by=(
+                (request.headers.get("X-User-Name") or request.headers.get("X-User-Username") or "").strip()
+                or str(session_user.get("name") or session_user.get("username") or "").strip()
+                or "--"
+            ),
+            disabled_by_username=(
+                (request.headers.get("X-User-Username") or "").strip()
+                or str(session_user.get("username") or "").strip()
+                or "--"
+            ),
+        )
+        if updated:
             rlabel = ""
             if existing:
                 rlabel = existing.get("productName") or existing.get("name") or ""
             details = "Recipe id {}".format(recipe_id)
             if rlabel:
                 details = "{}: {}".format(details, rlabel)
-            _audit(None, None, "Disable Recipe", details)
-            return jsonify({"success": True}), 200
+            v_user, v_role, v_name = _recipe_change_verified_audit_parts(verified)
+            details = "{} | verified by {}".format(details, v_name)
+            _audit(v_user, v_role, "Disable Recipe", details)
+            return jsonify({"success": True, "recipe": updated}), 200
         return jsonify({"error": "Recipe not found"}), 404
     except Exception as e:
         app.logger.exception("Error deleting recipe")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/recipes/<int:recipe_id>/enable", methods=["POST"])
+def enable_recipe(recipe_id):
+    try:
+        gate = _require_any_session_internal(
+            ["recipe-delete", "disable-recipes", "recipe-manage"],
+            "Forbidden. You do not have permission to enable recipes.",
+        )
+        if gate:
+            return gate
+        verified, gate_verify = _require_recipe_second_person_approval()
+        if gate_verify:
+            return gate_verify
+        updated = data_service.enable_recipe(recipe_id)
+        if updated:
+            rlabel = updated.get("productName") or updated.get("name") or ""
+            details = "Recipe id {}".format(recipe_id)
+            if rlabel:
+                details = "{}: {}".format(details, rlabel)
+            v_user, v_role, v_name = _recipe_change_verified_audit_parts(verified)
+            details = "{} | verified by {}".format(details, v_name)
+            _audit(v_user, v_role, "Enable Recipe", details)
+            return jsonify({"success": True, "recipe": updated}), 200
+        return jsonify({"error": "Recipe not found"}), 404
+    except Exception as e:
+        app.logger.exception("Error enabling recipe")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1664,6 +1785,8 @@ def approve_recipe(recipe_id):
         if not recipe:
             return jsonify({"ok": False, "error": "Recipe not found"}), 404
         verified_username = _norm_username(verified.get("username"))
+        if _recipe_verifier_is_current_operator(verified):
+            return jsonify({"ok": False, "error": "A second person must approve this recipe action."}), 403
         st = recipe.get("recipeApprovalStatus")
         if st == "approved":
             existing_approver = _norm_username(recipe.get("recipeApprovedByUsername"))
@@ -1827,7 +1950,8 @@ def create_report():
             enriched = _stamp_report_operator(enriched)
             td = enriched.get("testData") if isinstance(enriched.get("testData"), dict) else {}
             run_status = str(td.get("status") or enriched.get("status") or "").strip().lower()
-            if run_status == "aborted":
+            leak_abort = _is_leak_abort_report(enriched) or _is_leak_abort_report(report_data)
+            if run_status == "aborted" and not leak_abort:
                 enriched["reportApprovalStatus"] = "aborted"
                 if (enriched.get("type") or "").strip().lower() == "validation":
                     enriched["name"] = _validation_report_name_for_outcome(enriched, "Aborted")
@@ -1835,8 +1959,17 @@ def create_report():
                 enriched["reportApprovalStatus"] = "pending"
                 for k in ("approvalPassFail", "approvalRemarks", "approvedBy", "approvedAt", "approvedByUsername"):
                     enriched.pop(k, None)
+                if leak_abort:
+                    enriched.pop("result", None)
+                    if isinstance(td, dict):
+                        td = dict(td)
+                        td.pop("result", None)
+                        td.pop("approvalPassFail", None)
+                        enriched["testData"] = td
+                    if (enriched.get("type") or "").strip().lower() == "validation":
+                        enriched["name"] = _validation_report_name_for_outcome(enriched, None)
                 # Never persist "Pending Approval" inside the report title — approval is a separate field.
-                if (enriched.get("type") or "").strip().lower() == "validation":
+                elif (enriched.get("type") or "").strip().lower() == "validation":
                     nm = str(enriched.get("name") or "")
                     if re.search(r"pending\s*approval", nm, flags=re.I) or not nm.strip():
                         enriched["name"] = _validation_report_name_for_outcome(enriched, None)

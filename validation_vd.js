@@ -597,6 +597,10 @@
                                 return;
                             }
                             window._validationLeakAbortInFlight = true;
+                            var leakSnap = {
+                                vacuumMmHg: validationRunCurrentVacuumMmHg,
+                                elapsedSec: validationRunElapsedSec
+                            };
                             if (validationRunIntervalId != null) {
                                 clearInterval(validationRunIntervalId);
                                 validationRunIntervalId = null;
@@ -608,14 +612,12 @@
                             _resetValidationRunActionButtonToStart();
                             setValRunEl('val-run-status', 'Error');
                             setValRunEl('val-run-status-sub', 'Pressure not building');
-                            // Modal + STOP until STOP_ACK (backend retries until ACK).
-                            showAppModal('Check for leaks. Pressure not building', 'Validation');
                             try {
                                 var pFail = window._vdValidationParams || {};
                                 if (typeof auditValidationAbortedLeaksFound === 'function') {
                                     auditValidationAbortedLeaksFound({
                                         setVacuumMmHg: pFail.vacuumMmHg,
-                                        liveVacuumMmHg: validationRunCurrentVacuumMmHg
+                                        liveVacuumMmHg: leakSnap.vacuumMmHg
                                     });
                                 } else if (typeof logAuditEvent === 'function') {
                                     logAuditEvent(
@@ -625,6 +627,55 @@
                                     );
                                 }
                             } catch (auditErr) { /* keep abort path alive */ }
+                            showAppModal('Check for leaks. Pressure not building', 'Validation', function () {
+                                validationRunCurrentVacuumMmHg = leakSnap.vacuumMmHg;
+                                validationRunElapsedSec = leakSnap.elapsedSec;
+                                validationSessionResults.distance = buildValidationRunSnapshot(null, { aborted: true });
+                                validationCompletion.distance = true;
+                                var reportPayload = (typeof buildCombinedValidationReportPayload === 'function')
+                                    ? buildCombinedValidationReportPayload()
+                                    : null;
+                                if (!reportPayload) return;
+                                if (typeof _applyLeakAbortReportFields === 'function') {
+                                    _applyLeakAbortReportFields(reportPayload);
+                                } else {
+                                    reportPayload.status = 'aborted';
+                                    reportPayload.leakAbort = true;
+                                    reportPayload.remarks = 'Check for leaks. Pressure not building';
+                                    if (reportPayload.testData) {
+                                        reportPayload.testData.status = 'aborted';
+                                        reportPayload.testData.leakAbort = true;
+                                        reportPayload.testData.remarks = reportPayload.remarks;
+                                    }
+                                }
+                                reportPayload.name = 'Validation - Vacuum';
+                                _postRunSessionHold = true;
+                                if (typeof markAutoLogoutActivity === 'function') markAutoLogoutActivity();
+                                apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: reportPayload })
+                                    .then(function (result) {
+                                        if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
+                                        validationSessionResults = { distance: null, load: null };
+                                        validationCompletion = { distance: false, load: false };
+                                        var reportId = result && result.id;
+                                        currentReportFilter = 'validation';
+                                        if (reportId && typeof openReportPreview === 'function') {
+                                            openReportPreview(reportId, { setGate: true });
+                                        } else {
+                                            _postRunSessionHold = false;
+                                            goToPage('reports');
+                                        }
+                                    })
+                                    .catch(function (err) {
+                                        _postRunSessionHold = false;
+                                        if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
+                                        console.error('Failed to save leak abort validation report', err);
+                                        showAppModal(
+                                            'Failed to save leak abort report: ' + (err && err.message ? err.message : 'Unknown error'),
+                                            'Validation'
+                                        );
+                                        goToPage('reports');
+                                    });
+                            });
                             var stopFn = (typeof hardwareLeakStopUntilAck === 'function')
                                 ? hardwareLeakStopUntilAck
                                 : (typeof hardwareLeakStopAwait === 'function')
@@ -869,6 +920,7 @@
     function buildCalibrationReportPayload(actualPressure, run, options) {
         options = options || {};
         var aborted = !!options.aborted;
+        var leakAbort = !!options.leakAbort;
         var remarks = options.remarks != null ? String(options.remarks) : '';
         var user = window.currentUser || {};
         var now = new Date().toISOString();
@@ -892,6 +944,7 @@
             createdAt: now,
             completedAt: now
         };
+        if (leakAbort) td.leakAbort = true;
         var payload = {
             name: 'Calibration - Vacuum - ' + run.targetVacuumMmHg + ' mmHg',
             type: 'calibration',
@@ -911,6 +964,7 @@
         if (remarks) {
             payload.remarks = remarks;
         }
+        if (leakAbort) payload.leakAbort = true;
         return payload;
     }
 
@@ -919,14 +973,15 @@
         if (typeof markAutoLogoutActivity === 'function') markAutoLogoutActivity();
         var isAborted = String((payload && payload.status) || '').toLowerCase() === 'aborted'
             || String((payload && payload.testData && payload.testData.status) || '').toLowerCase() === 'aborted';
+        var isLeakAbort = !!(payload && (payload.leakAbort || (payload.testData && payload.testData.leakAbort)));
         return apiRequest(API_BASE + '/api/data/reports', { method: 'POST', body: payload })
             .then(function (result) {
                 if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
                 var reportId = result && result.id;
                 currentReportFilter = 'calibration';
                 if (reportId && typeof openReportPreview === 'function') {
-                    // Completed → pending approval gate; aborted → preview (same as test abort).
-                    openReportPreview(reportId, isAborted ? {} : { setGate: true });
+                    // Leak abort is pending QA; other aborts stay as aborted preview.
+                    openReportPreview(reportId, (isAborted && !isLeakAbort) ? {} : { setGate: true });
                 } else {
                     window._postRunSessionHold = false;
                     goToPage('reports');
@@ -1229,18 +1284,16 @@
                                 return;
                             }
                             window._calibrationLeakAbortInFlight = true;
-                            var setVac = null;
-                            var liveVac = null;
+                            var runSnap = window._vacuumCalRun ? Object.assign({}, window._vacuumCalRun) : {};
+                            var setVac = runSnap.targetVacuumMmHg;
+                            var liveVac = runSnap.liveVacuumMmHg;
                             if (window._vacuumCalRun) {
-                                setVac = window._vacuumCalRun.targetVacuumMmHg;
-                                liveVac = window._vacuumCalRun.liveVacuumMmHg;
                                 window._vacuumCalRun.phase = 'idle';
                             }
+                            _stopCalPressurePoll();
                             if (startBtnFail) startBtnFail.disabled = false;
                             if (backBtnFail) backBtnFail.textContent = 'Back';
                             _setCalRunEl('cal-run-status', 'Pressure not building');
-                            // Modal + STOP_CALIB until ACK (same time).
-                            showAppModal('Check for leaks. Pressure not building', 'Calibration');
                             try {
                                 if (typeof auditCalibrationAbortedLeaksFound === 'function') {
                                     auditCalibrationAbortedLeaksFound({
@@ -1255,6 +1308,14 @@
                                     );
                                 }
                             } catch (auditErr) { /* keep abort path alive */ }
+                            showAppModal('Check for leaks. Pressure not building', 'Calibration', function () {
+                                var payload = buildCalibrationReportPayload(liveVac, runSnap, {
+                                    aborted: true,
+                                    remarks: 'Check for leaks. Pressure not building',
+                                    leakAbort: true
+                                });
+                                saveCalibrationReport(payload);
+                            });
                             Promise.resolve(_stopVacuumCalibrationHardware()).catch(function () {}).finally(function () {
                                 window._calibrationLeakAbortInFlight = false;
                             });

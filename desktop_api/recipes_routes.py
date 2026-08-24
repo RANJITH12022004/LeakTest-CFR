@@ -27,32 +27,23 @@ def _utc_now_iso(kiosk):
 
 
 def _apply_recipe_approval_for_desktop_creator(user, processed, kiosk):
-    role = str((user or {}).get("role") or "").strip().lower()
-    if role != "factory":
-        processed["recipeApprovalStatus"] = "pending"
-        for k in (
-            "recipeApprovedAt",
-            "recipeApprovedBy",
-            "recipeApprovalRemarks",
-            "recipeApprovedByUsername",
-        ):
-            processed.pop(k, None)
-        return
-    display_name = (
-        (user.get("name") or "").strip()
-        or (user.get("username") or "").strip()
-        or "Factory"
-    )
-    username_key = _norm_username(user.get("username") or display_name)
-    by_line = "{} ({})".format(display_name, display_role_label("factory"))
-    processed["recipeApprovalStatus"] = "approved"
-    processed["recipeApprovedAt"] = _utc_now_iso(kiosk)
-    processed["recipeApprovedBy"] = by_line
-    processed["recipeApprovedByUsername"] = username_key
-    processed["recipeApprovalRemarks"] = ""
+    processed["recipeApprovalStatus"] = "pending"
+    for k in (
+        "recipeApprovedAt",
+        "recipeApprovedBy",
+        "recipeApprovalRemarks",
+        "recipeApprovedByUsername",
+    ):
+        processed.pop(k, None)
 
 
-def _apply_recipe_approval_verify_token(processed, remarks, kiosk):
+def _is_same_person(user, verified):
+    actor = _norm_username((user or {}).get("username") or (user or {}).get("name"))
+    verifier = _norm_username((verified or {}).get("username"))
+    return bool(actor and verifier and actor == verifier)
+
+
+def _apply_recipe_approval_verify_token(user, processed, remarks, kiosk):
     if (request.headers.get("X-Approval-Verify-Token") or "").strip() == "":
         return None, False
     if processed.get("recipeApprovalStatus") != "pending":
@@ -63,6 +54,8 @@ def _apply_recipe_approval_verify_token(processed, remarks, kiosk):
     verified_name = (verified.get("name") or verified.get("username") or "—").strip()
     verified_role = (verified.get("role") or "").strip()
     verified_username = _norm_username(verified.get("username"))
+    if _is_same_person(user, verified):
+        return "A second person must approve this recipe action.", False
     by_line = verified_name
     if verified_role:
         by_line = "{} ({})".format(verified_name, display_role_label(verified_role))
@@ -102,9 +95,10 @@ def register_recipes_routes(bp, kiosk):
             processed = calculation_service.process_recipe_form_data(recipe_data)
             _apply_recipe_approval_for_desktop_creator(user, processed, kiosk)
             remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
-            tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks, kiosk)
+            tok_err, via_token = _apply_recipe_approval_verify_token(user, processed, remarks, kiosk)
             if tok_err:
-                return jsonify({"error": tok_err}), 401
+                code = 403 if "second person" in str(tok_err).lower() else 401
+                return jsonify({"error": tok_err}), code
             recipe_id = data_service.save_recipe(processed)
             if audit_created:
                 audit_created(processed, recipe_id)
@@ -150,9 +144,10 @@ def register_recipes_routes(bp, kiosk):
             processed = calculation_service.process_recipe_form_data(recipe_data)
             _apply_recipe_approval_for_desktop_creator(user, processed, kiosk)
             remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
-            tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks, kiosk)
+            tok_err, via_token = _apply_recipe_approval_verify_token(user, processed, remarks, kiosk)
             if tok_err:
-                return jsonify({"error": tok_err}), 401
+                code = 403 if "second person" in str(tok_err).lower() else 401
+                return jsonify({"error": tok_err}), code
             data_service.save_recipe(processed)
             if audit_edited:
                 audit_edited(before_recipe, processed, recipe_id)
@@ -175,6 +170,11 @@ def register_recipes_routes(bp, kiosk):
     @auth_store.require_any_internal(["recipe-delete", "disable-recipes", "recipe-manage"])
     def desktop_recipes_delete(user, recipe_id):
         try:
+            verified, verify_err = auth_store.consume_approval_verify_token("recipe")
+            if verify_err:
+                return jsonify({"error": verify_err}), 401
+            if _is_same_person(user, verified):
+                return jsonify({"error": "A second person must approve this recipe action."}), 403
             existing = recipes_compat.get_recipe(recipe_id, include_disabled=True)
             updated = recipes_compat.disable_recipe(
                 recipe_id,
@@ -188,7 +188,14 @@ def register_recipes_routes(bp, kiosk):
                 details = "Recipe id {}".format(recipe_id)
                 if rlabel:
                     details = "{}: {}".format(details, rlabel)
-                legacy_audit(kiosk, user, "Disable Recipe", details)
+                v_name = (verified.get("name") or verified.get("username") or "--")
+                details = "{} | verified by {}".format(details, v_name)
+                legacy_audit(
+                    kiosk,
+                    {"username": verified.get("username") or v_name, "role": (verified.get("role") or "--")},
+                    "Disable Recipe",
+                    details,
+                )
                 return jsonify({"success": True, "recipe": updated}), 200
             return jsonify({"error": "Recipe not found"}), 404
         except Exception as e:
@@ -198,13 +205,25 @@ def register_recipes_routes(bp, kiosk):
     @auth_store.require_any_internal(["recipe-delete", "disable-recipes", "recipe-manage"])
     def desktop_recipes_enable(user, recipe_id):
         try:
+            verified, verify_err = auth_store.consume_approval_verify_token("recipe")
+            if verify_err:
+                return jsonify({"error": verify_err}), 401
+            if _is_same_person(user, verified):
+                return jsonify({"error": "A second person must approve this recipe action."}), 403
             updated = recipes_compat.enable_recipe(recipe_id)
             if updated:
                 rlabel = updated.get("productName") or updated.get("name") or ""
                 details = "Recipe id {}".format(recipe_id)
                 if rlabel:
                     details = "{}: {}".format(details, rlabel)
-                legacy_audit(kiosk, user, "Enable Recipe", details)
+                v_name = (verified.get("name") or verified.get("username") or "--")
+                details = "{} | verified by {}".format(details, v_name)
+                legacy_audit(
+                    kiosk,
+                    {"username": verified.get("username") or v_name, "role": (verified.get("role") or "--")},
+                    "Enable Recipe",
+                    details,
+                )
                 return jsonify({"success": True, "recipe": updated}), 200
             return jsonify({"error": "Recipe not found"}), 404
         except Exception as e:
@@ -224,6 +243,8 @@ def register_recipes_routes(bp, kiosk):
             if not recipe:
                 return jsonify({"ok": False, "error": "Recipe not found"}), 404
             verified_username = _norm_username(verified.get("username"))
+            if _is_same_person(user, verified):
+                return jsonify({"ok": False, "error": "A second person must approve this recipe action."}), 403
             st = recipe.get("recipeApprovalStatus")
             if st == "approved":
                 existing_approver = _norm_username(recipe.get("recipeApprovedByUsername"))
