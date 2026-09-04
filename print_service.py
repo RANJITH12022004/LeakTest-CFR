@@ -1221,6 +1221,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
         lines.extend(
             [
                 "[LOGO]",
+                f"Company: {fs.get('companyName', 'N/A')}",
                 f"Model No: {fs.get('modelNo', 'N/A')}",
                 f"Serial No: {fs.get('serialNo', 'N/A')}",
                 f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
