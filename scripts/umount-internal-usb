@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Operator shortcut: safely unmount the internal kiosk pendrive only.
+# Usage:
+#   sudo umount-internal-usb
+#
+# Refuses anything that is not the configured internal USB mountpoint/UUID.
+# Does not power-off the device (internal storage stays attached).
+set -euo pipefail
+
+APP_ROOT="${APP_ROOT:-/opt/kiosk}"
+ENV_FILE="${APP_ROOT}/config/internal_usb.env"
+INTERNAL_USB_PATH="${INTERNAL_USB_PATH:-/media/usb_internal}"
+LOG_TAG="umount-internal-usb"
+
+_log() { echo "${LOG_TAG}: $*" >&2; }
+_die() { _log "ERROR: $*"; exit 1; }
+
+if [ "$(id -u)" -ne 0 ]; then
+  _die "run as root: sudo umount-internal-usb"
+fi
+
+if [ ! -f "$ENV_FILE" ]; then
+  _die "missing $ENV_FILE"
+fi
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+
+EXPECTED_UUID="${INTERNAL_USB_UUID:-}"
+[ -n "$EXPECTED_UUID" ] || _die "INTERNAL_USB_UUID empty in $ENV_FILE"
+
+if ! mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
+  _log "already unmounted: $INTERNAL_USB_PATH"
+  exit 0
+fi
+
+SRC="$(findmnt -n -o SOURCE --target "$INTERNAL_USB_PATH" 2>/dev/null || true)"
+[ -n "$SRC" ] || _die "cannot resolve SOURCE for $INTERNAL_USB_PATH"
+
+GOT_UUID="$(blkid -o value -s UUID "$SRC" 2>/dev/null || true)"
+if [ "$GOT_UUID" != "$EXPECTED_UUID" ]; then
+  _die "refusing umount: $INTERNAL_USB_PATH is $SRC (UUID=$GOT_UUID), expected $EXPECTED_UUID"
+fi
+
+case "$SRC" in
+  /dev/mmcblk*) _die "refusing to umount SD/root device: $SRC" ;;
+esac
+
+_log "sync + umount $SRC -> $INTERNAL_USB_PATH"
+sync || true
+
+if umount "$INTERNAL_USB_PATH" 2>/dev/null; then
+  _log "OK unmounted"
+  exit 0
+fi
+
+# Retry a few times (bridge may briefly hold files).
+i=0
+while [ "$i" -lt 5 ]; do
+  i=$((i + 1))
+  sleep 0.4
+  if umount "$INTERNAL_USB_PATH" 2>/dev/null; then
+    _log "OK unmounted (retry $i)"
+    exit 0
+  fi
+done
+
+_die "busy — stop kiosk-bridge first: sudo systemctl stop kiosk-bridge.service"

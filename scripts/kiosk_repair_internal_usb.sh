@@ -13,28 +13,49 @@ MOUNT_OPTS="rw,uid=1000,gid=1000,dmask=0022,fmask=0133,flush,errors=remount-ro,n
 
 _log() { echo "${LOG_TAG}: $*" >&2; }
 
+_is_safe_usb_part() {
+  local p="$1" pk
+  [ -b "$p" ] || return 1
+  case "$p" in
+    /dev/mmcblk*|/dev/zram*|/dev/loop*|/dev/ram*) return 1 ;;
+  esac
+  # Never treat the root filesystem device as the internal USB.
+  if findmnt -n -o SOURCE / 2>/dev/null | grep -qx "$p"; then
+    return 1
+  fi
+  pk="$(lsblk -no PKNAME "$p" 2>/dev/null | head -n1 || true)"
+  case "$pk" in
+    mmcblk*|zram*|loop*) return 1 ;;
+  esac
+  return 0
+}
+
 _resolve_part() {
   local src
-  src="$(findmnt -n -o SOURCE --target "$INTERNAL_USB_PATH" 2>/dev/null || true)"
-  if [ -n "$src" ] && [ -b "$src" ]; then
-    PART="$src"
-    return 0
+  # Only trust findmnt SOURCE when the path is actually a mountpoint.
+  # Otherwise findmnt walks up to / and returns mmcblk root — never use that.
+  if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
+    src="$(findmnt -n -o SOURCE --target "$INTERNAL_USB_PATH" 2>/dev/null || true)"
+    if _is_safe_usb_part "$src"; then
+      PART="$src"
+      return 0
+    fi
   fi
   if [ -n "${INTERNAL_USB_UUIDS:-}" ]; then
     local uuid
     for uuid in ${INTERNAL_USB_UUIDS//,/ }; do
       if [ -b "/dev/disk/by-uuid/$uuid" ]; then
         PART="$(readlink -f "/dev/disk/by-uuid/$uuid" 2>/dev/null || true)"
-        if [ -b "$PART" ]; then
+        if _is_safe_usb_part "$PART"; then
           return 0
         fi
       fi
     done
   fi
-  if [ -b "$PART" ]; then
+  if _is_safe_usb_part "$PART"; then
     return 0
   fi
-  if [ -b /dev/sda1 ]; then
+  if _is_safe_usb_part /dev/sda1; then
     PART=/dev/sda1
     return 0
   fi
@@ -93,14 +114,14 @@ _fsck_part() {
     _log "fsck.vfat not found; skipping repair"
     return 1
   fi
-  if [ ! -b "$PART" ]; then
-    _log "partition missing: $PART"
+  if ! _is_safe_usb_part "$PART"; then
+    _log "refusing fsck on unsafe/non-USB partition: ${PART:-empty}"
     return 1
   fi
-  # Ensure nothing holds the device.
+  # Ensure nothing holds the device (never lazy-umount mmcblk/root).
   if findmnt -n -S "$PART" >/dev/null 2>&1; then
-    _log "device still mounted elsewhere — forcing lazy umount"
-    umount -l "$PART" 2>/dev/null || true
+    _log "device still mounted elsewhere — unmounting $PART"
+    umount "$PART" 2>/dev/null || umount -l "$PART" 2>/dev/null || true
     sleep 0.5
   fi
   _log "running fsck.vfat -a -w on $PART"

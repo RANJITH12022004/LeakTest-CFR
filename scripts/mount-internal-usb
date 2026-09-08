@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# Operator shortcut: mount the internal kiosk pendrive in one command.
+# Usage:
+#   sudo mount-internal-usb              # remount known stick, OR adopt the only USB stick present
+#   sudo mount-internal-usb /dev/sda1    # remount that device, OR adopt it as the new internal stick
+#
+# Safety: never mounts SD/root (mmcblk). Adopts only USB VFAT partitions.
+# Adopt updates: config/internal_usb.env, /etc/fstab, udev rule — then mounts RW.
+set -euo pipefail
+
+APP_ROOT="${APP_ROOT:-/opt/kiosk}"
+ENV_FILE="${APP_ROOT}/config/internal_usb.env"
+REPAIR_SCRIPT="${APP_ROOT}/scripts/kiosk_repair_internal_usb.sh"
+MOUNT_SCRIPT="${APP_ROOT}/scripts/kiosk_mount_internal_usb.sh"
+UDEV_TEMPLATE="${APP_ROOT}/config/99-kiosk-internal-usb.rules"
+UDEV_LIVE="/etc/udev/rules.d/99-kiosk-internal-usb.rules"
+INTERNAL_USB_PATH="${INTERNAL_USB_PATH:-/media/usb_internal}"
+FSTAB_MARKER="# kiosk-internal-usb"
+MOUNT_OPTS_FSTAB="defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133,errors=remount-ro,x-systemd.device-timeout=3"
+LOG_TAG="mount-internal-usb"
+ADOPTED=0
+REQUESTED_PART=""
+
+_log() { echo "${LOG_TAG}: $*" >&2; }
+_die() { _log "ERROR: $*"; exit 1; }
+
+if [ "$(id -u)" -ne 0 ]; then
+  _die "run as root: sudo mount-internal-usb${1:+ $1}"
+fi
+
+mkdir -p "$(dirname "$ENV_FILE")"
+if [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+fi
+
+EXPECTED_UUID="${INTERNAL_USB_UUID:-}"
+EXPECTED_PART="${INTERNAL_USB_PARTITION:-/dev/sda1}"
+EXPECTED_PKNAME="${INTERNAL_USB_PKNAME:-sda}"
+
+_uuid_of() { blkid -o value -s UUID "$1" 2>/dev/null || true; }
+_fstype_of() { blkid -o value -s TYPE "$1" 2>/dev/null || true; }
+
+_is_forbidden_device() {
+  local dev="$1" real pk
+  real="$(readlink -f "$dev" 2>/dev/null || true)"
+  [ -n "$real" ] || return 0
+  case "$real" in
+    /dev/mmcblk*|/dev/zram*|/dev/loop*|/dev/ram*) return 0 ;;
+  esac
+  if findmnt -n -o SOURCE / 2>/dev/null | grep -qx "$real"; then
+    return 0
+  fi
+  pk="$(lsblk -no PKNAME "$real" 2>/dev/null | head -n1 || true)"
+  case "$pk" in
+    mmcblk*|zram*|loop*) return 0 ;;
+  esac
+  return 1
+}
+
+_is_usb_partition() {
+  local part="$1" disk bus
+  part="$(readlink -f "$part" 2>/dev/null || true)"
+  [ -b "$part" ] || return 1
+  disk="$(lsblk -no PKNAME "$part" 2>/dev/null | head -n1 || true)"
+  [ -n "$disk" ] || return 1
+  bus="$(lsblk -ndo TRAN "/dev/$disk" 2>/dev/null || true)"
+  [ "$bus" = "usb" ] && return 0
+  if [ -e "/sys/block/$disk/device/../../../uevent" ] \
+    && grep -q 'DRIVER=usb-storage\|DRIVER=uas' "/sys/block/$disk/device/../../../uevent" 2>/dev/null; then
+    return 0
+  fi
+  if [ -d "/sys/block/$disk" ] && grep -qx 1 "/sys/block/$disk/removable" 2>/dev/null; then
+    case "$disk" in
+      sd*) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+_list_candidate_parts() {
+  local path fstype
+  while read -r path fstype; do
+    [ -b "$path" ] || continue
+    if _is_forbidden_device "$path"; then
+      continue
+    fi
+    if ! _is_usb_partition "$path"; then
+      continue
+    fi
+    case "${fstype:-}" in
+      vfat|msdos|fat|fat32) printf '%s\n' "$(readlink -f "$path")" ;;
+      *) continue ;;
+    esac
+  done < <(lsblk -nrpo NAME,TYPE,FSTYPE | awk '$2 == "part" { print $1, $3 }')
+}
+
+_pkname_of() {
+  lsblk -no PKNAME "$1" 2>/dev/null | head -n1 || true
+}
+
+_adopt() {
+  local part="$1"
+  local uuid fstype pkname
+
+  part="$(readlink -f "$part")"
+  [ -b "$part" ] || _die "not a block device: $part"
+  if _is_forbidden_device "$part"; then
+    _die "refusing system/SD device: $part"
+  fi
+  if ! _is_usb_partition "$part"; then
+    _die "refusing non-USB device: $part (internal storage must be a USB pendrive)"
+  fi
+
+  uuid="$(_uuid_of "$part")"
+  fstype="$(_fstype_of "$part")"
+  [ -n "$uuid" ] || _die "no filesystem UUID on $part — format VFAT first"
+  case "${fstype:-}" in
+    vfat|msdos|fat|fat32) ;;
+    *) _die "$part is '$fstype' — format as VFAT/FAT32 for internal kiosk storage" ;;
+  esac
+
+  pkname="$(_pkname_of "$part")"
+  [ -n "$pkname" ] || pkname="sda"
+
+  _log "adopting NEW internal stick: $part UUID=$uuid (was ${EXPECTED_UUID:-none})"
+
+  # Free mountpoint if something else is there (USB path only — never touch /).
+  if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
+    sync || true
+    umount "$INTERNAL_USB_PATH" 2>/dev/null || true
+    sleep 0.3
+  fi
+  if findmnt -n -S "$part" >/dev/null 2>&1; then
+    umount "$part" 2>/dev/null || true
+    sleep 0.3
+  fi
+
+  mkdir -p "$INTERNAL_USB_PATH"
+  chown rle:rle "$INTERNAL_USB_PATH" 2>/dev/null || true
+
+  cat >"$ENV_FILE" <<EOF
+INTERNAL_USB_UUID=${uuid}
+INTERNAL_USB_PKNAME=${pkname}
+INTERNAL_USB_PARTITION=${part}
+EOF
+  chmod 644 "$ENV_FILE"
+
+  if [ -f /etc/fstab ]; then
+    cp /etc/fstab "/etc/fstab.bak.$(date +%Y%m%d%H%M%S)"
+    sed -i "\|[[:space:]]${INTERNAL_USB_PATH}[[:space:]]|d" /etc/fstab
+    sed -i "\|^${FSTAB_MARKER}\$|d" /etc/fstab
+    {
+      echo "$FSTAB_MARKER"
+      echo "UUID=${uuid}  ${INTERNAL_USB_PATH}  vfat  ${MOUNT_OPTS_FSTAB}  0  2"
+    } >>/etc/fstab
+  fi
+
+  if [ -f "$UDEV_TEMPLATE" ]; then
+    sed "s/ID_FS_UUID}==\"[^\"]*\"/ID_FS_UUID}==\"${uuid}\"/" \
+      "$UDEV_TEMPLATE" >"$UDEV_LIVE"
+  else
+    cat >"$UDEV_LIVE" <<EOF
+# Remount internal kiosk USB when the pendrive is plugged in after boot.
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_FS_UUID}=="${uuid}", TAG+="systemd", ENV{SYSTEMD_WANTS}="kiosk-internal-usb-mount.service"
+EOF
+  fi
+  chmod 644 "$UDEV_LIVE"
+  udevadm control --reload-rules 2>/dev/null || true
+
+  EXPECTED_UUID="$uuid"
+  EXPECTED_PART="$part"
+  EXPECTED_PKNAME="$pkname"
+  ADOPTED=1
+  _log "registered UUID=$uuid partition=$part (fstab + udev + env updated)"
+}
+
+# Sets REQUESTED_PART / EXPECTED_* / ADOPTED in this shell (must NOT run in $()).
+_resolve() {
+  local arg="${1:-}"
+  local cand got
+
+  if [ -n "$arg" ]; then
+    case "$arg" in
+      /dev/*) cand="$arg" ;;
+      *) _die "device must look like /dev/sda1 (got: $arg)" ;;
+    esac
+    [ -b "$cand" ] || _die "not a block device: $cand"
+    if _is_forbidden_device "$cand"; then
+      _die "refusing system/SD device: $cand"
+    fi
+    got="$(_uuid_of "$cand")"
+    [ -n "$got" ] || _die "no filesystem UUID on $cand — format VFAT first"
+    if [ -n "$EXPECTED_UUID" ] && [ "$got" = "$EXPECTED_UUID" ]; then
+      REQUESTED_PART="$(readlink -f "$cand")"
+      return 0
+    fi
+    # Explicit device = production intent to use this stick (new or replacement).
+    _adopt "$cand"
+    REQUESTED_PART="$(readlink -f "$cand")"
+    return 0
+  fi
+
+  # No args: prefer already-configured UUID if present.
+  if [ -n "$EXPECTED_UUID" ] && [ -b "/dev/disk/by-uuid/$EXPECTED_UUID" ]; then
+    REQUESTED_PART="$(readlink -f "/dev/disk/by-uuid/$EXPECTED_UUID")"
+    return 0
+  fi
+  if [ -n "$EXPECTED_UUID" ] && [ -b "$EXPECTED_PART" ]; then
+    got="$(_uuid_of "$EXPECTED_PART")"
+    if [ "$got" = "$EXPECTED_UUID" ]; then
+      REQUESTED_PART="$(readlink -f "$EXPECTED_PART")"
+      return 0
+    fi
+  fi
+
+  # Configured stick missing → adopt the single eligible USB VFAT partition.
+  mapfile -t cands < <(_list_candidate_parts | awk 'NF' | sort -u)
+  if [ "${#cands[@]}" -eq 0 ]; then
+    _die "no USB pendrive found — plug in the internal stick (VFAT), then retry"
+  fi
+  if [ "${#cands[@]}" -gt 1 ]; then
+    _log "multiple USB partitions found:"
+    local c
+    for c in "${cands[@]}"; do
+      _log "  $c  UUID=$(_uuid_of "$c")  TYPE=$(_fstype_of "$c")"
+    done
+    _die "pass the device explicitly, e.g.: sudo mount-internal-usb /dev/sda1"
+  fi
+
+  _adopt "${cands[0]}"
+  REQUESTED_PART="${cands[0]}"
+}
+
+_resolve "${1:-}"
+[ -n "$REQUESTED_PART" ] || _die "internal resolution failed"
+
+export INTERNAL_USB_PATH
+export INTERNAL_USB_PARTITION="$REQUESTED_PART"
+export INTERNAL_USB_UUID="$EXPECTED_UUID"
+export INTERNAL_USB_UUIDS="$EXPECTED_UUID"
+export INTERNAL_USB_PKNAME="$EXPECTED_PKNAME"
+export APP_ROOT
+
+_log "target $REQUESTED_PART (UUID=$EXPECTED_UUID) -> $INTERNAL_USB_PATH"
+
+[ -x "$REPAIR_SCRIPT" ] || _die "missing repair script: $REPAIR_SCRIPT"
+/bin/bash "$REPAIR_SCRIPT"
+
+if [ -x "$MOUNT_SCRIPT" ]; then
+  /bin/bash "$MOUNT_SCRIPT" || true
+fi
+
+if ! mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
+  _die "mount failed — $INTERNAL_USB_PATH is not a mountpoint"
+fi
+
+OPTS="$(findmnt -n -o OPTIONS --target "$INTERNAL_USB_PATH" 2>/dev/null || true)"
+SRC="$(findmnt -n -o SOURCE --target "$INTERNAL_USB_PATH" 2>/dev/null || true)"
+case ",${OPTS}," in
+  *,ro,*) _die "mounted RO from $SRC (repair did not restore RW)" ;;
+esac
+
+case "$SRC" in
+  /dev/mmcblk*) _die "refusing: $INTERNAL_USB_PATH resolved to SD/root ($SRC)" ;;
+esac
+
+PROBE="${INTERNAL_USB_PATH}/.kiosk_write_probe"
+if ! touch "$PROBE" 2>/dev/null; then
+  _die "mounted but not writable: $INTERNAL_USB_PATH"
+fi
+rm -f "$PROBE" 2>/dev/null || true
+
+# Seed empty new stick from SD mirror if needed.
+if [ "$ADOPTED" -eq 1 ] && [ -x "$APP_ROOT/scripts/migrate_storage_to_internal_usb.sh" ]; then
+  if [ ! -f "$INTERNAL_USB_PATH/storage/members.json" ] && [ -f "$APP_ROOT/storage/members.json" ]; then
+    _log "seeding new stick from SD-card storage mirror"
+    /bin/bash "$APP_ROOT/scripts/migrate_storage_to_internal_usb.sh" || true
+  fi
+fi
+
+if [ "$ADOPTED" -eq 1 ]; then
+  _log "OK $SRC -> $INTERNAL_USB_PATH (rw) [ADOPTED new internal stick]"
+else
+  _log "OK $SRC -> $INTERNAL_USB_PATH (rw)"
+fi
+findmnt "$INTERNAL_USB_PATH" || true
+
+if [ "$ADOPTED" -eq 1 ]; then
+  if systemctl is-enabled kiosk-bridge.service >/dev/null 2>&1 \
+    || systemctl is-active kiosk-bridge.service >/dev/null 2>&1; then
+    _log "restarting kiosk-bridge to use new internal USB"
+    systemctl try-restart kiosk-bridge.service 2>/dev/null || true
+  fi
+fi
+
+exit 0
