@@ -1,0 +1,5 @@
+# Operator shortcuts for internal USB (production kiosk).
+# Install: sudo install -m 0440 /opt/kiosk/config/sudoers-kiosk-usb-mount /etc/sudoers.d/kiosk-usb-mount
+# Scripts themselves refuse non-internal / wrong-UUID devices.
+rle ALL=(root) NOPASSWD: /usr/local/bin/mount-internal-usb, /usr/local/bin/mount-internal-usb *, /usr/local/bin/umount-internal-usb
+rle ALL=(root) NOPASSWD: /opt/kiosk/scripts/mount-internal-usb, /opt/kiosk/scripts/mount-internal-usb *, /opt/kiosk/scripts/umount-internal-usb

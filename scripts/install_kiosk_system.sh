@@ -74,6 +74,21 @@ fi
 if [ -f "$APP_ROOT/config/sudoers-kiosk-vnc" ]; then
   install -m 0440 "$APP_ROOT/config/sudoers-kiosk-vnc" /etc/sudoers.d/kiosk-vnc
 fi
+
+echo "==> Operator USB mount shortcuts (mount-internal-usb / umount-internal-usb)"
+chmod 0755 "$APP_ROOT/scripts/mount-internal-usb" "$APP_ROOT/scripts/umount-internal-usb" 2>/dev/null || true
+ln -sfn "$APP_ROOT/scripts/mount-internal-usb" /usr/local/bin/mount-internal-usb
+ln -sfn "$APP_ROOT/scripts/umount-internal-usb" /usr/local/bin/umount-internal-usb
+if [ -f "$APP_ROOT/config/sudoers-kiosk-usb-mount" ]; then
+  install -m 0440 "$APP_ROOT/config/sudoers-kiosk-usb-mount" /etc/sudoers.d/kiosk-usb-mount
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf /etc/sudoers.d/kiosk-usb-mount >/dev/null
+  fi
+fi
+if [ -f "$APP_ROOT/config/sudoers-kiosk-usb-repair" ]; then
+  install -m 0440 "$APP_ROOT/config/sudoers-kiosk-usb-repair" /etc/sudoers.d/kiosk-usb-repair
+fi
+
 echo "==> Display hardening (systemd units, mask getty tty1–tty6, boot guard)"
 /bin/bash "$APP_ROOT/scripts/kiosk_harden_display.sh"
 
