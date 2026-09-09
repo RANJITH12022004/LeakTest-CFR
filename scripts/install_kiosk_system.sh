@@ -89,7 +89,7 @@ if [ -f "$APP_ROOT/config/sudoers-kiosk-usb-repair" ]; then
   install -m 0440 "$APP_ROOT/config/sudoers-kiosk-usb-repair" /etc/sudoers.d/kiosk-usb-repair
 fi
 
-echo "==> Display hardening (systemd units, mask getty tty1–tty6, boot guard)"
+echo "==> Display hardening (systemd units, mask getty tty2–tty6, enable tty1 developer shell)"
 /bin/bash "$APP_ROOT/scripts/kiosk_harden_display.sh"
 
 echo "==> Apt post-upgrade display guard"
