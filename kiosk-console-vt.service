@@ -1,9 +1,9 @@
 [Unit]
-Description=Keep HDMI console on kiosk virtual terminal (tty2)
+Description=Keep HDMI console on kiosk virtual terminal (tty2), allow tty1 developer shell
 DefaultDependencies=no
 After=local-fs.target
-Before=getty@tty1.service
-Conflicts=getty@tty1.service
+# Do not Conflict with getty@tty1 — Ctrl+Alt+F1 must stay usable for developers.
+Before=getty@tty2.service
 
 [Service]
 Type=simple

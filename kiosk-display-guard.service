@@ -2,12 +2,16 @@
 Description=Tap Density kiosk display guard (mask getty, sync units at boot)
 DefaultDependencies=no
 After=local-fs.target
-Before=kiosk-display.service getty@tty1.service getty@tty2.service
+# Order before display only. Do NOT order Before=getty@tty1 — starting/restarting
+# getty from the guard script would deadlock systemd and block the kiosk UI.
+Before=kiosk-display.service getty@tty2.service
 Conflicts=getty@tty2.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# Safety net: never hang boot forever if hardening blocks unexpectedly.
+TimeoutStartSec=60
 ExecStart=/bin/bash /opt/kiosk/scripts/kiosk_harden_display.sh --boot --quiet
 
 [Install]
