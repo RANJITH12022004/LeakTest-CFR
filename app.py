@@ -2950,6 +2950,16 @@ def login_biometric():
                 pass
             member = data_service.get_member_by_fingerprint_template(template_id)
         if not member:
+            # Orphaned sensor template (e.g. re-enroll used a new slot while the old scan remained).
+            try:
+                deleted = biometric_service.delete_template(int(template_id))
+                if deleted.get("ok"):
+                    app.logger.warning(
+                        "Removed orphaned biometric template %s with no member link",
+                        template_id,
+                    )
+            except Exception:
+                pass
             return jsonify({
                 "error": (
                     "Fingerprint template {} is not linked to any member on the current account. "
@@ -4979,11 +4989,10 @@ def biometric_enroll():
         if status != "active":
             _audit_event(action="Biometric enroll", outcome="denied", entity_type="member", entity_id=member.get("id"), entity_name=username, details="Member account is not active", target_user=username, before=before_member)
             return jsonify({"ok": False, "error": "Member account is not active"}), 403
-        template_id_raw = payload.get("templateId")
-        if template_id_raw is None:
-            template_id = data_service.get_next_fingerprint_template_id()
-        else:
-            template_id = int(template_id_raw)
+        try:
+            template_id = data_service.resolve_enroll_template_id(member, payload.get("templateId"))
+        except ValueError as ve:
+            return jsonify({"ok": False, "error": str(ve)}), 400
         timeout_sec = float(payload.get("captureTimeoutSec") or BIOMETRIC_ENROLL_TIMEOUT_SEC)
         enrolled = biometric_service.enroll(template_id, capture_timeout_sec=timeout_sec)
         if not enrolled.get("ok"):
@@ -5066,11 +5075,10 @@ def biometric_enroll_capture():
         timeout_sec = float(payload.get("captureTimeoutSec") or BIOMETRIC_ENROLL_TIMEOUT_SEC)
 
         if step == 1:
-            template_id_raw = payload.get("templateId")
-            if template_id_raw is None:
-                template_id = data_service.get_next_fingerprint_template_id()
-            else:
-                template_id = int(template_id_raw)
+            try:
+                template_id = data_service.resolve_enroll_template_id(member, payload.get("templateId"))
+            except ValueError as ve:
+                return jsonify({"ok": False, "error": str(ve)}), 400
             captured = biometric_service.capture_enroll_finger(0x01, timeout_sec=timeout_sec)
             if not captured.get("ok"):
                 _clear_enroll_session(username)
@@ -5097,6 +5105,17 @@ def biometric_enroll_capture():
         if not captured.get("ok"):
             _clear_enroll_session(username)
             return jsonify(captured), 400
+
+        old_template_id = before_member.get("fingerprintTemplateId")
+        try:
+            old_tid = int(old_template_id) if old_template_id is not None else None
+        except (TypeError, ValueError):
+            old_tid = None
+        if old_tid is not None and old_tid != int(template_id):
+            try:
+                biometric_service.delete_template(old_tid)
+            except Exception:
+                pass
 
         finalized = biometric_service.finalize_enroll(template_id)
         _clear_enroll_session(username)
