@@ -1219,6 +1219,33 @@ def get_next_fingerprint_template_id(max_templates: int = 1000) -> int:
     raise ValueError("No biometric template slots available.")
 
 
+def resolve_enroll_template_id(
+    member: Dict[str, Any],
+    template_id_raw: Any = None,
+    max_templates: int = 1000,
+) -> int:
+    """Pick template slot for enrollment.
+
+    Reuses the member's existing fingerprintTemplateId when present so re-enrollment
+    after disable/enable overwrites the same R307 slot instead of leaving an orphaned
+    template on the sensor that login can match without a members.json link.
+    """
+    if template_id_raw is not None:
+        tid = int(template_id_raw)
+        if 1 <= tid <= max_templates:
+            return tid
+        raise ValueError("templateId must be between 1 and {}.".format(max_templates))
+    existing = member.get("fingerprintTemplateId")
+    if existing is not None:
+        try:
+            tid = int(existing)
+            if 1 <= tid <= max_templates:
+                return tid
+        except (TypeError, ValueError):
+            pass
+    return get_next_fingerprint_template_id(max_templates=max_templates)
+
+
 def _save_member_record(updated: Dict[str, Any]) -> None:
     """Internal helper to persist a single member record by id."""
     members_path = _get_storage_path("members.json")

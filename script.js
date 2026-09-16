@@ -4695,14 +4695,23 @@ function enableMember(id) {
                 showAppModal('Account enabled.', 'Enable');
                 if (biometricEnabledSetting && member && typeof canEditMembers === 'function' && canEditMembers()) {
                     _addMemberLastSavedId = id;
-                    window._biometricEnrollReturnPage = 'manage-members';
-                    _populateMemberBiometricSummary({
+                    var enrollSummary = {
                         id: id,
                         username: username,
                         name: member.name || username,
                         role: member.role
+                    };
+                    offerOptionalBiometricReset({
+                        username: username,
+                        memberId: id,
+                        name: member.name || username,
+                        returnPage: 'manage-members',
+                        onSkip: function () {
+                            window._biometricEnrollReturnPage = 'manage-members';
+                            _populateMemberBiometricSummary(enrollSummary);
+                            goToPage('member-biometric');
+                        }
                     });
-                    goToPage('member-biometric');
                 }
             })
             .catch(function (err) {
