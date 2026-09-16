@@ -652,13 +652,37 @@ def enable_recipe(recipe_id: int):
 # =================== REPORT OPERATIONS ==========================
 
 
+def _normalize_report_type(report: Dict[str, Any]) -> str:
+    """Canonical report type for list/filter (handles legacy rows missing top-level type)."""
+    if not isinstance(report, dict):
+        return "test"
+    t = str(report.get("type") or "").strip().lower()
+    if t in ("test", "validation", "calibration"):
+        return t
+    td = report.get("testData")
+    if isinstance(td, dict):
+        td_type = str(td.get("type") or "").strip().lower()
+        if td_type in ("test", "validation", "calibration"):
+            return td_type
+        if td.get("calibrationSubtype"):
+            return "calibration"
+        if td.get("validationSubtype"):
+            return "validation"
+    if report.get("calibrationSubtype"):
+        return "calibration"
+    if report.get("validationSubtype"):
+        return "validation"
+    return t or "test"
+
+
 def list_reports(filter_type="all"):
     """List reports, optionally filtered by type."""
     reports = _load_critical_json("reports.json", default=[])
     if not isinstance(reports, list):
         reports = []
     if filter_type and filter_type != "all":
-        reports = [r for r in reports if r.get("type") == filter_type]
+        want = str(filter_type).strip().lower()
+        reports = [r for r in reports if _normalize_report_type(r) == want]
 
     def sort_key(r):
         ts = r.get("createdAt") or r.get("completedAt") or ""

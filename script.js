@@ -2025,6 +2025,13 @@ function goToPage(pageName) {
         if (backBtnEl) backBtnEl.style.display = 'block';
     }
     if (pageName === 'reports' && typeof loadReports === 'function') {
+        var previewPage = document.getElementById('page-report-preview');
+        if (previewPage && previewPage.classList.contains('active') && window._lastReportPreview) {
+            var previewType = String(window._lastReportPreview.type || '').trim().toLowerCase();
+            if (previewType === 'test' || previewType === 'validation' || previewType === 'calibration') {
+                currentReportFilter = previewType;
+            }
+        }
         if (typeof refreshReportsActionButtons === 'function') refreshReportsActionButtons();
         setTimeout(function () { loadReports(currentReportFilter || null); }, 50);
     }
@@ -4947,7 +4954,17 @@ function filterReports(type) {
         showAppModal("You Don't Have Access to Audit Trail", 'Audit');
         return;
     }
+    currentReportFilter = type || null;
     loadReports(type);
+}
+
+function closeReportPreviewToReports() {
+    var preview = window._lastReportPreview || {};
+    var previewType = String(preview.type || '').trim().toLowerCase();
+    if (previewType === 'test' || previewType === 'validation' || previewType === 'calibration') {
+        currentReportFilter = previewType;
+    }
+    goToPage('reports');
 }
 
 function applyAuditFiltersAndRefresh() {

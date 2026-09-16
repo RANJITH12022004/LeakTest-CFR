@@ -2586,6 +2586,15 @@ body {
     background: #7e22ce;
 }
 
+.reports-filter-calibration {
+    background: #0d9488;
+    border-color: #0f766e;
+}
+
+.reports-filter-calibration:hover {
+    background: #0f766e;
+}
+
 .reports-filter-audit {
     background: #0891b2;
     border-color: #0e7490;
