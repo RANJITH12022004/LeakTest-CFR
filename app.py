@@ -166,8 +166,12 @@ _cfg_log.info(
 )
 
 
-def _audit(user, role, action, details=""):
-    """Helper to log audit event (user/role from current user if not passed)."""
+def _audit(user, role, action, details="", timestamp_ms=None, date_time=None):
+    """Helper to log audit event (user/role from current user if not passed).
+
+    Optional timestamp_ms/date_time keep related events ordered when they share the
+    same RTC second (e.g. Recipe edited then Recipe approved).
+    """
     u = user
     r = role
     if u is None or r is None:
@@ -176,6 +180,8 @@ def _audit(user, role, action, details=""):
             u = u if u is not None else cur.get("username") or cur.get("name") or "--"
             r = r if r is not None else cur.get("role") or "--"
     audit_time = _audit_time_fields()
+    ts = audit_time.get("timestamp_ms") if timestamp_ms is None else int(timestamp_ms)
+    dt = audit_time.get("date_time") if date_time is None else date_time
     audit_service.log_structured_event(
         user=u,
         role=r,
@@ -183,9 +189,35 @@ def _audit(user, role, action, details=""):
         details=details,
         event_type="legacy",
         outcome="success" if action else "",
-        timestamp_ms=audit_time.get("timestamp_ms"),
-        date_time=audit_time.get("date_time"),
+        timestamp_ms=ts,
+        date_time=dt,
     )
+
+
+def _audit_member_permissions_if_changed(before_member, after_member, *, member_id=None, signature=None):
+    """Emit User permissions updated when role/cards change (create or edit)."""
+    after_member = after_member or {}
+    uname = after_member.get("username") or after_member.get("name") or ""
+    try:
+        perm_audit = rbac_service.build_permission_change_audit(before_member, after_member, uname)
+    except Exception:
+        perm_audit = None
+    if not perm_audit:
+        return False
+    _audit_event(
+        action="User permissions updated",
+        outcome="success",
+        entity_type="member",
+        entity_id=member_id if member_id is not None else after_member.get("id"),
+        entity_name=uname,
+        details=perm_audit.get("details") or "User permissions updated",
+        target_user=uname,
+        before=perm_audit.get("before"),
+        after=perm_audit.get("after"),
+        signature=signature,
+        extra=perm_audit.get("extra") or {},
+    )
+    return True
 
 
 def _recipe_audit_field_map(recipe):
@@ -835,10 +867,41 @@ def _startup_session_power_audit():
     try:
         had_clean_shutdown = data_service.consume_app_clean_stop_flag()
         pending = data_service.read_session_power_audit_pending()
-        if pending and not had_clean_shutdown:
-            un = (pending.get("username") or "").strip()
-            role = (pending.get("role") or "").strip()
-            if not pending.get("powerAuditLogged"):
+        checkpoint = data_service.get_test_run_data()
+        mid_test = _checkpoint_is_mid_test(checkpoint)
+
+        # Mid-test checkpoint always means unclean for report recovery, even if
+        # SIGTERM/logout left a clean-stop flag (TimeoutStopSec / USB restart).
+        if had_clean_shutdown and mid_test:
+            had_clean_shutdown = False
+            app.logger.warning(
+                "Ignoring stale clean-stop flag; mid-test checkpoint present "
+                "— treating as unclean shutdown"
+            )
+
+        should_recover = mid_test or (pending and not had_clean_shutdown)
+        if should_recover:
+            un = (pending.get("username") or "").strip() if pending else ""
+            role = (pending.get("role") or "").strip() if pending else ""
+            if not un and mid_test and isinstance(checkpoint, dict):
+                td = checkpoint.get("testData") if isinstance(checkpoint.get("testData"), dict) else {}
+                un = _norm_username(
+                    checkpoint.get("operatedByUsername")
+                    or checkpoint.get("operatorUsername")
+                    or td.get("operatedByUsername")
+                    or td.get("operatorUsername")
+                    or checkpoint.get("operatorName")
+                    or td.get("operatorName")
+                    or ""
+                )
+                if not role:
+                    role = str(
+                        checkpoint.get("operatedByRole")
+                        or td.get("operatedByRole")
+                        or checkpoint.get("operatorRole")
+                        or ""
+                    ).strip()
+            if pending and not pending.get("powerAuditLogged"):
                 audit_time = _audit_time_fields()
                 if audit_service.is_hidden_factory_actor(un, role):
                     pi_details = "Privileged factory session was active when power was interrupted or the system restarted."
@@ -861,17 +924,17 @@ def _startup_session_power_audit():
                     timestamp_ms=audit_time.get("timestamp_ms"),
                     date_time=audit_time.get("date_time"),
                 )
-                pending = dict(pending)
-                pending["powerAuditLogged"] = True
-                data_service.write_session_power_audit_pending(pending)
-            # Always attempt report finalization on unclean boot (idempotent via checkpoint clear / duplicate guard).
+                if pending:
+                    pending = dict(pending)
+                    pending["powerAuditLogged"] = True
+                    data_service.write_session_power_audit_pending(pending)
+            # Always attempt report finalization on unclean/mid-test boot.
             try:
                 _abort_pending_reports_after_power_loss(un)
                 created = _create_aborted_report_from_power_loss_checkpoint(un)
                 if created:
                     app.logger.info("Power-loss checkpoint recovered into report(s)")
                 else:
-                    # Log why for production diagnosis
                     cp = data_service.get_test_run_data()
                     app.logger.warning(
                         "Power-loss report not created (checkpoint mid-test=%s keys=%s)",
@@ -912,10 +975,17 @@ def _register_clean_shutdown_atexit():
         pass
 
 def _register_clean_shutdown_signals():
-    """Mark clean shutdown on SIGTERM/SIGINT so the next start does not log a false power interruption."""
+    """Mark clean shutdown on SIGTERM/SIGINT so the next start does not log a false power interruption.
+
+    Do not stamp clean-stop while a mid-test checkpoint exists — power/USB restarts
+    often deliver SIGTERM (TimeoutStopSec=5) and must still recover abort reports.
+    """
 
     def _handler(signum, frame):
         try:
+            cp = data_service.get_test_run_data()
+            if _checkpoint_is_mid_test(cp):
+                return
             data_service.touch_app_clean_stop_flag()
         except Exception:
             pass
@@ -1404,20 +1474,20 @@ def _apply_recipe_approval_verify_token(processed, remarks=""):
     """
     When X-Approval-Verify-Token is present, approve a pending recipe in the same save
     (avoids save-then-approve creating duplicate recipes or double writes).
-    Returns (error_message or None, applied_via_token bool).
+    Returns (error_message or None, applied_via_token bool, verified_payload or None).
     """
     if (request.headers.get("X-Approval-Verify-Token") or "").strip() == "":
-        return None, False
+        return None, False, None
     if processed.get("recipeApprovalStatus") != "pending":
-        return None, False
+        return None, False, None
     verified, verify_err = _consume_approval_verify_token("recipe")
     if verify_err:
-        return verify_err, False
+        return verify_err, False, None
     verified_name = (verified.get("name") or verified.get("username") or "—").strip()
     verified_role = (verified.get("role") or "").strip()
     verified_username = _norm_username(verified.get("username"))
     if _recipe_verifier_is_current_operator(verified):
-        return "A second person must approve this recipe action.", False
+        return "A second person must approve this recipe action.", False, None
     by_line = verified_name
     if verified_role:
         by_line = "{} ({})".format(verified_name, _display_role_label(verified_role))
@@ -1426,7 +1496,7 @@ def _apply_recipe_approval_verify_token(processed, remarks=""):
     processed["recipeApprovedBy"] = by_line
     processed["recipeApprovedByUsername"] = verified_username
     processed["recipeApprovalRemarks"] = (remarks or "").strip()
-    return None, True
+    return None, True, verified
 
 
 def _require_recipe_second_person_approval():
@@ -1625,17 +1695,32 @@ def create_recipe():
         processed = calculation_service.process_recipe_form_data(recipe_data)
         _apply_recipe_approval_for_session_creator(processed)
         remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
-        tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
+        tok_err, via_token, verified = _apply_recipe_approval_verify_token(processed, remarks)
         if tok_err:
             code = 403 if "second person" in str(tok_err).lower() else 401
             return jsonify({"error": tok_err}), code
         recipe_id = data_service.save_recipe(processed)
         rd = format_recipe_audit_details(processed, recipe_id=recipe_id)
-        _audit(None, None, "Recipe created", "Recipe created: {}".format(rd))
+        create_time = _audit_time_fields()
+        _audit(
+            None,
+            None,
+            "Recipe created",
+            "Recipe created: {}".format(rd),
+            timestamp_ms=create_time.get("timestamp_ms"),
+            date_time=create_time.get("date_time"),
+        )
         if processed.get("recipeApprovalStatus") == "approved" and via_token:
-            v_user = processed.get("recipeApprovedByUsername") or "--"
-            v_role = (request.headers.get("X-User-Role") or "").strip() or "--"
-            _audit(v_user, v_role, "Recipe approved", rd)
+            v_user, v_role, _v_name = _recipe_change_verified_audit_parts(verified)
+            approve_ms = int(create_time.get("timestamp_ms") or 0) + 1
+            _audit(
+                v_user,
+                v_role,
+                "Recipe approved",
+                rd,
+                timestamp_ms=approve_ms,
+                date_time=create_time.get("date_time"),
+            )
         return jsonify({"id": recipe_id, "recipe": processed}), 201
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -1679,18 +1764,33 @@ def update_recipe(recipe_id):
         processed = calculation_service.process_recipe_form_data(recipe_data)
         _apply_recipe_approval_for_session_creator(processed)
         remarks = (recipe_data.get("recipeApprovalRemarks") or recipe_data.get("remarks") or "").strip()
-        tok_err, via_token = _apply_recipe_approval_verify_token(processed, remarks)
+        tok_err, via_token, verified = _apply_recipe_approval_verify_token(processed, remarks)
         if tok_err:
             code = 403 if "second person" in str(tok_err).lower() else 401
             return jsonify({"error": tok_err}), code
         existing = data_service.get_recipe(recipe_id)
         data_service.save_recipe(processed)
         rd = diff_recipe_audit_details(existing, processed, recipe_id=recipe_id)
-        _audit(None, None, "Recipe edited", "Recipe edited: {}".format(rd))
+        edit_time = _audit_time_fields()
+        _audit(
+            None,
+            None,
+            "Recipe edited",
+            "Recipe edited: {}".format(rd),
+            timestamp_ms=edit_time.get("timestamp_ms"),
+            date_time=edit_time.get("date_time"),
+        )
         if processed.get("recipeApprovalStatus") == "approved" and via_token:
-            v_user = processed.get("recipeApprovedByUsername") or "--"
-            v_role = (request.headers.get("X-User-Role") or "").strip() or "--"
-            _audit(v_user, v_role, "Recipe approved", rd)
+            v_user, v_role, _v_name = _recipe_change_verified_audit_parts(verified)
+            approve_ms = int(edit_time.get("timestamp_ms") or 0) + 1
+            _audit(
+                v_user,
+                v_role,
+                "Recipe approved",
+                rd,
+                timestamp_ms=approve_ms,
+                date_time=edit_time.get("date_time"),
+            )
         return jsonify({"id": recipe_id, "recipe": processed}), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -2259,6 +2359,7 @@ def create_member():
             after=data_service.sanitize_member_for_client(created) or created,
             signature=sig,
         )
+        _audit_member_permissions_if_changed(None, created, member_id=member_id, signature=sig)
         safe = data_service.sanitize_member_for_client(created) or dict(created)
         return jsonify({"id": member_id, "member": safe}), 201
     except ValueError as e:
@@ -2332,25 +2433,7 @@ def update_member(member_id):
                 target_user=uname,
                 signature=sig,
             )
-        perm_audit = None
-        try:
-            perm_audit = rbac_service.build_permission_change_audit(before_member, updated, uname)
-        except Exception:
-            perm_audit = None
-        if perm_audit:
-            _audit_event(
-                action="User permissions updated",
-                outcome="success",
-                entity_type="member",
-                entity_id=member_id,
-                entity_name=uname,
-                details=perm_audit.get("details") or "User permissions updated",
-                target_user=uname,
-                before=perm_audit.get("before"),
-                after=perm_audit.get("after"),
-                signature=sig,
-                extra=perm_audit.get("extra") or {},
-            )
+        _audit_member_permissions_if_changed(before_member, updated, member_id=member_id, signature=sig)
         _audit_event(
             action="User update",
             outcome="success",
@@ -2592,6 +2675,14 @@ def _release_esp_pressure_on_login():
     threading.Thread(target=_worker, name="esp-stop-on-login", daemon=True).start()
 
 
+def _clear_stale_clean_stop_on_login():
+    """Logout/SIGTERM may leave clean-stop; clear on login so mid-test power-cut still recovers."""
+    try:
+        data_service.clear_app_clean_stop_flag()
+    except Exception:
+        pass
+
+
 @app.route("/api/data/auth/login", methods=["POST"])
 def login():
     try:
@@ -2612,6 +2703,7 @@ def login():
             if user:
                 data_service.save_current_user(user)
                 data_service.write_session_power_audit_pending(user)
+                _clear_stale_clean_stop_on_login()
                 _audit_event(
                     action="Login",
                     outcome="success",
@@ -2694,6 +2786,7 @@ def login():
             data_service.save_current_user(user)
             data_service.refresh_current_user_from_member()
             data_service.write_session_power_audit_pending(data_service.get_current_user() or user)
+            _clear_stale_clean_stop_on_login()
             _audit_event(
                 action="Login",
                 outcome="success",
@@ -3023,6 +3116,7 @@ def login_biometric():
         data_service.record_successful_login(username)
         data_service.save_current_user(user)
         data_service.write_session_power_audit_pending(user)
+        _clear_stale_clean_stop_on_login()
         _audit_event(
             action="Biometric login",
             outcome="success",

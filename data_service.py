@@ -1832,6 +1832,17 @@ def consume_app_clean_stop_flag() -> bool:
         return False
 
 
+def clear_app_clean_stop_flag():
+    """Remove clean-stop marker without treating it as a prior clean exit (e.g. on login)."""
+    path = _get_storage_path(_APP_CLEAN_STOP_FLAG)
+    if not path.exists():
+        return
+    try:
+        path.unlink()
+    except Exception:
+        pass
+
+
 def touch_app_clean_stop_flag():
     """Mark a clean application shutdown (best-effort; used to avoid false power-interruption audits)."""
     path = _get_storage_path(_APP_CLEAN_STOP_FLAG)
