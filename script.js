@@ -3468,7 +3468,7 @@ function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
         'Validation performed', 'Report saved', 'Report generated', 'Report approved',
         'Report aborted', 'Report aborted (power loss)', 'Report PDF generated',
         'Recipe created', 'Recipe edited', 'Recipe approved', 'Power interruption',
-        'Approval verification', 'Disable Recipe', 'Recipe disabled',
+        'Approval verification', 'Reports export failed', 'Disable Recipe', 'Recipe disabled',
         'Added new user', 'Password changed', 'User create', 'User update',
         'User disable', 'User enable', 'User enable attempted', 'User unlock', 'User locked'
     ];

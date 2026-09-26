@@ -3624,41 +3624,96 @@ def _format_export_actors_detail(exported_by, approved_by):
     return "exported by {} ({}) | approved by {} ({})".format(ex_u, ex_e, ap_u, ap_e)
 
 
-def _log_usb_export_audit(cur, verifier, action: str, detail: str) -> None:
+def _audit_error_from_response(resp) -> str:
+    try:
+        if resp is not None:
+            data = resp.get_json(silent=True) or {}
+            return str(data.get("error") or data.get("message") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _audit_report_ids_label(report_ids) -> str:
+    out = []
+    for rid in report_ids or []:
+        try:
+            out.append(int(rid))
+        except (TypeError, ValueError):
+            continue
+    return ", ".join(str(i) for i in out)
+
+
+def _log_usb_export_audit(
+    cur,
+    verifier,
+    action: str,
+    detail: str,
+    *,
+    outcome: str = "success",
+    attribute_approver: bool = True,
+    extra: dict = None,
+) -> None:
     exported_by = _export_actor_snapshot(cur or {})
     approved_by = _export_actor_from_verifier(verifier) if verifier else dict(exported_by)
     ex_u = (exported_by or {}).get("username") or "--"
     ex_e = (exported_by or {}).get("employee_id") or "--"
     exporter_line = "exported by {} ({})".format(ex_u, ex_e)
-    if verifier:
+    if verifier and attribute_approver and outcome == "success":
         if exporter_line not in detail:
             detail = "{} | {}".format(detail, exporter_line) if detail else exporter_line
-    else:
+    elif outcome == "success":
         actors = _format_export_actors_detail(exported_by, approved_by)
         if actors and actors not in detail:
             detail = "{} | {}".format(detail, actors)
+    elif exporter_line not in detail:
+        detail = "{} | {}".format(detail, exporter_line) if detail else exporter_line
     signature = {}
-    if verifier:
+    if verifier and attribute_approver and outcome == "success":
         signature = {
             "mode": "export_approval",
             "username": approved_by.get("username") or "--",
             "role": approved_by.get("role") or "--",
         }
-    extra = {
+    audit_extra = {
         "exportedBy": exported_by,
         "exportApprovedBy": approved_by,
     }
-    approver_user = (approved_by or {}).get("username") if verifier else None
-    approver_role = (approved_by or {}).get("role") if verifier else None
+    if extra:
+        audit_extra.update(extra)
+    approver_user = None
+    approver_role = None
+    if verifier and attribute_approver and outcome == "success":
+        approver_user = (approved_by or {}).get("username")
+        approver_role = (approved_by or {}).get("role")
     _audit_event(
         action=action,
-        outcome="success",
+        outcome=outcome,
         details=detail,
         event_type="compliance",
         signature=signature,
-        extra=extra,
+        extra=audit_extra,
         actor_user=approver_user,
         actor_role=approver_role,
+    )
+
+
+def _log_reports_export_failure(cur, verifier, reason: str, report_ids=None, extra=None) -> None:
+    detail = str(reason or "Report export failed").strip() or "Report export failed"
+    label = _audit_report_ids_label(report_ids)
+    if label:
+        detail = "{} | report ids: {}".format(detail, label)
+    fail_extra = dict(extra or {})
+    if label:
+        fail_extra["reportIds"] = label
+    _log_usb_export_audit(
+        cur,
+        verifier,
+        "Reports export failed",
+        detail,
+        outcome="failed",
+        attribute_approver=False,
+        extra=fail_extra,
     )
 
 
@@ -4390,6 +4445,9 @@ def export_reports():
     Returns 409 with `devices` list when multiple pendrives are connected and none chosen.
     """
     mounted_now = None
+    report_ids = []
+    cur = None
+    verifier = None
     try:
         data = request.get_json(force=True, silent=True) or {}
         raw_ids = data.get("report_ids", [])
@@ -4400,11 +4458,19 @@ def export_reports():
             except (TypeError, ValueError):
                 continue
         if not report_ids:
+            cur = data_service.get_current_user()
+            _log_reports_export_failure(cur, None, "No report IDs provided", report_ids=[])
             return jsonify({"success": False, "error": "No report IDs provided"}), 400
         gate, verifier = _require_export_usb_and_verification_json()
-        if gate is not None:
-            return gate
         cur = data_service.get_current_user()
+        if gate is not None:
+            _log_reports_export_failure(
+                cur,
+                verifier,
+                _audit_error_from_response(gate[0]) or "Export approval or permission denied",
+                report_ids=report_ids,
+            )
+            return gate
         device_path = (data.get("device_path") or "").strip() or None
         requested_export_path = (data.get("export_path") or "").strip() or None
         pdf_html_by_id = data.get("pdf_html_by_id") or {}
@@ -4439,24 +4505,36 @@ def export_reports():
             else:
                 missing.append(rid)
         if missing:
+            err_msg = (
+                "PDF unavailable for report(s): {}. Approve the report first, "
+                "or ensure aborted reports were saved correctly."
+            ).format(", ".join(str(i) for i in missing))
+            _log_reports_export_failure(cur, verifier, err_msg, report_ids=report_ids, extra={"missing_pdfs": missing})
             return jsonify({
                 "success": False,
-                "error": (
-                    "PDF unavailable for report(s): {}. Approve the report first, "
-                    "or ensure aborted reports were saved correctly."
-                ).format(", ".join(str(i) for i in missing)),
+                "error": err_msg,
                 "missing_pdfs": missing,
             }), 400
 
         export_dir, err, devices, mounted_now = _resolve_export_destination(device_path, requested_export_path)
         if err == "MULTIPLE_PENDRIVES":
+            _log_reports_export_failure(
+                cur, verifier, "Multiple pendrives detected. Choose one.", report_ids=report_ids
+            )
             return jsonify({"success": False, "error": "Multiple pendrives detected. Choose one.", "devices": devices, "code": "MULTIPLE_PENDRIVES"}), 409
         if err:
+            _log_reports_export_failure(cur, verifier, str(err), report_ids=report_ids)
             return jsonify({"success": False, "error": err, "devices": devices}), 400
 
         for rid in report_ids:
             blocked = _check_report_approved_for_print_export(report_id=rid)
             if blocked is not None:
+                _log_reports_export_failure(
+                    cur,
+                    verifier,
+                    _audit_error_from_response(blocked[0]) or "Report must be approved before export",
+                    report_ids=report_ids,
+                )
                 return blocked
 
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -4494,13 +4572,19 @@ def export_reports():
             unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
 
         ok_count = len(exported_files)
-        ids_label = ", ".join(str(i) for i in report_ids[:ok_count]) if ok_count else ""
-        detail = "Exported {} report{} to USB".format(ok_count, "" if ok_count == 1 else "s")
-        if ids_label:
-            detail = "{} (ids: {})".format(detail, ids_label)
-        _log_usb_export_audit(cur, verifier, "Reports exported", detail)
+        if failed or ok_count == 0:
+            fail_detail = "Exported {} of {} report(s); failures: {}".format(
+                ok_count, len(report_ids), failed or "none copied"
+            )
+            _log_reports_export_failure(cur, verifier, fail_detail, report_ids=report_ids, extra={"failed": failed})
+        else:
+            ids_label = ", ".join(str(i) for i in report_ids[:ok_count])
+            detail = "Exported {} report{} to USB".format(ok_count, "" if ok_count == 1 else "s")
+            if ids_label:
+                detail = "{} (ids: {})".format(detail, ids_label)
+            _log_usb_export_audit(cur, verifier, "Reports exported", detail)
         return jsonify({
-            "success": (len(failed) == 0),
+            "success": (len(failed) == 0 and ok_count > 0),
             "count": len(exported_files),
             "exported_files": exported_files,
             "failed": failed,
@@ -4516,6 +4600,15 @@ def export_reports():
             except Exception:
                 pass
         app.logger.exception("Error exporting reports")
+        try:
+            _log_reports_export_failure(
+                cur or data_service.get_current_user(),
+                verifier,
+                _friendly_export_error(e),
+                report_ids=report_ids,
+            )
+        except Exception:
+            pass
         return jsonify({"success": False, "error": _friendly_export_error(e)}), 500
 
 
@@ -4542,6 +4635,7 @@ def export_reports_stream():
         except (TypeError, ValueError):
             continue
     if not report_ids:
+        _log_reports_export_failure(data_service.get_current_user(), None, "No report IDs provided", report_ids=[])
         return jsonify({"success": False, "error": "No report IDs provided"}), 400
     device_path = (data.get("device_path") or "").strip() or None
     requested_export_path = (data.get("export_path") or "").strip() or None
@@ -4553,18 +4647,57 @@ def export_reports_stream():
     power_off = bool(data.get("power_off") or False)
 
     gate, verifier = _require_export_usb_and_verification_json()
-    if gate is not None:
-        return gate
     cur = data_service.get_current_user()
+    if gate is not None:
+        _log_reports_export_failure(
+            cur,
+            verifier,
+            _audit_error_from_response(gate[0]) or "Export approval or permission denied",
+            report_ids=report_ids,
+        )
+        return gate
     for rid in report_ids:
         blocked = _check_report_approved_for_print_export(report_id=rid)
         if blocked is not None:
+            _log_reports_export_failure(
+                cur,
+                verifier,
+                _audit_error_from_response(blocked[0]) or "Report must be approved before export",
+                report_ids=report_ids,
+            )
             return blocked
 
     def _emit(obj):
         return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
     def gen():
+        audit_logged = False
+
+        def _audit_stream_failure(reason, extra=None):
+            nonlocal audit_logged
+            if audit_logged:
+                return
+            audit_logged = True
+            _log_reports_export_failure(cur, verifier, reason, report_ids=report_ids, extra=extra)
+
+        def _audit_stream_finish():
+            nonlocal audit_logged
+            if audit_logged:
+                return
+            audit_logged = True
+            failed = result.get("failed") or []
+            ok_count = int(result.get("count") or 0)
+            if ok_count > 0 and not failed:
+                detail = "Exported {} report{} to USB (stream)".format(
+                    ok_count, "" if ok_count == 1 else "s"
+                )
+                _log_usb_export_audit(cur, verifier, "Reports exported", detail)
+                return
+            fail_detail = "Exported {} of {} report(s) (stream)".format(ok_count, total)
+            if failed:
+                fail_detail = "{} | failures: {}".format(fail_detail, failed)
+            _log_reports_export_failure(cur, verifier, fail_detail, report_ids=report_ids, extra={"failed": failed})
+
         total = len(report_ids)
         # Budget allocation (sums to 100):
         #   3% detect-usb, 7% mount, 80% per-report PDF + copy, 8% sync+unmount, 2% done
@@ -4588,11 +4721,13 @@ def export_reports_stream():
 
             export_dir, err, devices, mounted_now = _resolve_export_destination(device_path, requested_export_path)
             if err == "MULTIPLE_PENDRIVES":
+                _audit_stream_failure("Multiple pendrives detected. Choose one.")
                 yield _emit({"event": "error", "code": "MULTIPLE_PENDRIVES",
                              "message": "Multiple pendrives detected. Choose one.",
                              "devices": devices})
                 return
             if err:
+                _audit_stream_failure(_friendly_export_error(err))
                 yield _emit({"event": "error", "message": _friendly_export_error(err), "devices": devices})
                 return
             result["export_directory"] = str(export_dir)
@@ -4604,6 +4739,7 @@ def export_reports_stream():
             try:
                 export_dir.mkdir(parents=True, exist_ok=True)
             except OSError as oe:
+                _audit_stream_failure(_friendly_export_error(oe))
                 yield _emit({"event": "error", "message": _friendly_export_error(oe)})
                 return
 
@@ -4675,11 +4811,7 @@ def export_reports_stream():
                 unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
                 mounted_now = None
 
-            ok_count = result["count"]
-            detail = "Exported {} report{} to USB (stream)".format(
-                ok_count, "" if ok_count == 1 else "s"
-            )
-            _log_usb_export_audit(cur, verifier, "Reports exported", detail)
+            _audit_stream_finish()
 
             result["ok"] = (len(result["failed"]) == 0 and result["count"] > 0)
             yield _emit({
@@ -4695,6 +4827,7 @@ def export_reports_stream():
             })
         except Exception as e:
             app.logger.exception("[EXPORT-STREAM] Unexpected failure")
+            _audit_stream_failure(_friendly_export_error(e))
             try:
                 yield _emit({"event": "error", "message": _friendly_export_error(e)})
             except Exception:
