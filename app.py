@@ -3643,6 +3643,62 @@ def _format_export_actors_detail(exported_by, approved_by):
     return "exported by {} ({}) | approved by {} ({})".format(ex_u, ex_e, ap_u, ap_e)
 
 
+
+
+def _stage_audit_usb_export(cur, verifier, entry_ids, pdf_path=""):
+    ids = []
+    for eid in entry_ids or []:
+        if eid is None:
+            continue
+        if isinstance(eid, str):
+            s = eid.strip()
+            if s:
+                ids.append(s)
+            continue
+        try:
+            n = int(eid)
+            if n > 0:
+                ids.append(str(n))
+        except (TypeError, ValueError):
+            s = str(eid).strip()
+            if s:
+                ids.append(s)
+    if not ids:
+        return None, None, None
+    export_id = secrets.token_urlsafe(16)
+    exported_by = _export_actor_snapshot(cur or {})
+    approved_by = _export_actor_from_verifier(verifier) if verifier else dict(exported_by)
+    audit_service.stage_audit_export_pending(
+        export_id=export_id,
+        entry_ids=ids,
+        exported_by=exported_by,
+        approved_by=approved_by,
+        pdf_path=str(pdf_path or ""),
+    )
+    return export_id, exported_by, approved_by
+
+
+def _maybe_purge_scheduled_audit_export() -> None:
+    try:
+        purged = audit_service.run_due_audit_export_purge()
+    except Exception:
+        app.logger.exception("Audit export purge check failed")
+        return
+    if not purged:
+        return
+    exported = purged.get("exported_by") if isinstance(purged.get("exported_by"), dict) else {}
+    approved = purged.get("approved_by") if isinstance(purged.get("approved_by"), dict) else {}
+    details = (
+        "Audit cycle started | Exported by: {} ({}) | Approved by: {} ({})"
+    ).format(
+        exported.get("username") or "--",
+        exported.get("employee_id") or "--",
+        approved.get("username") or "--",
+        approved.get("employee_id") or "--",
+    )
+    _audit(None, None, "Audit cycle started", details)
+
+
 def _audit_error_from_response(resp) -> str:
     try:
         if resp is not None:
@@ -4236,6 +4292,13 @@ def export_audit_trails():
             power_off = bool(data.get("power_off") or False)
             unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
 
+        entry_ids = []
+        for e in entries or []:
+            if isinstance(e, dict) and e.get("id") is not None:
+                entry_ids.append(e.get("id"))
+        export_id, exported_by, approved_by = _stage_audit_usb_export(
+            cur, verifier, entry_ids, pdf_path=str(out_path)
+        )
         _log_export_completed_audit(
             cur,
             verifier,
@@ -4249,6 +4312,9 @@ def export_audit_trails():
             "format": "pdf",
             "entries": len(entries),
             "unmount_detail": unmount_detail,
+            "export_id": export_id,
+            "entries_staged": len(entry_ids) if export_id else 0,
+            "retentionNote": "After you verify the USB copy, exported audit rows are purged from this device after 24 hours.",
         }), 200
     except Exception as e:
         if mounted_now:
@@ -4258,6 +4324,48 @@ def export_audit_trails():
                 pass
         app.logger.exception("Error exporting audit trails")
         return jsonify({"success": False, "error": _friendly_export_error(e)}), 500
+
+
+
+
+@app.route("/api/audit/export/confirm", methods=["POST"])
+def confirm_audit_export():
+    """Operator confirmed USB audit export; starts 24h retention timer."""
+    try:
+        _maybe_purge_scheduled_audit_export()
+        cur = data_service.get_current_user()
+        if not cur:
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+        if not _session_has_internal("export-usb"):
+            return jsonify({"success": False, "error": "Forbidden."}), 403
+        data = request.get_json(force=True, silent=True) or {}
+        export_id = (data.get("export_id") or "").strip()
+        verified = bool(data.get("verified"))
+        if not verified:
+            return jsonify({"success": True, "verified": False, "scheduled": False}), 200
+        if not export_id:
+            return jsonify({"success": False, "error": "Missing export_id"}), 400
+        scheduled = audit_service.confirm_audit_export_verified(export_id)
+        if not scheduled:
+            return jsonify({"success": False, "error": "Export session expired or invalid. Export again."}), 400
+        _audit(
+            cur.get("username") or cur.get("name"),
+            cur.get("role"),
+            "Audit export verified",
+            "USB export verified; {} entries scheduled for removal after 24 hours".format(
+                len(scheduled.get("entry_ids") or [])
+            ),
+        )
+        return jsonify({
+            "success": True,
+            "verified": True,
+            "scheduled": True,
+            "purge_at_ms": int(scheduled.get("purge_at_ms") or 0),
+            "entries_scheduled": len(scheduled.get("entry_ids") or []),
+        }), 200
+    except Exception as e:
+        app.logger.exception("Error confirming audit export")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # =================== CALCULATE ==========================

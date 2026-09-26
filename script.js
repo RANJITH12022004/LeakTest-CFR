@@ -3425,6 +3425,7 @@ function _friendlyExportError(err) {
         return 'Could not access the pendrive. Reconnect it and try again.';
     if (t.indexOf('disk full') !== -1 || t.indexOf('no space') !== -1)
         return 'Pendrive is full. Free space or use a different pendrive.';
+    if (raw) return raw;
     return 'Failed to export. Please format the pendrive (FAT32 or exFAT) and try again.';
 }
 
@@ -5771,16 +5772,21 @@ function exportAuditTrails() {
                                     }).then(function (confirmRes) {
                                         hideLoadingOverlay();
                                         if (confirmRes && confirmRes.success && confirmRes.scheduled) {
-                                            showAuditExportRetentionModal(confirmRes.entries_scheduled).then(function () {
+                                            showAppModal(
+                                                'Audit trail export successful.',
+                                                'Export Audit'
+                                            ).then(function () {
+                                                return showAuditExportRetentionModal(confirmRes.entries_scheduled);
+                                            }).then(function () {
                                                 if (typeof applyAuditFiltersAndRefresh === 'function') {
                                                     applyAuditFiltersAndRefresh();
                                                 }
                                             });
                                         } else {
-                                            showAppModal(
-                                                _friendlyExportError((confirmRes && confirmRes.error) || 'Could not schedule retention'),
-                                                titleText
-                                            );
+                                            var confirmErrText = (confirmRes && confirmRes.error)
+                                                ? String(confirmRes.error)
+                                                : 'Could not confirm audit trail export. Please try again.';
+                                            showAppModal(confirmErrText, titleText);
                                         }
                                     }).catch(function (confirmErr) {
                                         hideLoadingOverlay();
