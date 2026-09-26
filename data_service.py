@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-data_service.py - Data storage and management service for Friability Tester
+data_service.py - Data storage and management service for Leak Test
 Handles CRUD for recipes, reports, members, and factory settings.
 All data stored as JSON files under STORAGE_DIR.
 """
@@ -11,6 +11,10 @@ import json
 import os
 import pathlib
 import secrets
+import shutil
+import tempfile
+import threading
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 
@@ -20,6 +24,10 @@ _config = {}
 _storage_dir = None
 _reports_dir = None
 _current_user = None
+# Serialize session file writes; unique tmp names still protect all JSON files.
+_session_save_lock = threading.Lock()
+_json_write_locks_guard = threading.Lock()
+_json_write_locks: Dict[str, threading.Lock] = {}
 
 FACTORY_USERNAME = "RLERLT"
 FACTORY_PASSWORD = "Rahul"
@@ -30,12 +38,8 @@ FACTORY_USER = {
     "role": "Factory",
 }
 
-PASSWORD_HISTORY_LIMIT = 5
-PASSWORD_HISTORY_REUSE_ERROR = "New password must not match any of your last 5 passwords."
-
-
 def _creation_password_pepper() -> str:
-    return os.environ.get("KIOSK_PASSWORD_PEPPER", "tapdensity-kiosk-default-pepper-v1")
+    return os.environ.get("KIOSK_PASSWORD_PEPPER", "leaktest-kiosk-default-pepper-v1")
 
 
 def hash_creation_password(salt: str, password: str) -> str:
@@ -65,89 +69,6 @@ def new_password_matches_creation_commitment(member: Dict[str, Any], new_passwor
     return hmac.compare_digest(hash_creation_password(salt, new_password), expected)
 
 
-def _normalize_password_history(member: Dict[str, Any]) -> None:
-    """Ensure passwordHistory is a clean list of salted hash entries, capped at PASSWORD_HISTORY_LIMIT."""
-    raw = member.get("passwordHistory")
-    if not isinstance(raw, list):
-        member["passwordHistory"] = []
-        return
-    cleaned: List[Dict[str, Any]] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        salt = str(entry.get("salt") or "")
-        hash_val = str(entry.get("hash") or "")
-        if not salt or not hash_val:
-            continue
-        cleaned.append({
-            "salt": salt,
-            "hash": hash_val,
-            "changedAt": str(entry.get("changedAt") or ""),
-        })
-        if len(cleaned) >= PASSWORD_HISTORY_LIMIT:
-            break
-    member["passwordHistory"] = cleaned
-
-
-def _make_history_entry(password: str) -> Dict[str, Any]:
-    salt = secrets.token_hex(16)
-    return {
-        "salt": salt,
-        "hash": hash_creation_password(salt, str(password or "")),
-        "changedAt": datetime.utcnow().isoformat() + "Z",
-    }
-
-
-def password_reuses_recent(member: Dict[str, Any], new_password: str) -> bool:
-    """True if new_password matches the current password or any of the last 5 history hashes."""
-    new_pwd = str(new_password or "")
-    if not new_pwd:
-        return False
-    current = str(member.get("password") or "")
-    if current and current == new_pwd:
-        return True
-    if new_password_matches_creation_commitment(member, new_pwd):
-        return True
-    _normalize_password_history(member)
-    for entry in member.get("passwordHistory") or []:
-        salt = str(entry.get("salt") or "")
-        expected = str(entry.get("hash") or "")
-        if not salt or not expected:
-            continue
-        if hmac.compare_digest(hash_creation_password(salt, new_pwd), expected):
-            return True
-    return False
-
-
-def _push_password_into_history(member: Dict[str, Any], old_password: str) -> None:
-    """Prepend hashed old password to history and trim to PASSWORD_HISTORY_LIMIT."""
-    old_pwd = str(old_password or "")
-    _normalize_password_history(member)
-    if not old_pwd:
-        return
-    history = list(member.get("passwordHistory") or [])
-    history.insert(0, _make_history_entry(old_pwd))
-    member["passwordHistory"] = history[:PASSWORD_HISTORY_LIMIT]
-
-
-def apply_password_change_to_member(
-    member: Dict[str, Any],
-    new_password: str,
-    changed_at: Optional[str] = None,
-) -> None:
-    """
-    Reject reuse of recent passwords, push the old password into history, and set the new password.
-    Mutates member in place. Raises ValueError(PASSWORD_HISTORY_REUSE_ERROR) on reuse.
-    """
-    new_pwd = str(new_password or "")
-    if password_reuses_recent(member, new_pwd):
-        raise ValueError(PASSWORD_HISTORY_REUSE_ERROR)
-    old_pwd = str(member.get("password") or "")
-    _push_password_into_history(member, old_pwd)
-    member["password"] = new_pwd
-    member["passwordLastChangedAt"] = str(changed_at or (datetime.utcnow().isoformat() + "Z"))
-
-
 def sanitize_member_for_client(member: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Return a shallow copy safe for JSON responses (no password or creation commitment fields)."""
     if not member:
@@ -156,7 +77,6 @@ def sanitize_member_for_client(member: Optional[Dict[str, Any]]) -> Optional[Dic
     safe.pop("password", None)
     safe.pop("creationPasswordSalt", None)
     safe.pop("creationPasswordHash", None)
-    safe.pop("passwordHistory", None)
     return safe
 
 
@@ -169,7 +89,8 @@ def complete_mandatory_password_reset(username: str, new_password: str) -> Dict[
         raise ValueError("The factory user cannot be modified.")
     if not bool(m.get("mustChangePassword")):
         raise ValueError("Password change is not required for this account")
-    apply_password_change_to_member(m, new_password)
+    m["password"] = str(new_password or "")
+    m["passwordLastChangedAt"] = datetime.utcnow().isoformat() + "Z"
     _clear_creation_password_commitment(m)
     _save_member_record(m)
     return m
@@ -194,121 +115,335 @@ def init(config):
     """Initialize data service with config."""
     global _config, _storage_dir, _reports_dir
     _config = dict(config)
-    _storage_dir = pathlib.Path(_config.get("STORAGE_DIR", "./storage"))
+    _refresh_storage_dir()
     _reports_dir = pathlib.Path(_config.get("REPORTS_DIR", "./reports"))
     _storage_dir.mkdir(parents=True, exist_ok=True)
     _reports_dir.mkdir(parents=True, exist_ok=True)
-    _sync_factory_settings_storage()
 
 
-def _app_root_storage_dir() -> pathlib.Path:
-    app_root = pathlib.Path(
-        _config.get("APP_ROOT") or os.environ.get("APP_ROOT", "/opt/kiosk")
-    )
-    return app_root / "storage"
+def _configured_storage_dir() -> Optional[pathlib.Path]:
+    """Explicit STORAGE_DIR from env or init config (production internal USB)."""
+    for raw in (
+        os.environ.get("STORAGE_DIR"),
+        (_config.get("STORAGE_DIR") if _config else None),
+    ):
+        if raw:
+            return pathlib.Path(raw)
+    return None
 
 
-def _factory_settings_mirror_path() -> pathlib.Path:
-    return _app_root_storage_dir() / "factorySettings.json"
+def _internal_usb_storage_dir() -> Optional[pathlib.Path]:
+    internal = pathlib.Path(os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal"))
+    if internal.is_dir():
+        return internal / "storage"
+    return None
 
 
-def _file_mtime(path: pathlib.Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
+def _storage_dir_candidates() -> List[pathlib.Path]:
+    """Storage roots when no explicit STORAGE_DIR is configured."""
+    seen = set()
+    out: List[pathlib.Path] = []
 
+    def _add(p: pathlib.Path) -> None:
+        try:
+            key = str(p.resolve())
+        except OSError:
+            key = str(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
 
-def _merge_factory_settings_dicts(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge settings; non-empty values in the newer primary dict win per key."""
-    out = dict(secondary or {})
-    for key, value in (primary or {}).items():
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        out[key] = value
+    internal_storage = _internal_usb_storage_dir()
+    if internal_storage is not None:
+        _add(internal_storage)
+    app_root = _config.get("APP_ROOT") if _config else None
+    if app_root:
+        _add(pathlib.Path(app_root) / "storage")
+    if not out:
+        _add(pathlib.Path("./storage"))
     return out
 
 
-def _normalize_factory_settings_dict(settings: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply the same validation/normalization used when saving factory settings."""
-    def _to_bool(v):
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, (int, float)):
-            return bool(v)
-        if isinstance(v, str):
-            t = v.strip().lower()
-            if t in ("false", "0", "off", "no", "disabled"):
-                return False
-            if t in ("true", "1", "on", "yes", "enabled"):
-                return True
-        return True
-
-    if not isinstance(settings, dict):
-        settings = {}
-    merged = dict(settings)
-    merged.pop("loadCellRange", None)
-    merged["biometricEnabled"] = _to_bool(merged.get("biometricEnabled", True))
-    for key, default, min_val, max_val in [
-        ("maxRecipes", 150, 1, 999),
-        ("maxUsers", 10, 1, 999),
-        ("maxAdmins", 2, 1, 99),
-        ("maxSupervisors", 3, 1, 99),
-        ("passwordResetPeriodDays", 30, 1, 3650),
-        ("autoLogoutMinutes", 0, 0, 10080),
-    ]:
-        val = merged.get(key)
-        if val is not None:
-            try:
-                val = max(min_val, min(max_val, int(val)))
-            except (ValueError, TypeError):
-                val = default
-            merged[key] = val
-    return merged
-
-
-def _sync_factory_settings_storage() -> None:
-    """
-    Keep factorySettings.json consistent on internal USB and APP_ROOT/storage.
-    After power loss the service must not read stale defaults from the wrong path.
-    """
-    canonical = _get_storage_path("factorySettings.json")
-    mirror = _factory_settings_mirror_path()
+def _storage_dir_score(path: pathlib.Path) -> int:
+    """Prefer a tree that already has persisted factory settings (fallback mode only)."""
+    fs_file = path / "factorySettings.json"
+    if not fs_file.is_file():
+        return 0
     try:
-        mirror.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
+        data = _load_json_file(fs_file, default={})
+        if isinstance(data, dict) and data:
+            return 2
+    except Exception:
         pass
+    return 1
 
-    canon_data = _load_json_file(canonical, default={}) if canonical.exists() else {}
-    mirror_data = _load_json_file(mirror, default={}) if mirror.exists() else {}
-    if not isinstance(canon_data, dict):
-        canon_data = {}
-    if not isinstance(mirror_data, dict):
-        mirror_data = {}
 
-    if canonical.exists() and mirror.exists():
-        if _file_mtime(canonical) >= _file_mtime(mirror):
-            merged = _merge_factory_settings_dicts(canon_data, mirror_data)
-        else:
-            merged = _merge_factory_settings_dicts(mirror_data, canon_data)
-    elif canonical.exists():
-        merged = dict(canon_data)
-    elif mirror.exists():
-        merged = dict(mirror_data)
+def _path_is_writable(path: pathlib.Path) -> bool:
+    """True if we can create the dir and write a probe file (USB remount-ro fails here)."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".kiosk_write_probe"
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+        return True
+    except OSError:
+        return False
+
+
+_CRITICAL_JSON_NAMES = frozenset(
+    {
+        "members.json",
+        "recipes.json",
+        "reports.json",
+        "factorySettings.json",
+        "roles.json",
+        "current_user.json",
+        "session_power_audit_pending.json",
+    }
+)
+
+
+def _sd_storage_dir() -> pathlib.Path:
+    app_root = None
+    if _config:
+        app_root = _config.get("APP_ROOT")
+    if not app_root:
+        app_root = os.environ.get("APP_ROOT", "/opt/kiosk")
+    return pathlib.Path(app_root) / "storage"
+
+
+def _json_richness_score(name: str, data, path: Optional[pathlib.Path] = None) -> int:
+    """Higher = prefer this copy (survives empty SD placeholders after remount-ro fallback)."""
+    if data is None:
+        return -1
+    score = 0
+    if isinstance(data, list):
+        score = len(data) * 100
+        if name == "members.json":
+            enrolled = 0
+            for m in data:
+                if not isinstance(m, dict):
+                    continue
+                if m.get("fingerprintTemplateId") not in (None, "", 0, "0"):
+                    enrolled += 1
+            score += enrolled * 10
+    elif isinstance(data, dict):
+        score = len(data) * 10
+        if data:
+            score += 5
     else:
-        return
+        return 0
+    if path is not None:
+        try:
+            score += min(50, int(path.stat().st_mtime) % 100000 // 2000)
+        except OSError:
+            pass
+    return score
 
-    merged = _normalize_factory_settings_dict(merged)
-    _save_json_file(canonical, merged)
-    if mirror.resolve() != canonical.resolve():
-        _save_json_file(mirror, merged)
+
+def _candidate_storage_dirs_for_read() -> List[pathlib.Path]:
+    """USB (even if RO) + active storage + SD mirror — used to avoid empty fallback views."""
+    seen = set()
+    out: List[pathlib.Path] = []
+
+    def _add(p: Optional[pathlib.Path]) -> None:
+        if p is None:
+            return
+        try:
+            key = str(p.resolve())
+        except OSError:
+            key = str(p)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(p)
+
+    _add(_internal_usb_storage_dir())
+    if _storage_dir is not None:
+        _add(_storage_dir)
+    _add(_sd_storage_dir())
+    configured = _configured_storage_dir()
+    _add(configured)
+    return out
+
+
+def _load_critical_json(name: str, default=None):
+    """Load critical JSON from the richest readable copy (USB RO / USB RW / SD mirror)."""
+    if default is None:
+        default = []
+    best = None
+    best_score = -1
+    for root in _candidate_storage_dirs_for_read():
+        path = root / name
+        if not path.is_file():
+            continue
+        data = _load_json_file(path, default=None)
+        score = _json_richness_score(name, data, path)
+        if score > best_score:
+            best_score = score
+            best = data
+    if best is None:
+        return default
+    return best
+
+
+def _mirror_critical_json(filepath: pathlib.Path, data) -> None:
+    """Dual-write critical files to SD (and USB when available) so remount-ro cannot erase login data."""
+    name = filepath.name
+    if name not in _CRITICAL_JSON_NAMES:
+        return
+    usb = _internal_usb_storage_dir()
+    sd = _sd_storage_dir()
+    try:
+        primary = filepath.resolve()
+    except OSError:
+        primary = filepath
+    targets: List[pathlib.Path] = []
+    try:
+        if usb is not None and primary.parent.resolve() == usb.resolve():
+            targets.append(sd / name)
+        elif primary.parent.resolve() == sd.resolve():
+            if usb is not None and _path_is_writable(usb):
+                targets.append(usb / name)
+        else:
+            # Unexpected path — still keep an SD mirror.
+            targets.append(sd / name)
+            if usb is not None and _path_is_writable(usb):
+                targets.append(usb / name)
+    except OSError:
+        targets.append(sd / name)
+
+    for target in targets:
+        try:
+            if target.resolve() == primary:
+                continue
+        except OSError:
+            if str(target) == str(filepath):
+                continue
+        try:
+            _save_json_file_atomic(target, data)
+        except Exception:
+            pass
+
+
+def _storage_file_needs_seed(path: pathlib.Path) -> bool:
+    """True when dest is missing or is an empty JSON placeholder ([] / {})."""
+    if not path.is_file():
+        return True
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return True
+    if size <= 0:
+        return True
+    # "[]" / "{}" are 2 bytes — treat as empty so RO-USB seed is not skipped.
+    if size <= 4:
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+            if raw in ("", "[]", "{}", "null"):
+                return True
+        except OSError:
+            return True
+    try:
+        data = _load_json_file(path, default=None)
+        if data is None:
+            return True
+        if isinstance(data, list) and len(data) == 0:
+            return True
+        if isinstance(data, dict) and len(data) == 0:
+            return True
+    except Exception:
+        return True
+    return False
+
+
+def _seed_storage_from_readonly_usb(dest: pathlib.Path) -> None:
+    """If USB is readable but RO, copy critical JSON so login/recipes still work on SD."""
+    usb_storage = _internal_usb_storage_dir()
+    if usb_storage is None or not usb_storage.is_dir():
+        return
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    for name in (
+        "members.json",
+        "factorySettings.json",
+        "recipes.json",
+        "roles.json",
+        "reports.json",
+    ):
+        src = usb_storage / name
+        dst = dest / name
+        if not src.is_file():
+            continue
+        if not _storage_file_needs_seed(dst):
+            # Still refresh when USB clearly has more members/recipes than empty-looking SD.
+            try:
+                if name in ("members.json", "recipes.json", "reports.json"):
+                    src_data = _load_json_file(src, default=[])
+                    dst_data = _load_json_file(dst, default=[])
+                    if isinstance(src_data, list) and isinstance(dst_data, list):
+                        if _json_richness_score(name, src_data, src) > _json_richness_score(name, dst_data, dst):
+                            shutil.copy2(src, dst)
+                continue
+            except Exception:
+                continue
+        try:
+            shutil.copy2(src, dst)
+        except OSError:
+            pass
+
+
+def _refresh_storage_dir() -> None:
+    """Re-resolve STORAGE_DIR; always prefer writable USB when present.
+
+    After power-loss the launcher may start on SD fallback while USB is still RO.
+    Once USB is repaired/writable again, switch back so members/recipes/reports return.
+    """
+    global _storage_dir
+    usb = _internal_usb_storage_dir()
+    sd_fallback = _sd_storage_dir()
+    if usb is not None and _path_is_writable(usb):
+        _storage_dir = usb
+        return
+    # USB absent or remount-ro — seed SD from readable USB so login/recipes are not empty.
+    _seed_storage_from_readonly_usb(sd_fallback)
+    configured = _configured_storage_dir()
+    if configured is not None and _path_is_writable(configured):
+        _storage_dir = configured
+        return
+    candidates = _storage_dir_candidates()
+    writable = [p for p in candidates if _path_is_writable(p)]
+    if writable:
+        if len(writable) == 1:
+            _storage_dir = writable[0]
+        else:
+            _storage_dir = max(writable, key=_storage_dir_score)
+        return
+    _storage_dir = sd_fallback
 
 
 def _get_storage_path(filename: str) -> pathlib.Path:
+    _refresh_storage_dir()
     safe_name = "".join(c for c in filename if c.isalnum() or c in "-_.")
     return _storage_dir / safe_name
+
+
+def _json_write_lock_for(filepath: pathlib.Path) -> threading.Lock:
+    key = str(filepath)
+    with _json_write_locks_guard:
+        lock = _json_write_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _json_write_locks[key] = lock
+        return lock
 
 
 def _load_json_file(filepath: pathlib.Path, default=None):
@@ -324,54 +459,94 @@ def _load_json_file(filepath: pathlib.Path, default=None):
         return default
 
 
-def _save_json_file(filepath: pathlib.Path, data):
+def _save_json_file_atomic(filepath: pathlib.Path, data):
+    """Atomic JSON write (no mirroring)."""
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-def _save_json_file_durable(filepath: pathlib.Path, data):
-    """Atomic replace + fsync so sudden power loss keeps the last complete checkpoint."""
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.flush()
+    lock = _json_write_lock_for(filepath)
+    with lock:
+        fd = None
+        tmp_path = None
         try:
-            os.fsync(f.fileno())
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=filepath.name + ".",
+                suffix=".tmp",
+                dir=str(filepath.parent),
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = None  # ownership transferred to the file object
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, filepath)
+            tmp_path = None
+            try:
+                dir_fd = os.open(str(filepath.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
         except OSError:
-            pass
-    os.replace(tmp_path, filepath)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            raise
+
+
+def _save_json_file(filepath: pathlib.Path, data):
+    """Atomic JSON write + dual-write critical files to SD/USB mirror."""
+    _save_json_file_atomic(filepath, data)
     try:
-        dir_fd = os.open(str(filepath.parent), os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except OSError:
+        _mirror_critical_json(filepath, data)
+    except Exception:
         pass
 
 
 # =================== RECIPE OPERATIONS ==========================
 
 
-def list_recipes(filter_type=None):
-    """List all recipes, optionally filtered by type."""
-    recipes_path = _get_storage_path("recipes.json")
-    recipes = _load_json_file(recipes_path, default=[])
+def _normalize_recipe_status(recipe: Dict[str, Any]) -> str:
+    status = str((recipe or {}).get("status") or "active").strip().lower()
+    return status if status in ("active", "disabled") else "active"
+
+
+def _normalize_recipe_record(recipe: Dict[str, Any]) -> Dict[str, Any]:
+    item = dict(recipe or {})
+    item["status"] = _normalize_recipe_status(item)
+    return item
+
+
+def list_recipes(filter_type=None, status: str = "all"):
+    """List recipes, optionally filtered by type and active/disabled status."""
+    recipes = _load_critical_json("recipes.json", default=[])
     if not isinstance(recipes, list):
         recipes = []
+    recipes = [_normalize_recipe_record(r) if isinstance(r, dict) else r for r in recipes]
+    recipes = [r for r in recipes if isinstance(r, dict)]
     if filter_type:
         recipes = [r for r in recipes if r.get("type") == filter_type]
+    status_norm = str(status or "all").strip().lower()
+    if status_norm == "disabled":
+        recipes = [r for r in recipes if r.get("status") == "disabled"]
+    elif status_norm == "active":
+        recipes = [r for r in recipes if r.get("status") != "disabled"]
     return recipes
 
 
-def get_recipe(recipe_id: int):
+def get_recipe(recipe_id: int, include_disabled: bool = False):
     """Get recipe by ID."""
     want = _norm_recipe_id(recipe_id)
     if want is None:
         return None
-    recipes = list_recipes()
+    recipes = list_recipes(status="all" if include_disabled else "active")
     for recipe in recipes:
         if _norm_recipe_id(recipe.get("id")) == want:
             return recipe
@@ -391,7 +566,7 @@ def _norm_recipe_id(recipe_id) -> Optional[int]:
 def save_recipe(recipe_data: Dict[str, Any]) -> int:
     """Save recipe (create or update). Enforces maxRecipes from factory settings."""
     recipes_path = _get_storage_path("recipes.json")
-    recipes = list_recipes()
+    recipes = list_recipes(status="all")
     recipe_id = _norm_recipe_id(recipe_data.get("id"))
     if recipe_id is not None:
         recipe_data["id"] = recipe_id
@@ -402,12 +577,21 @@ def save_recipe(recipe_data: Dict[str, Any]) -> int:
     if not is_update:
         fs = get_factory_settings()
         max_recipes = int(fs.get("maxRecipes") or 150)
-        if len(recipes) >= max_recipes:
+        active_recipes = [r for r in recipes if _normalize_recipe_status(r) != "disabled"]
+        if len(active_recipes) >= max_recipes:
             raise ValueError("Your limit for recipes reached. Contact support for upgrade.")
+
+    incoming_had_status = "status" in recipe_data
+    recipe_data = _normalize_recipe_record(recipe_data)
 
     if recipe_id and is_update:
         for i, r in enumerate(recipes):
-            if r.get("id") == recipe_id:
+            if _norm_recipe_id(r.get("id")) == recipe_id:
+                if not incoming_had_status and r.get("status"):
+                    recipe_data["status"] = _normalize_recipe_status(r)
+                if recipe_data.get("status") != "disabled":
+                    for key in ("disabledAt", "disabledBy", "disabledByUsername"):
+                        recipe_data.pop(key, None)
                 recipes[i] = recipe_data
                 _save_json_file(recipes_path, recipes)
                 return recipe_id
@@ -426,102 +610,79 @@ def save_recipe(recipe_data: Dict[str, Any]) -> int:
 
 
 def delete_recipe(recipe_id: int) -> bool:
-    """Delete recipe by ID."""
+    """Backward-compatible alias for disable_recipe()."""
+    return disable_recipe(recipe_id) is not None
+
+
+def disable_recipe(recipe_id: int, disabled_by: Optional[str] = None, disabled_by_username: Optional[str] = None):
+    """Soft-disable recipe by ID and keep it in storage for re-enable."""
     recipes_path = _get_storage_path("recipes.json")
-    recipes = list_recipes()
-    original_len = len(recipes)
-    recipes = [r for r in recipes if r.get("id") != recipe_id]
-    if len(recipes) < original_len:
-        _save_json_file(recipes_path, recipes)
-        return True
-    return False
+    recipes = list_recipes(status="all")
+    for i, recipe in enumerate(recipes):
+        if _norm_recipe_id(recipe.get("id")) == _norm_recipe_id(recipe_id):
+            updated = _normalize_recipe_record(recipe)
+            updated["status"] = "disabled"
+            updated["disabledAt"] = datetime.utcnow().isoformat() + "Z"
+            if disabled_by is not None:
+                updated["disabledBy"] = str(disabled_by or "").strip() or "--"
+            if disabled_by_username is not None:
+                updated["disabledByUsername"] = str(disabled_by_username or "").strip() or "--"
+            recipes[i] = updated
+            _save_json_file(recipes_path, recipes)
+            return updated
+    return None
 
 
-def list_disabled_recipes() -> list:
-    """List archived disabled recipes (newest first)."""
-    path = _get_storage_path("disabled_recipes.json")
-    rows = _load_json_file(path, default=[])
-    if not isinstance(rows, list):
-        rows = []
-
-    def sort_key(r):
-        ts = r.get("disabledAt") or r.get("recipeDisabledAt") or r.get("createdAt") or ""
-        try:
-            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-            if dt.tzinfo is not None:
-                dt = dt.astimezone().replace(tzinfo=None)
-            return dt.timestamp()
-        except Exception:
-            return float("-inf")
-
-    rows.sort(key=sort_key, reverse=True)
-    return rows
-
-
-def archive_disabled_recipe(
-    recipe_data: Dict[str, Any],
-    *,
-    disabled_by: str = "",
-    disabled_by_username: str = "",
-    disable_approved_by: str = "",
-    disable_approved_by_username: str = "",
-    disable_approval_remarks: str = "",
-) -> bool:
-    """Remove recipe from active list and store in disabled archive."""
-    recipe_id = _norm_recipe_id((recipe_data or {}).get("id"))
-    if recipe_id is None:
-        return False
-    if not delete_recipe(recipe_id):
-        return False
-    entry = dict(recipe_data)
-    entry["id"] = recipe_id
-    entry["disabledAt"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    entry["disabledBy"] = disabled_by or "--"
-    entry["disabledByUsername"] = disabled_by_username or "--"
-    entry["disableApprovedBy"] = disable_approved_by or "--"
-    entry["disableApprovedByUsername"] = disable_approved_by_username or "--"
-    entry["disableApprovalRemarks"] = (disable_approval_remarks or "").strip()
-    path = _get_storage_path("disabled_recipes.json")
-    disabled = list_disabled_recipes()
-    disabled = [d for d in disabled if _norm_recipe_id(d.get("id")) != recipe_id]
-    disabled.append(entry)
-    _save_json_file(path, disabled)
-    return True
+def enable_recipe(recipe_id: int):
+    """Re-enable a previously disabled recipe."""
+    recipes_path = _get_storage_path("recipes.json")
+    recipes = list_recipes(status="all")
+    for i, recipe in enumerate(recipes):
+        if _norm_recipe_id(recipe.get("id")) == _norm_recipe_id(recipe_id):
+            updated = _normalize_recipe_record(recipe)
+            updated["status"] = "active"
+            for key in ("disabledAt", "disabledBy", "disabledByUsername"):
+                updated.pop(key, None)
+            recipes[i] = updated
+            _save_json_file(recipes_path, recipes)
+            return updated
+    return None
 
 
 # =================== REPORT OPERATIONS ==========================
 
 
-def _load_reports_raw():
-    """Load every stored report (including pending approval drafts)."""
-    reports_path = _get_storage_path("reports.json")
-    reports = _load_json_file(reports_path, default=[])
+def _normalize_report_type(report: Dict[str, Any]) -> str:
+    """Canonical report type for list/filter (handles legacy rows missing top-level type)."""
+    if not isinstance(report, dict):
+        return "test"
+    t = str(report.get("type") or "").strip().lower()
+    if t in ("test", "validation", "calibration"):
+        return t
+    td = report.get("testData")
+    if isinstance(td, dict):
+        td_type = str(td.get("type") or "").strip().lower()
+        if td_type in ("test", "validation", "calibration"):
+            return td_type
+        if td.get("calibrationSubtype"):
+            return "calibration"
+        if td.get("validationSubtype"):
+            return "validation"
+    if report.get("calibrationSubtype"):
+        return "calibration"
+    if report.get("validationSubtype"):
+        return "validation"
+    return t or "test"
+
+
+def list_reports(filter_type="all"):
+    """List reports, optionally filtered by type."""
+    reports = _load_critical_json("reports.json", default=[])
     if not isinstance(reports, list):
         reports = []
-    return reports
-
-
-def report_visible_in_list(report: Dict[str, Any]) -> bool:
-    """Approved reports and power-loss aborted reports appear in the reports list.
-
-    Pending drafts stay hidden until a reviewer/Admin approves them.
-    """
-    if not isinstance(report, dict):
-        return False
-    st = report.get("reportApprovalStatus")
-    if st is None:
-        return True
-    norm = str(st).strip().lower()
-    return norm in ("approved", "aborted")
-
-
-def list_reports(filter_type="all", include_pending=False):
-    """List reports, optionally filtered by type."""
-    reports = _load_reports_raw()
-    if not include_pending:
-        reports = [r for r in reports if report_visible_in_list(r)]
     if filter_type and filter_type != "all":
-        reports = [r for r in reports if r.get("type") == filter_type]
+        want = str(filter_type).strip().lower()
+        reports = [r for r in reports if _normalize_report_type(r) == want]
 
     def sort_key(r):
         ts = r.get("createdAt") or r.get("completedAt") or ""
@@ -539,7 +700,8 @@ def list_reports(filter_type="all", include_pending=False):
 
 def get_report(report_id: int):
     """Get report by ID."""
-    for report in _load_reports_raw():
+    reports = list_reports()
+    for report in reports:
         if report.get("id") == report_id:
             return report
     return None
@@ -548,7 +710,7 @@ def get_report(report_id: int):
 def save_report(report_data: Dict[str, Any]) -> int:
     """Save report (create or update)."""
     reports_path = _get_storage_path("reports.json")
-    reports = _load_reports_raw()
+    reports = list_reports("all")
     report_id = report_data.get("id")
     if not report_id:
         max_id = max([r.get("id", 0) for r in reports], default=0)
@@ -571,7 +733,7 @@ def save_report(report_data: Dict[str, Any]) -> int:
 def delete_report(report_id: int) -> bool:
     """Delete report by ID."""
     reports_path = _get_storage_path("reports.json")
-    reports = _load_reports_raw()
+    reports = list_reports("all")
     original_len = len(reports)
     reports = [r for r in reports if r.get("id") != report_id]
     if len(reports) < original_len:
@@ -585,8 +747,7 @@ def delete_report(report_id: int) -> bool:
 
 def list_members():
     """List all members. Excludes hidden factory user. Normalizes status/failedAttempts."""
-    members_path = _get_storage_path("members.json")
-    members = _load_json_file(members_path, default=[])
+    members = _load_critical_json("members.json", default=[])
     if not isinstance(members, list):
         members = []
 
@@ -646,11 +807,12 @@ def count_active_supervisor_members() -> int:
 
 
 def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], existing_member: Optional[Dict] = None):
-    """Check factory limits for users, admins, supervisors. Raise ValueError if exceeded."""
+    """Check factory limits for users, admins, reviewers, and QA. Raise ValueError if exceeded."""
     fs = get_factory_settings()
     max_users = int(fs.get("maxUsers") or 10)
     max_admins = int(fs.get("maxAdmins") or 2)
     max_supervisors = int(fs.get("maxSupervisors") or 3)
+    max_qa = int(fs.get("maxQa") or 3)
 
     def count_role(ms: List, r: str) -> int:
         return sum(1 for m in ms if str(m.get("role", "")).strip().lower() == r)
@@ -659,6 +821,7 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
     users = count_role(members, "user")
     admins = count_role(members, "admin")
     supervisors = count_role(members, "supervisor")
+    qa = count_role(members, "qa")
 
     if existing_member:
         old_role = str(existing_member.get("role", "")).strip().lower()
@@ -668,6 +831,8 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
             admins -= 1
         elif old_role == "supervisor":
             supervisors -= 1
+        elif old_role == "qa":
+            qa -= 1
 
     if new_role == "user":
         users += 1
@@ -675,6 +840,8 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
         admins += 1
     elif new_role == "supervisor":
         supervisors += 1
+    elif new_role == "qa":
+        qa += 1
 
     if users > max_users:
         raise ValueError("Your limit for users reached. Contact support for upgrade.")
@@ -682,6 +849,8 @@ def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], exist
         raise ValueError("Your limit for admins reached. Contact support for upgrade.")
     if supervisors > max_supervisors:
         raise ValueError("Your limit for reviewers reached. Contact support for upgrade.")
+    if qa > max_qa:
+        raise ValueError("Your limit for QA profiles reached. Contact support for upgrade.")
 
 
 def _member_username_key(member: Dict[str, Any]) -> str:
@@ -763,7 +932,6 @@ def _normalize_member_password_fields(member: Dict[str, Any]) -> None:
     if bool(member.get("mustChangePassword")) and pwd0:
         if not member.get("creationPasswordSalt") or not member.get("creationPasswordHash"):
             _set_creation_password_commitment(member, pwd0)
-    _normalize_password_history(member)
 
 
 def _parse_isoish_datetime(value: Any) -> Optional[datetime]:
@@ -811,80 +979,10 @@ def get_password_policy_for_members() -> Dict[str, Any]:
     }
 
 
-def _compute_password_cycle_state(
-    anchor: datetime,
-    period_days: int,
-    plc_dt: datetime,
-    now_dt: datetime,
-) -> Dict[str, Any]:
-    """
-    Rolling password-expiry cycles anchored to installation date.
-
-    First enforcement boundary: installationDate + periodDays + 1 day
-    (e.g. install 01-03 with 30 days => enforce from 01-04).
-    Later boundaries: every periodDays after that first boundary.
-    Expired when passwordLastChangedAt is before the current cycle start.
-    """
-    if period_days < 1:
-        return {"expired": False, "reason": "invalid-policy"}
-    if now_dt.tzinfo is not None:
-        now_dt = now_dt.replace(tzinfo=None)
-    if plc_dt.tzinfo is not None:
-        plc_dt = plc_dt.replace(tzinfo=None)
-    if anchor.tzinfo is not None:
-        anchor = anchor.replace(tzinfo=None)
-    # Compare on calendar dates so time-of-day on password change does not skip a cycle.
-    anchor_day = datetime(anchor.year, anchor.month, anchor.day)
-    now_day = datetime(now_dt.year, now_dt.month, now_dt.day)
-    plc_day = datetime(plc_dt.year, plc_dt.month, plc_dt.day)
-
-    if now_day < anchor_day:
-        first = anchor_day + timedelta(days=period_days + 1)
-        return {
-            "expired": False,
-            "reason": "before-anchor",
-            "expiresOn": first.strftime("%Y-%m-%d"),
-            "cycleStart": first.strftime("%Y-%m-%dT%H:%M:%S"),
-            "nextCycleStart": first.strftime("%Y-%m-%dT%H:%M:%S"),
-            "passwordLastChangedAt": plc_day.strftime("%Y-%m-%dT%H:%M:%S"),
-            "periodDays": period_days,
-            "cycleIndex": 0,
-        }
-
-    first_boundary = anchor_day + timedelta(days=period_days + 1)
-    if now_day < first_boundary:
-        return {
-            "expired": False,
-            "reason": "before-first-cycle",
-            "expiresOn": first_boundary.strftime("%Y-%m-%d"),
-            "cycleStart": first_boundary.strftime("%Y-%m-%dT%H:%M:%S"),
-            "nextCycleStart": first_boundary.strftime("%Y-%m-%dT%H:%M:%S"),
-            "passwordLastChangedAt": plc_day.strftime("%Y-%m-%dT%H:%M:%S"),
-            "periodDays": period_days,
-            "cycleIndex": 0,
-        }
-
-    days_past = (now_day - first_boundary).days
-    cycle_index = days_past // period_days  # 0 = first enforceable cycle
-    cycle_start = first_boundary + timedelta(days=cycle_index * period_days)
-    next_cycle = cycle_start + timedelta(days=period_days)
-    expired = plc_day < cycle_start
-    return {
-        "expired": bool(expired),
-        "reason": "expired" if expired else "ok",
-        "expiresOn": (cycle_start if expired else next_cycle).strftime("%Y-%m-%d"),
-        "cycleStart": cycle_start.strftime("%Y-%m-%dT%H:%M:%S"),
-        "nextCycleStart": next_cycle.strftime("%Y-%m-%dT%H:%M:%S"),
-        "passwordLastChangedAt": plc_day.strftime("%Y-%m-%dT%H:%M:%S"),
-        "periodDays": period_days,
-        "cycleIndex": int(cycle_index) + 1,
-    }
-
-
 def get_member_password_expiry_state(member: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
     """
     Compute password expiry status for a non-factory member.
-    Global rolling cycles: installationDate + N * periodDays (first boundary at +period+1).
+    Global cycle anchor: installationDate + N * periodDays.
     """
     policy = get_password_policy_for_members()
     if not policy.get("enabled"):
@@ -892,14 +990,26 @@ def get_member_password_expiry_state(member: Dict[str, Any], now: Optional[datet
     anchor = policy.get("installationDate")
     period_days = int(policy.get("periodDays") or 0)
     now_dt = now or datetime.now()
+    if now_dt.tzinfo is not None:
+        now_dt = now_dt.replace(tzinfo=None)
     if not anchor or period_days < 1:
         return {"expired": False, "reason": "invalid-policy"}
-    plc_dt = _parse_isoish_datetime(member.get("passwordLastChangedAt")) or _parse_isoish_datetime(
-        member.get("createdAt")
-    )
+    if now_dt < anchor:
+        return {"expired": False, "reason": "before-anchor"}
+    # First enforcement boundary uses "after N full days from installation".
+    # Example: 01-03 + 30 days => enforce from 01-04.
+    cycle_start = anchor + timedelta(days=period_days + 1)
+    plc_dt = _parse_isoish_datetime(member.get("passwordLastChangedAt")) or _parse_isoish_datetime(member.get("createdAt"))
     if not plc_dt:
         plc_dt = datetime.min
-    return _compute_password_cycle_state(anchor, period_days, plc_dt, now_dt)
+    expired = now_dt >= cycle_start and plc_dt < cycle_start
+    return {
+        "expired": bool(expired),
+        "expiresOn": cycle_start.strftime("%Y-%m-%d"),
+        "cycleStart": cycle_start.strftime("%Y-%m-%dT%H:%M:%S"),
+        "passwordLastChangedAt": plc_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+        "periodDays": period_days,
+    }
 
 
 def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = None) -> int:
@@ -943,8 +1053,6 @@ def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = Non
             member_data["featureOverrides"] = existing.get("featureOverrides", {"allow": [], "deny": []})
         if "password" not in member_data:
             member_data["password"] = existing.get("password", "")
-        # Always take history from the stored member; never trust client-supplied history.
-        member_data["passwordHistory"] = list(existing.get("passwordHistory") or [])
         old_pwd = str(existing.get("password", ""))
         new_pwd = str(member_data.get("password", ""))
         try:
@@ -953,14 +1061,6 @@ def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = Non
             actor_int = None
         mid = int(member_id)
         if new_pwd != old_pwd and new_pwd:
-            scratch = {
-                "password": old_pwd,
-                "passwordHistory": list(existing.get("passwordHistory") or []),
-            }
-            apply_password_change_to_member(scratch, new_pwd)
-            member_data["password"] = scratch["password"]
-            member_data["passwordHistory"] = scratch["passwordHistory"]
-            member_data["passwordLastChangedAt"] = scratch["passwordLastChangedAt"]
             if actor_int is not None and actor_int == mid:
                 member_data["mustChangePassword"] = False
                 _clear_creation_password_commitment(member_data)
@@ -968,15 +1068,14 @@ def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = Non
                 member_data["mustChangePassword"] = True
                 _set_creation_password_commitment(member_data, new_pwd)
         else:
-            for k in ("mustChangePassword", "creationPasswordSalt", "creationPasswordHash", "passwordHistory"):
+            for k in ("mustChangePassword", "creationPasswordSalt", "creationPasswordHash"):
                 if k not in member_data and k in existing:
                     member_data[k] = existing[k]
-            if "passwordLastChangedAt" not in member_data:
-                member_data["passwordLastChangedAt"] = (
-                    existing.get("passwordLastChangedAt")
-                    or existing.get("createdAt")
-                    or datetime.utcnow().isoformat() + "Z"
-                )
+        if "passwordLastChangedAt" not in member_data:
+            if new_pwd != old_pwd:
+                member_data["passwordLastChangedAt"] = datetime.utcnow().isoformat() + "Z"
+            else:
+                member_data["passwordLastChangedAt"] = existing.get("passwordLastChangedAt") or existing.get("createdAt") or datetime.utcnow().isoformat() + "Z"
         if "createdAt" not in member_data:
             member_data["createdAt"] = existing.get("createdAt") or datetime.utcnow().isoformat() + "Z"
         _normalize_member_biometric_fields(member_data)
@@ -1012,7 +1111,6 @@ def save_member(member_data: Dict[str, Any], acting_user_id: Optional[Any] = Non
         member_data["createdAt"] = datetime.utcnow().isoformat() + "Z"
     if "passwordLastChangedAt" not in member_data:
         member_data["passwordLastChangedAt"] = member_data.get("createdAt")
-    member_data["passwordHistory"] = []
     member_data["mustChangePassword"] = True
     _set_creation_password_commitment(member_data, str(member_data.get("password") or ""))
     _normalize_member_biometric_fields(member_data)
@@ -1070,7 +1168,6 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
             user.pop("password", None)
             user.pop("creationPasswordSalt", None)
             user.pop("creationPasswordHash", None)
-            user.pop("passwordHistory", None)
             return user
     return None
 
@@ -1083,8 +1180,7 @@ def get_member_by_username(username: str) -> Optional[Dict[str, Any]]:
     if username_clean.upper() == FACTORY_USERNAME.upper():
         return None
     username_lower = username_clean.lower()
-    members_path = _get_storage_path("members.json")
-    members = _load_json_file(members_path, default=[])
+    members = _load_critical_json("members.json", default=[])
     if not isinstance(members, list):
         members = []
     for m in members:
@@ -1194,13 +1290,14 @@ def _save_member_record(updated: Dict[str, Any]) -> None:
 
 
 def set_member_password(member_id: int, new_password: str, changed_at: Optional[str] = None) -> Dict[str, Any]:
-    """Set password for member and stamp passwordLastChangedAt (enforces last-5 history)."""
+    """Set password for member and stamp passwordLastChangedAt."""
     m = get_member(member_id)
     if not m:
         raise ValueError("Member not found")
     if str(m.get("username", "")).strip().upper() == FACTORY_USERNAME.upper():
         raise ValueError("Factory user password cannot be changed from this flow.")
-    apply_password_change_to_member(m, new_password, changed_at=changed_at)
+    m["password"] = str(new_password or "")
+    m["passwordLastChangedAt"] = str(changed_at or (datetime.utcnow().isoformat() + "Z"))
     _save_member_record(m)
     return m
 
@@ -1240,20 +1337,14 @@ def record_successful_login(username: str) -> Optional[Dict[str, Any]]:
 
 
 def unlock_member(member_id: int) -> Dict[str, Any]:
-    """Reactivate a locked account and require a password reset on next login."""
+    """Set member status to active and clear failed login attempts."""
     m = get_member(member_id)
     if not m:
         raise ValueError("Member not found")
     if str(m.get("username", "")).strip().upper() == FACTORY_USERNAME.upper():
         raise ValueError("The factory user cannot be modified.")
     m["status"] = "active"
-    # Clear lockout counter so the next wrong password does not instantly re-lock.
     m["failedAttempts"] = 0
-    # Force password reset before the user can use the app again.
-    m["mustChangePassword"] = True
-    current_password = str(m.get("password") or "")
-    if current_password:
-        _set_creation_password_commitment(m, current_password)
     _save_member_record(m)
     return m
 
@@ -1282,47 +1373,33 @@ def enable_member(member_id: int) -> Dict[str, Any]:
     return m
 
 
-def _configured_storage_dir() -> Optional[pathlib.Path]:
-    """Explicit STORAGE_DIR from env or init config (production internal USB)."""
-    for raw in (
-        os.environ.get("STORAGE_DIR"),
-        (_config.get("STORAGE_DIR") if _config else None),
-    ):
-        if raw:
-            return pathlib.Path(raw)
-    return None
-
-
-def _internal_usb_storage_dir() -> Optional[pathlib.Path]:
-    internal = pathlib.Path(os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal"))
-    if internal.is_dir():
-        return internal / "storage"
-    return None
-
-
-def _storage_dir_candidates() -> List[pathlib.Path]:
-    """Storage roots when resolving all known trees (USB + SD mirror)."""
-    seen = set()
-    out: List[pathlib.Path] = []
-
-    def _add(p: pathlib.Path) -> None:
-        try:
-            key = str(p.resolve())
-        except OSError:
-            key = str(p)
-        if key not in seen:
-            seen.add(key)
-            out.append(p)
-
-    internal_storage = _internal_usb_storage_dir()
-    if internal_storage is not None:
-        _add(internal_storage)
-    app_root = _config.get("APP_ROOT") if _config else None
-    if app_root:
-        _add(pathlib.Path(app_root) / "storage")
-    if not out:
-        _add(pathlib.Path("./storage"))
-    return out
+_FACTORY_RESET_EMPTY_JSON = {
+    "recipes.json": [],
+    "reports.json": [],
+    "members.json": [],
+    "users.json": [],
+}
+_FACTORY_RESET_DELETE_FILES = (
+    "test_run.json",
+    "test_run.json.bak",
+    "datetime.json",
+    "current_user.json",
+    "currentUser.json",
+    "session_power_audit_pending.json",
+    "app_clean_stop.flag",
+    "audit_entries.json",
+    "audit_log.json",
+    "audit_export.json",
+    "report_export_schedule.json",
+    "audit_export_schedule.json",
+    "basketBatches.json",
+    "basketConfig.json",
+    "basketDurations.json",
+    "basketModes.json",
+    "basketProducts.json",
+    "configuredBeakers.json",
+    "setTemp.json",
+)
 
 
 def _unique_paths(paths: List[pathlib.Path]) -> List[pathlib.Path]:
@@ -1386,29 +1463,6 @@ def all_known_audit_db_dirs() -> List[pathlib.Path]:
         if raw:
             dirs.append(pathlib.Path(raw))
     return _unique_paths(dirs)
-
-
-_FACTORY_RESET_EMPTY_JSON = {
-    "recipes.json": [],
-    "reports.json": [],
-    "members.json": [],
-    "users.json": [],
-    "disabled_recipes.json": [],
-}
-_FACTORY_RESET_DELETE_FILES = (
-    "test_run.json",
-    "test_run.json.bak",
-    "datetime.json",
-    "current_user.json",
-    "currentUser.json",
-    "session_power_audit_pending.json",
-    "app_clean_stop.flag",
-    "audit_entries.json",
-    "audit_log.json",
-    "audit_export.json",
-    "report_export_schedule.json",
-    "audit_export_schedule.json",
-)
 
 
 _FACTORY_IDENTITY_KEYS = (
@@ -1511,10 +1565,9 @@ def factory_reset() -> Dict[str, Any]:
         "storageRoots": 0,
         "reportRoots": 0,
     }
-    try:
+    clear_report_export_schedule = globals().get("clear_report_export_schedule")
+    if callable(clear_report_export_schedule):
         clear_report_export_schedule()
-    except Exception:
-        pass
     for storage_dir in all_known_storage_dirs():
         _wipe_storage_tree(storage_dir, preserved_settings, stats)
         stats["storageRoots"] += 1
@@ -1531,13 +1584,6 @@ def factory_reset() -> Dict[str, Any]:
         stats["reportRoots"] += 1
     clear_current_user()
     delete_session_power_audit_pending()
-    clean_flag = _get_storage_path(_APP_CLEAN_STOP_FLAG)
-    if clean_flag.exists():
-        try:
-            clean_flag.unlink()
-            stats["storageFiles"] += 1
-        except Exception:
-            pass
     if preserved_settings:
         save_factory_settings(preserved_settings)
         saved = get_factory_settings()
@@ -1560,8 +1606,7 @@ def factory_reset() -> Dict[str, Any]:
 
 def get_factory_settings() -> Dict[str, Any]:
     """Get factory settings."""
-    settings_path = _get_storage_path("factorySettings.json")
-    settings = _load_json_file(settings_path, default={})
+    settings = _load_critical_json("factorySettings.json", default={})
     if not isinstance(settings, dict):
         settings = {}
     if "biometricEnabled" not in settings:
@@ -1570,27 +1615,103 @@ def get_factory_settings() -> Dict[str, Any]:
         settings["passwordResetPeriodDays"] = 30
     if "autoLogoutMinutes" not in settings:
         settings["autoLogoutMinutes"] = 0
+    if not isinstance(settings.get("recipeVacuumPresets"), list) or len(settings["recipeVacuumPresets"]) != 3:
+        settings["recipeVacuumPresets"] = [200, 400, 600]
+    if not isinstance(settings.get("recipeTimePresetsSec"), list) or len(settings["recipeTimePresetsSec"]) != 3:
+        settings["recipeTimePresetsSec"] = [30, 60, 90]
+    try:
+        settings["calibrationTargetVacuumMmHg"] = max(
+            1, min(650, int(settings.get("calibrationTargetVacuumMmHg", 400)))
+        )
+    except (TypeError, ValueError):
+        settings["calibrationTargetVacuumMmHg"] = 400
+    try:
+        settings["calibrationReleaseTimeSec"] = max(
+            1, min(5999, int(settings.get("calibrationReleaseTimeSec", 80)))
+        )
+    except (TypeError, ValueError):
+        settings["calibrationReleaseTimeSec"] = 80
     return settings
 
 
 def save_factory_settings(settings: Dict[str, Any]):
     """Save factory settings with validation. Merges with existing file; drops deprecated loadCellRange."""
+    def _to_bool(v):
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return bool(v)
+        if isinstance(v, str):
+            t = v.strip().lower()
+            if t in ("false", "0", "off", "no", "disabled"):
+                return False
+            if t in ("true", "1", "on", "yes", "enabled"):
+                return True
+        return True
+
     if not isinstance(settings, dict):
         settings = {}
     merged = dict(get_factory_settings())
     merged.update(settings)
-    merged = _normalize_factory_settings_dict(merged)
+    merged.pop("loadCellRange", None)
+    merged["biometricEnabled"] = _to_bool(merged.get("biometricEnabled", True))
+    for key, default, min_val, max_val in [
+        ("maxRecipes", 150, 1, 999),
+        ("maxUsers", 10, 1, 999),
+        ("maxAdmins", 2, 1, 99),
+        ("maxQa", 3, 1, 99),
+        ("maxSupervisors", 3, 1, 99),
+        ("passwordResetPeriodDays", 30, 1, 3650),
+        ("autoLogoutMinutes", 0, 0, 10080),
+    ]:
+        val = merged.get(key)
+        if val is not None:
+            try:
+                val = max(min_val, min(max_val, int(val)))
+            except (ValueError, TypeError):
+                val = default
+            merged[key] = val
     try:
-        period_days = int(merged.get("passwordResetPeriodDays") or 0)
+        max_vacuum = max(1, min(650, int(merged.get("maxVacuumMmHg", 650))))
+    except (ValueError, TypeError):
+        max_vacuum = 650
+    merged["maxVacuumMmHg"] = max_vacuum
+
+    vacuum_defaults = [200, 400, 600]
+    vacuum_presets = merged.get("recipeVacuumPresets")
+    if not isinstance(vacuum_presets, list) or len(vacuum_presets) != 3:
+        vacuum_presets = vacuum_defaults
+    normalized_vacuum_presets = []
+    for index, value in enumerate(vacuum_presets):
+        try:
+            normalized_vacuum_presets.append(max(1, min(max_vacuum, int(value))))
+        except (ValueError, TypeError):
+            normalized_vacuum_presets.append(min(max_vacuum, vacuum_defaults[index]))
+    merged["recipeVacuumPresets"] = normalized_vacuum_presets
+
+    time_defaults = [30, 60, 90]
+    time_presets = merged.get("recipeTimePresetsSec")
+    if not isinstance(time_presets, list) or len(time_presets) != 3:
+        time_presets = time_defaults
+    normalized_time_presets = []
+    for index, value in enumerate(time_presets):
+        try:
+            normalized_time_presets.append(max(1, min(5999, int(value))))
+        except (ValueError, TypeError):
+            normalized_time_presets.append(time_defaults[index])
+    merged["recipeTimePresetsSec"] = normalized_time_presets
+    try:
+        cal_target = max(1, min(max_vacuum, int(merged.get("calibrationTargetVacuumMmHg", 400))))
     except (TypeError, ValueError):
-        period_days = 0
-    if period_days > 0 and not _parse_installation_date(merged.get("installationDate")):
-        raise ValueError("Installation Date is required when Password Reset Period is configured.")
+        cal_target = min(400, max_vacuum)
+    merged["calibrationTargetVacuumMmHg"] = cal_target
+    try:
+        cal_release = max(1, min(5999, int(merged.get("calibrationReleaseTimeSec", 80))))
+    except (TypeError, ValueError):
+        cal_release = 80
+    merged["calibrationReleaseTimeSec"] = cal_release
     settings_path = _get_storage_path("factorySettings.json")
     _save_json_file(settings_path, merged)
-    mirror = _factory_settings_mirror_path()
-    if mirror.resolve() != settings_path.resolve():
-        _save_json_file(mirror, merged)
 
 
 # =================== SESSION ==========================
@@ -1599,19 +1720,27 @@ def save_factory_settings(settings: Dict[str, Any]):
 def save_current_user(user: Dict[str, Any]):
     """Save current logged-in user session."""
     global _current_user
-    _current_user = dict(user)
-    session_path = _get_storage_path("current_user.json")
-    _save_json_file(session_path, _current_user)
+    with _session_save_lock:
+        _current_user = dict(user)
+        session_path = _get_storage_path("current_user.json")
+        _save_json_file(session_path, _current_user)
 
 
 def get_current_user() -> Optional[Dict[str, Any]]:
-    """Get current logged-in user."""
+    """Get current logged-in user. Reloads from disk when memory is empty; one retry on USB flake."""
     global _current_user
     if _current_user:
         return _current_user
-    session_path = _get_storage_path("current_user.json")
-    _current_user = _load_json_file(session_path, default=None)
-    return _current_user
+    with _session_save_lock:
+        if _current_user:
+            return _current_user
+        session_path = _get_storage_path("current_user.json")
+        loaded = _load_json_file(session_path, default=None)
+        if loaded is None and session_path.exists():
+            time.sleep(0.05)
+            loaded = _load_json_file(session_path, default=None)
+        _current_user = loaded
+        return _current_user
 
 
 def refresh_current_user_from_member() -> Optional[Dict[str, Any]]:
@@ -1627,19 +1756,21 @@ def refresh_current_user_from_member() -> Optional[Dict[str, Any]]:
     member = get_member_by_username(username)
     if not member:
         return cur
-    if bool(member.get("mustChangePassword")):
-        clear_current_user()
-        return None
-    expiry = get_member_password_expiry_state(member)
-    if bool(expiry.get("expired")):
-        clear_current_user()
-        return None
     updated = dict(cur)
     updated["id"] = member.get("id", cur.get("id"))
     updated["name"] = member.get("name", cur.get("name"))
     updated["role"] = member.get("role", cur.get("role"))
     updated["featureOverrides"] = member.get("featureOverrides")
     updated["permissionsVersion"] = member.get("permissionsVersion")
+    # Skip disk write when nothing changed — avoids stampeding current_user.json on every API call.
+    if (
+        updated.get("id") == cur.get("id")
+        and updated.get("name") == cur.get("name")
+        and updated.get("role") == cur.get("role")
+        and updated.get("featureOverrides") == cur.get("featureOverrides")
+        and updated.get("permissionsVersion") == cur.get("permissionsVersion")
+    ):
+        return cur
     save_current_user(updated)
     return updated
 
@@ -1647,13 +1778,14 @@ def refresh_current_user_from_member() -> Optional[Dict[str, Any]]:
 def clear_current_user():
     """Clear current user session."""
     global _current_user
-    _current_user = None
-    session_path = _get_storage_path("current_user.json")
-    if session_path.exists():
-        try:
-            session_path.unlink()
-        except Exception:
-            pass
+    with _session_save_lock:
+        _current_user = None
+        session_path = _get_storage_path("current_user.json")
+        if session_path.exists():
+            try:
+                session_path.unlink()
+            except Exception:
+                pass
 
 
 _SESSION_POWER_AUDIT_PENDING = "session_power_audit_pending.json"
@@ -1700,6 +1832,17 @@ def consume_app_clean_stop_flag() -> bool:
         return False
 
 
+def clear_app_clean_stop_flag():
+    """Remove clean-stop marker without treating it as a prior clean exit (e.g. on login)."""
+    path = _get_storage_path(_APP_CLEAN_STOP_FLAG)
+    if not path.exists():
+        return
+    try:
+        path.unlink()
+    except Exception:
+        pass
+
+
 def touch_app_clean_stop_flag():
     """Mark a clean application shutdown (best-effort; used to avoid false power-interruption audits)."""
     path = _get_storage_path(_APP_CLEAN_STOP_FLAG)
@@ -1713,267 +1856,101 @@ def touch_app_clean_stop_flag():
 # =================== TEST RUN DATA ==========================
 
 
-def save_test_run_data(test_data: Dict[str, Any]):
-    """Save in-progress test/validation checkpoint (durable for power-cut recovery)."""
-    test_path = _get_storage_path("test_run.json")
-    _save_json_file_durable(test_path, test_data)
+def _test_run_mirror_path() -> pathlib.Path:
+    """SD-card mirror of the mid-test checkpoint (survives USB 0-byte wipe after power loss)."""
+    return _app_root_path() / "storage" / "test_run.json"
 
+
+def _is_usable_checkpoint(data) -> bool:
+    return isinstance(data, dict) and bool(data)
+
+
+def _load_checkpoint_candidate(path: pathlib.Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        if path.stat().st_size < 3:
+            return {}
+    except OSError:
+        return {}
+    data = _load_json_file(path, default={})
+    return data if _is_usable_checkpoint(data) else {}
+
+
+def save_test_run_data(test_data: Dict[str, Any]):
+    """Save in-progress test checkpoint to USB storage and SD mirror."""
+    if not isinstance(test_data, dict):
+        return
+    payload = dict(test_data)
+    test_path = _get_storage_path("test_run.json")
+    try:
+        _save_json_file(test_path, payload)
+    except Exception:
+        pass
+    # Always mirror to APP_ROOT so a VFAT power-cut wipe of USB still recovers the run.
+    try:
+        mirror = _test_run_mirror_path()
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        # Skip duplicate write when STORAGE_DIR already is APP_ROOT/storage.
+        if mirror.resolve() != test_path.resolve():
+            _save_json_file(mirror, payload)
+    except Exception:
+        pass
 
 def get_test_run_data() -> Dict[str, Any]:
-    """Get last test run data."""
-    test_path = _get_storage_path("test_run.json")
-    return _load_json_file(test_path, default={})
+    """Get last mid-test checkpoint (freshest among USB, .bak, and SD mirror)."""
+    primary = _get_storage_path("test_run.json")
+    candidates = []
+    for path in (primary, primary.with_name(primary.name + ".bak"), _test_run_mirror_path()):
+        try:
+            if path.resolve() in {c[0].resolve() for c in candidates}:
+                continue
+        except OSError:
+            pass
+        data = _load_checkpoint_candidate(path)
+        if _is_usable_checkpoint(data):
+            candidates.append((path, data))
+
+    if not candidates:
+        return {}
+
+    def _cp_rank(item):
+        _path, data = item
+        td = data.get("testData") if isinstance(data.get("testData"), dict) else {}
+        stamp = (
+            data.get("_checkpointAt")
+            or data.get("testEndTime")
+            or td.get("testEndTime")
+            or data.get("wallElapsedSec")
+            or td.get("wallElapsedSec")
+            or td.get("durationSeconds")
+            or 0
+        )
+        # Prefer ISO timestamps lexicographically; fall back to numeric elapsed.
+        try:
+            if isinstance(stamp, (int, float)):
+                return (1, float(stamp))
+            s = str(stamp).strip()
+            if s:
+                return (2, s)
+        except Exception:
+            pass
+        return (0, "")
+
+    candidates.sort(key=_cp_rank)
+    return dict(candidates[-1][1])
 
 
 def clear_test_run_data() -> None:
     """Remove in-progress test run checkpoint (after normal complete/abort save)."""
     test_path = _get_storage_path("test_run.json")
-    if test_path.exists():
-        try:
-            test_path.unlink()
-        except Exception:
-            pass
-
-
-# =================== REPORT EXPORT SCHEDULE (24h purge, Tap Density style) =======
-
-REPORT_EXPORT_SCHEDULE_FILE = "report_export_schedule.json"
-REPORT_EXPORT_RETENTION_MS = 24 * 60 * 60 * 1000
-REPORT_EXPORT_PURGE_AFTER_MS = REPORT_EXPORT_RETENTION_MS
-
-
-def _report_export_schedule_path() -> pathlib.Path:
-    return _get_storage_path(REPORT_EXPORT_SCHEDULE_FILE)
-
-
-def _load_report_export_schedule() -> Dict[str, Any]:
-    path = _report_export_schedule_path()
-    if not path.is_file():
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-        if isinstance(data, list):
-            latest = None
-            for row in data:
-                if not isinstance(row, dict):
-                    continue
-                if bool(row.get("purged")):
-                    continue
-                latest = row
-            if not latest:
-                return {}
-            export_id = str(latest.get("id") or latest.get("export_id") or "").strip()
-            report_ids = []
-            for rid in latest.get("reportIds") or latest.get("report_ids") or []:
-                try:
-                    n = int(rid)
-                    if n > 0:
-                        report_ids.append(n)
-                except (TypeError, ValueError):
-                    continue
-            staged_at = int(latest.get("stagedAt") or latest.get("exported_at_ms") or 0)
-            confirmed_at = latest.get("confirmedAt")
-            exported_by = {
-                "username": str(latest.get("exporterUsername") or "--").strip() or "--",
-                "employee_id": "--",
-                "role": "--",
-            }
-            approved_by = {
-                "username": str(latest.get("approverUsername") or "--").strip() or "--",
-                "employee_id": "--",
-                "role": "--",
-            }
-            if confirmed_at:
-                confirmed_ms = int(confirmed_at)
-                return {
-                    "scheduled": {
-                        "export_id": export_id,
-                        "report_ids": report_ids,
-                        "exported_by": exported_by,
-                        "approved_by": approved_by,
-                        "exported_at_ms": staged_at or confirmed_ms,
-                        "confirmed_at_ms": confirmed_ms,
-                        "purge_at_ms": confirmed_ms + REPORT_EXPORT_RETENTION_MS,
-                    }
-                }
-            return {
-                "staged": {
-                    "export_id": export_id,
-                    "report_ids": report_ids,
-                    "exported_by": exported_by,
-                    "approved_by": approved_by,
-                    "exported_at_ms": staged_at,
-                }
-            }
-        return {}
-    except Exception:
-        return {}
-
-
-def _save_report_export_schedule(data: Dict[str, Any]) -> None:
-    path = _report_export_schedule_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-def clear_report_export_schedule() -> None:
-    path = _report_export_schedule_path()
-    if path.exists():
-        try:
-            path.unlink()
-        except Exception:
-            pass
-
-
-def purge_report_files(report_id: int, reports_dir: Optional[pathlib.Path] = None) -> None:
-    """Remove PDF and text artifacts for a report id."""
-    try:
-        rid = int(report_id)
-    except (TypeError, ValueError):
-        return
-    if reports_dir is None:
-        return
-    d = pathlib.Path(reports_dir)
-    for name in (
-        "report_{}.pdf".format(rid),
-        "report_{}_a4.txt".format(rid),
-        "report_{}_thermal.txt".format(rid),
+    for path in (
+        test_path,
+        test_path.with_name(test_path.name + ".bak"),
+        _test_run_mirror_path(),
     ):
-        p = d / name
         try:
-            if p.exists():
-                p.unlink()
+            if path.exists():
+                path.unlink()
         except Exception:
             pass
-
-
-def purge_reports_by_ids(report_ids: List[int], reports_dir: Optional[pathlib.Path] = None) -> int:
-    """Delete reports from storage JSON and remove associated files."""
-    ids: List[int] = []
-    for x in report_ids or []:
-        try:
-            n = int(x)
-            if n > 0:
-                ids.append(n)
-        except (TypeError, ValueError):
-            continue
-    removed = 0
-    for rid in ids:
-        if delete_report(rid):
-            removed += 1
-        if reports_dir is not None:
-            purge_report_files(rid, reports_dir)
-    return removed
-
-
-def stage_report_export_pending(
-    *,
-    export_id: str,
-    report_ids: List[int],
-    exported_by: Dict[str, Any],
-    approved_by: Dict[str, Any],
-) -> None:
-    """Store a successful USB report export awaiting operator verification (no purge yet)."""
-    import time
-    now_ms = int(time.time() * 1000)
-    ids: List[int] = []
-    for x in report_ids or []:
-        try:
-            n = int(x)
-            if n > 0:
-                ids.append(n)
-        except (TypeError, ValueError):
-            continue
-    state = _load_report_export_schedule()
-    state["staged"] = {
-        "export_id": str(export_id or "").strip(),
-        "report_ids": ids,
-        "exported_by": dict(exported_by or {}),
-        "approved_by": dict(approved_by or {}),
-        "exported_at_ms": now_ms,
-    }
-    _save_report_export_schedule(state)
-
-
-def confirm_report_export_verified(export_id: str) -> Optional[Dict[str, Any]]:
-    """Operator confirmed USB export OK: schedule purge in 24h."""
-    import time
-    want = str(export_id or "").strip()
-    if not want:
-        return None
-    state = _load_report_export_schedule()
-    staged = state.get("staged") if isinstance(state.get("staged"), dict) else {}
-    if str(staged.get("export_id") or "").strip() != want:
-        return None
-    now_ms = int(time.time() * 1000)
-    scheduled = {
-        "export_id": want,
-        "report_ids": list(staged.get("report_ids") or []),
-        "exported_by": dict(staged.get("exported_by") or {}),
-        "approved_by": dict(staged.get("approved_by") or {}),
-        "exported_at_ms": int(staged.get("exported_at_ms") or now_ms),
-        "confirmed_at_ms": now_ms,
-        "purge_at_ms": now_ms + REPORT_EXPORT_RETENTION_MS,
-    }
-    state["scheduled"] = scheduled
-    state.pop("staged", None)
-    _save_report_export_schedule(state)
-    return scheduled
-
-
-def run_due_report_export_purge(reports_dir: Optional[pathlib.Path] = None) -> Optional[Dict[str, Any]]:
-    """If a confirmed report export purge is due, delete only its report_ids."""
-    import time
-    state = _load_report_export_schedule()
-    scheduled = state.get("scheduled") if isinstance(state.get("scheduled"), dict) else {}
-    purge_at = scheduled.get("purge_at_ms")
-    if purge_at is None:
-        return None
-    try:
-        purge_at_ms = int(purge_at)
-    except (TypeError, ValueError):
-        return None
-    now_ms = int(time.time() * 1000)
-    if now_ms < purge_at_ms:
-        return None
-    report_ids = list(scheduled.get("report_ids") or [])
-    purge_reports_by_ids(report_ids, reports_dir)
-    state.pop("scheduled", None)
-    _save_report_export_schedule(state)
-    out = dict(scheduled)
-    out["purged_at_ms"] = now_ms
-    out["reports_removed"] = len(report_ids)
-    return out
-
-
-# ---- Backward-compatible wrappers (legacy batch API / tests) ----
-
-def stage_report_export(report_ids: List[int], exporter_username: str, approver_username: str) -> Dict[str, Any]:
-    export_id = secrets.token_urlsafe(16)
-    exported_by = {"username": (exporter_username or "").strip() or "--", "employee_id": "--", "role": "--"}
-    approved_by = {"username": (approver_username or "").strip() or "--", "employee_id": "--", "role": "--"}
-    stage_report_export_pending(
-        export_id=export_id,
-        report_ids=report_ids or [],
-        exported_by=exported_by,
-        approved_by=approved_by,
-    )
-    return {"id": export_id, "export_id": export_id, "reportIds": report_ids or []}
-
-
-def confirm_report_export_batch(batch_id: str) -> Optional[Dict[str, Any]]:
-    return confirm_report_export_verified(batch_id)
-
-
-def purge_due_report_exports(reports_dir: pathlib.Path, now_ms: Optional[int] = None) -> int:
-    purged = run_due_report_export_purge(reports_dir)
-    if not purged:
-        return 0
-    try:
-        return int(purged.get("reports_removed") or 0)
-    except (TypeError, ValueError):
-        return 0

@@ -102,7 +102,7 @@ var PERMISSION_CARD_CATALOG = [
   { key: 'perm_calibration_report_approve', label: 'Calibration report approval', description: 'Approve pending calibration reports only.', accent: 13 },
   { key: 'perm_datetime', label: 'Edit date and time', description: 'Change system date, time, and RTC.', accent: 7 },
   { key: 'perm_reports_view', label: 'View and print reports', description: 'Open, preview, and print reports.', accent: 8 },
-  { key: 'perm_audit_view', label: 'View and print audit trails', description: 'View audit log and print audit trails (does not include test/validation reports list).', accent: 9 },
+  { key: 'perm_audit_view', label: 'View audit trails only', description: 'View audit log only (no print). Does not include reports list.', accent: 9 },
   { key: 'perm_export_usb', label: 'Export reports and audit (USB)', description: 'Export to USB (requires report or audit access for the data being exported).', accent: 10 },
   { key: 'perm_export_approve', label: 'Export approval', description: 'Verify another user’s USB export (secondary approval).', accent: 11 },
 ];
