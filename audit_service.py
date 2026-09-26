@@ -18,6 +18,7 @@ _db_dir = None
 _audit_db_path = None
 _legacy_audit_log_path = None
 AUDIT_LOG_CAP = 5000
+AUDIT_EXPORT_RETENTION_MS = 24 * 60 * 60 * 1000
 FACTORY_USERNAME = "RLERLT"
 FACTORY_ROLE = "Factory"
 
@@ -587,6 +588,168 @@ def _destroy_audit_database() -> None:
     """Delete the on-disk audit database so the next open recreates an empty schema."""
     _remove_audit_db_artifacts()
     _ensure_db_schema()
+
+
+
+
+def _audit_export_schedule_path() -> Optional[pathlib.Path]:
+    if not _storage_dir:
+        return None
+    return _storage_dir / "audit_export_schedule.json"
+
+
+def _load_audit_export_schedule() -> Dict[str, Any]:
+    path = _audit_export_schedule_path()
+    if not path or not path.is_file():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_audit_export_schedule(data: Dict[str, Any]) -> None:
+    path = _audit_export_schedule_path()
+    if not path:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def clear_audit_export_schedule() -> None:
+    """Remove pending audit export purge schedule (factory reset)."""
+    path = _audit_export_schedule_path()
+    if path and path.exists():
+        try:
+            path.unlink()
+        except Exception:
+            pass
+
+
+def stage_audit_export_pending(
+    *,
+    export_id: str,
+    entry_ids: List[Any],
+    exported_by: Dict[str, Any],
+    approved_by: Dict[str, Any],
+    pdf_path: str = "",
+) -> None:
+    """Store a successful USB audit export awaiting operator verification (no purge yet)."""
+    now_ms = int(time.time() * 1000)
+    ids = []
+    for x in entry_ids or []:
+        try:
+            n = int(x)
+            if n > 0:
+                ids.append(n)
+        except (TypeError, ValueError):
+            s = str(x).strip()
+            if s:
+                ids.append(s)
+    state = _load_audit_export_schedule()
+    state["staged"] = {
+        "export_id": str(export_id or "").strip(),
+        "entry_ids": ids,
+        "exported_by": dict(exported_by or {}),
+        "approved_by": dict(approved_by or {}),
+        "exported_at_ms": now_ms,
+        "pdf_path": str(pdf_path or "").strip(),
+    }
+    _save_audit_export_schedule(state)
+
+
+def confirm_audit_export_verified(export_id: str) -> Optional[Dict[str, Any]]:
+    """Operator confirmed USB PDF OK: schedule purge in 24h."""
+    want = str(export_id or "").strip()
+    if not want:
+        return None
+    state = _load_audit_export_schedule()
+    staged = state.get("staged") if isinstance(state.get("staged"), dict) else {}
+    if str(staged.get("export_id") or "").strip() != want:
+        return None
+    now_ms = int(time.time() * 1000)
+    scheduled = {
+        "export_id": want,
+        "entry_ids": list(staged.get("entry_ids") or []),
+        "exported_by": dict(staged.get("exported_by") or {}),
+        "approved_by": dict(staged.get("approved_by") or {}),
+        "exported_at_ms": int(staged.get("exported_at_ms") or now_ms),
+        "pdf_path": str(staged.get("pdf_path") or "").strip(),
+        "confirmed_at_ms": now_ms,
+        "purge_at_ms": now_ms + AUDIT_EXPORT_RETENTION_MS,
+    }
+    state["scheduled"] = scheduled
+    state.pop("staged", None)
+    _save_audit_export_schedule(state)
+    return scheduled
+
+
+def delete_entries_by_ids(entry_ids: List[Any]) -> int:
+    """Delete audit rows with matching primary keys only."""
+    if not entry_ids or not _audit_db_path or not _audit_db_path.exists():
+        return 0
+    ids = []
+    for eid in entry_ids:
+        if eid is None:
+            continue
+        s = str(eid).strip()
+        if s:
+            ids.append(s)
+    if not ids:
+        return 0
+    conn = _db_connect()
+    if not conn:
+        return 0
+    try:
+        removed = 0
+        chunk_size = 400
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i : i + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            cur = conn.execute(
+                "DELETE FROM audit_entries WHERE id IN ({})".format(placeholders),
+                tuple(chunk),
+            )
+            conn.commit()
+            if cur.rowcount is not None and cur.rowcount >= 0:
+                removed += int(cur.rowcount)
+        try:
+            conn.execute("VACUUM")
+            conn.commit()
+        except Exception:
+            pass
+        return removed
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+
+def run_due_audit_export_purge() -> Optional[Dict[str, Any]]:
+    """If a confirmed audit export purge is due, delete only its entry_ids."""
+    state = _load_audit_export_schedule()
+    scheduled = state.get("scheduled") if isinstance(state.get("scheduled"), dict) else {}
+    purge_at = scheduled.get("purge_at_ms")
+    if purge_at is None:
+        return None
+    try:
+        purge_at_ms = int(purge_at)
+    except (TypeError, ValueError):
+        return None
+    now_ms = int(time.time() * 1000)
+    if now_ms < purge_at_ms:
+        return None
+    entry_ids = list(scheduled.get("entry_ids") or [])
+    delete_entries_by_ids(entry_ids)
+    state.pop("scheduled", None)
+    _save_audit_export_schedule(state)
+    out = dict(scheduled)
+    out["purged_at_ms"] = now_ms
+    out["rows_removed"] = len(entry_ids)
+    return out
 
 
 def clear_all_entries() -> int:
