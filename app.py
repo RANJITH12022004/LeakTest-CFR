@@ -366,8 +366,27 @@ def _verifier_audit_actor(verifier: dict) -> dict:
 
 
 _ACTIONS_ATTRIBUTED_TO_SIGNATURE_USER = frozenset(
-    {"Approval verification", "Audit trail exported", "Reports exported"}
+    {
+        "Approval verification",
+        "Export completed",
+        "Audit trail exported",
+        "Reports exported",
+    }
 )
+
+
+def _log_export_completed_audit(cur, verifier, export_kind: str, detail: str) -> None:
+    kind = str(export_kind or "Export").strip() or "Export"
+    body = str(detail or "").strip()
+    prefix = "{} export completed".format(kind)
+    if body.lower().startswith(prefix.lower()):
+        audit_detail = body
+    elif body:
+        audit_detail = "{} | {}".format(prefix, body)
+    else:
+        audit_detail = prefix
+    _log_usb_export_audit(cur, verifier, "Export completed", audit_detail, outcome="success")
+
 
 
 def _audit_event(
@@ -3866,6 +3885,8 @@ def _humanize_audit_details(action: str, details: str, entry: dict = None) -> st
         if "kiosk-bridge" in details.lower() or "clean shutdown" in details.lower():
             return "Unclean shutdown during active session"
         return details
+    if action == "Export completed":
+        return details
     if action == "Reports exported":
         import re
         if details.lower().startswith("exported "):
@@ -4215,10 +4236,10 @@ def export_audit_trails():
             power_off = bool(data.get("power_off") or False)
             unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
 
-        _log_usb_export_audit(
+        _log_export_completed_audit(
             cur,
             verifier,
-            "Audit trail exported",
+            "Audit trail",
             "pdf {} | entries {}".format(out_path, len(entries)),
         )
         return jsonify({
@@ -4582,7 +4603,7 @@ def export_reports():
             detail = "Exported {} report{} to USB".format(ok_count, "" if ok_count == 1 else "s")
             if ids_label:
                 detail = "{} (ids: {})".format(detail, ids_label)
-            _log_usb_export_audit(cur, verifier, "Reports exported", detail)
+            _log_export_completed_audit(cur, verifier, "Report", detail)
         return jsonify({
             "success": (len(failed) == 0 and ok_count > 0),
             "count": len(exported_files),
