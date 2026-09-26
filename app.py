@@ -357,6 +357,19 @@ def _changed_fields(before_obj, after_obj):
     return changed
 
 
+def _verifier_audit_actor(verifier: dict) -> dict:
+    if not verifier:
+        return _audit_actor()
+    uname = str(verifier.get("username") or verifier.get("name") or "").strip()
+    member = data_service.get_member_by_username(uname) if uname else None
+    return _member_login_actor(member or verifier, uname)
+
+
+_ACTIONS_ATTRIBUTED_TO_SIGNATURE_USER = frozenset(
+    {"Approval verification", "Audit trail exported", "Reports exported"}
+)
+
+
 def _audit_event(
     *,
     action,
@@ -375,12 +388,11 @@ def _audit_event(
     actor_user=None,
     actor_role=None,
 ):
-    actor = _audit_actor()
+    kiosk_actor = _audit_actor()
+    actor = dict(kiosk_actor)
     if actor_user is not None:
-        actor = dict(actor)
         actor["user"] = str(actor_user or "").strip() or "--"
     if actor_role is not None:
-        actor = dict(actor)
         actor["role"] = str(actor_role or "").strip() or "--"
     audit_time = _audit_time_fields()
     signature = signature or {}
@@ -397,8 +409,8 @@ def _audit_event(
         entity_name=entity_name,
         outcome=outcome,
         reason=reason,
-        session_user=actor.get("user"),
-        session_role=actor.get("role"),
+        session_user=kiosk_actor.get("user"),
+        session_role=kiosk_actor.get("role"),
         target_user=target_user,
         signature_mode=signature.get("mode") or "",
         signature_user=signature.get("username") or "",
@@ -3357,18 +3369,27 @@ def approval_verify():
         )
         vname = verifier.get("username") or username
         issued_by = _export_actor_from_verifier(verifier)
+        kiosk_actor = _audit_actor()
         _audit_event(
             action="Approval verification",
             outcome="success",
             entity_type="verification",
             entity_name=purpose,
-            details=_format_verification_token_issued_audit_details(verifier, purpose, method),
+            details=_format_verification_token_issued_audit_details(
+                verifier, purpose, method, issuer_in_details=False
+            ),
             target_user=vname,
             signature={"mode": method, "username": vname, "role": verifier_role},
+            actor_user=vname,
+            actor_role=verifier_role,
             extra={
                 "purpose": purpose,
                 "method": method,
                 "verificationTokenIssuedBy": issued_by,
+                "requestedBy": {
+                    "username": kiosk_actor.get("user"),
+                    "role": kiosk_actor.get("role"),
+                },
             },
         )
         return jsonify(
@@ -3552,14 +3573,18 @@ def _export_actor_from_verifier(verifier: dict) -> dict:
     )
 
 
-def _format_verification_token_issued_audit_details(verifier: dict, purpose: str, method: str) -> str:
-    """Human-readable audit text: who issued the short-lived approval verification token."""
-    actor = _export_actor_from_verifier(verifier)
-    username = str(actor.get("username") or "--").strip() or "--"
-    employee_id = str(actor.get("employee_id") or username).strip() or username
+def _format_verification_token_issued_audit_details(
+    verifier: dict, purpose: str, method: str, *, issuer_in_details: bool = True
+) -> str:
     purpose_text = str(purpose or "").strip().lower().replace("_", " ") or "approval"
-    detail = "Verification token issued by {} ({}) for {}".format(username, employee_id, purpose_text)
     method_text = str(method or "").strip().lower()
+    if issuer_in_details:
+        actor = _export_actor_from_verifier(verifier)
+        username = str(actor.get("username") or "--").strip() or "--"
+        employee_id = str(actor.get("employee_id") or username).strip() or username
+        detail = "Verification token issued by {} ({}) for {}".format(username, employee_id, purpose_text)
+    else:
+        detail = "Verification token for {}".format(purpose_text)
     if method_text and method_text not in ("credentials",):
         detail = "{} | method: {}".format(detail, method_text)
     return detail
@@ -3602,9 +3627,16 @@ def _format_export_actors_detail(exported_by, approved_by):
 def _log_usb_export_audit(cur, verifier, action: str, detail: str) -> None:
     exported_by = _export_actor_snapshot(cur or {})
     approved_by = _export_actor_from_verifier(verifier) if verifier else dict(exported_by)
-    actors = _format_export_actors_detail(exported_by, approved_by)
-    if actors and actors not in detail:
-        detail = "{} | {}".format(detail, actors)
+    ex_u = (exported_by or {}).get("username") or "--"
+    ex_e = (exported_by or {}).get("employee_id") or "--"
+    exporter_line = "exported by {} ({})".format(ex_u, ex_e)
+    if verifier:
+        if exporter_line not in detail:
+            detail = "{} | {}".format(detail, exporter_line) if detail else exporter_line
+    else:
+        actors = _format_export_actors_detail(exported_by, approved_by)
+        if actors and actors not in detail:
+            detail = "{} | {}".format(detail, actors)
     signature = {}
     if verifier:
         signature = {
@@ -3616,6 +3648,8 @@ def _log_usb_export_audit(cur, verifier, action: str, detail: str) -> None:
         "exportedBy": exported_by,
         "exportApprovedBy": approved_by,
     }
+    approver_user = (approved_by or {}).get("username") if verifier else None
+    approver_role = (approved_by or {}).get("role") if verifier else None
     _audit_event(
         action=action,
         outcome="success",
@@ -3623,6 +3657,8 @@ def _log_usb_export_audit(cur, verifier, action: str, detail: str) -> None:
         event_type="compliance",
         signature=signature,
         extra=extra,
+        actor_user=approver_user,
+        actor_role=approver_role,
     )
 
 
@@ -3851,13 +3887,32 @@ def _audit_entry_should_omit(entry: dict) -> bool:
     return False
 
 
+def _audit_entry_display_identity(entry: dict) -> dict:
+    row = dict(entry or {})
+    action = str(row.get("action") or "").strip()
+    sig_user = str(row.get("signatureUser") or "").strip()
+    stored_user = str(row.get("user") or "--").strip() or "--"
+    attributed_username = stored_user
+    attributed_role = row.get("role")
+    if action in _ACTIONS_ATTRIBUTED_TO_SIGNATURE_USER and sig_user:
+        attributed_username = sig_user
+        attributed_role = row.get("signatureRole") or attributed_role
+    member = None
+    if attributed_username and attributed_username != "--":
+        member = data_service.get_member_by_username(attributed_username)
+    display_name = str((member or {}).get("name") or attributed_username or "--").strip() or "--"
+    row["userId"] = attributed_username
+    row["user"] = display_name
+    row["role"] = _display_role_label(attributed_role)
+    return row
+
+
 def _prepare_audit_entries_for_display(entries):
     out = []
     for entry in entries or []:
         if _audit_entry_should_omit(entry):
             continue
-        row = dict(entry)
-        row["role"] = _display_role_label(row.get("role"))
+        row = _audit_entry_display_identity(entry)
         row["details"] = _humanize_audit_details(row.get("action"), row.get("details"), row)
         out.append(row)
     return out
@@ -3933,6 +3988,7 @@ def _build_audit_trail_html(entries, filters, factory):
         for i, e in enumerate(entries, start=1):
             date_part, time_part = _split_date_time_cell(e.get("dateTime"), e.get("timestamp"))
             usr = _html_escape(e.get("user") or "--")
+            uid = _html_escape(e.get("userId") or e.get("user") or "--")
             rol = _html_escape(e.get("role") or "--")
             act = _html_escape(e.get("action") or "")
             det = _html_escape(e.get("details") or "")
@@ -3945,15 +4001,16 @@ def _build_audit_trail_html(entries, filters, factory):
                   "<span class=\"dt-time\">{t}</span>"
                 "</td>"
                 "<td>{usr}</td>"
+                "<td>{uid}</td>"
                 "<td>{rol}</td>"
                 "<td>{act}</td>"
                 "<td class=\"col-out\">{out}</td>"
                 "<td class=\"col-det\">{det}</td>"
-                "</tr>".format(sl=i, d=date_part, t=time_part, usr=usr, rol=rol, act=act, out=outcome, det=det)
+                "</tr>".format(sl=i, d=date_part, t=time_part, usr=usr, uid=uid, rol=rol, act=act, out=outcome, det=det)
             )
         rows_html = "".join(rows)
     else:
-        rows_html = '<tr><td colspan="7" class="empty">No audit entries match the filters.</td></tr>'
+        rows_html = '<tr><td colspan="8" class="empty">No audit entries match the filters.</td></tr>'
 
     return (
         '<!doctype html><html><head><meta charset="utf-8"><title>Audit Trail Export</title>'
@@ -4011,6 +4068,7 @@ def _build_audit_trail_html(entries, filters, factory):
         '    <th class="col-sl">#</th>'
         '    <th class="col-dt">Date &amp; Time</th>'
         '    <th>User</th>'
+        '    <th>User ID</th>'
         '    <th>Role</th>'
         '    <th>Action</th>'
         '    <th class="col-out">Outcome</th>'
