@@ -561,6 +561,64 @@ def _remove_audit_legacy_files() -> None:
                 pass
 
 
+def _audit_row_count_at(db_path: pathlib.Path) -> int:
+    """Row count for an audit DB file (0 if missing or unreadable)."""
+    db_path = pathlib.Path(db_path)
+    if not db_path.is_file():
+        return 0
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT COUNT(*) AS c FROM audit_entries").fetchone()
+        conn.close()
+        return int(row["c"] if row else 0)
+    except Exception:
+        return 0
+
+
+def _remove_audit_db_artifacts_at(db_dir: pathlib.Path) -> None:
+    """Remove audit_log.db and sidecars under any storage root (USB or SD mirror)."""
+    db_dir = pathlib.Path(db_dir)
+    base = "audit_log.db"
+    if not db_dir.is_dir():
+        return
+    for path in list(db_dir.iterdir()):
+        if not path.is_file():
+            continue
+        name = path.name
+        if name == base or name.startswith(base + "-") or name.startswith(base + "."):
+            try:
+                path.unlink()
+            except Exception:
+                pass
+    for backup in db_dir.glob("audit_log.db.bak*"):
+        try:
+            backup.unlink()
+        except Exception:
+            pass
+
+
+def clear_legacy_audit_files_at(storage_dir: pathlib.Path) -> None:
+    """Delete JSON audit exports under a storage tree."""
+    storage_dir = pathlib.Path(storage_dir)
+    for name in ("audit_log.json", "audit_entries.json", "audit_export.json"):
+        path = storage_dir / name
+        if path.is_file():
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+
+def clear_audit_database_at(db_dir: pathlib.Path) -> int:
+    """Wipe audit SQLite at db_dir; used for SD fallback copies factory reset missed."""
+    db_dir = pathlib.Path(db_dir)
+    db_path = db_dir / "audit_log.db"
+    before = _audit_row_count_at(db_path)
+    _remove_audit_db_artifacts_at(db_dir)
+    return before
+
+
 def _remove_audit_db_artifacts() -> None:
     """Remove SQLite DB file, WAL/SHM sidecars, and timestamped backups."""
     if not _audit_db_path:
@@ -587,6 +645,33 @@ def _destroy_audit_database() -> None:
     """Delete the on-disk audit database so the next open recreates an empty schema."""
     _remove_audit_db_artifacts()
     _ensure_db_schema()
+
+
+def remove_stale_local_audit_database(app_root: pathlib.Path) -> bool:
+    """Delete APP_ROOT/db audit artifacts when the live DB is stored elsewhere."""
+    if not _audit_db_path or not app_root:
+        return False
+    try:
+        local_db_dir = pathlib.Path(app_root) / "db"
+        local_db = local_db_dir / "audit_log.db"
+        if local_db.resolve() == _audit_db_path.resolve():
+            return False
+        if not local_db_dir.exists():
+            return False
+        removed = False
+        for path in list(local_db_dir.iterdir()):
+            if not path.is_file():
+                continue
+            name = path.name
+            if name == "audit_log.db" or name.startswith("audit_log.db."):
+                try:
+                    path.unlink()
+                    removed = True
+                except Exception:
+                    pass
+        return removed
+    except Exception:
+        return False
 
 
 def clear_all_entries() -> int:
