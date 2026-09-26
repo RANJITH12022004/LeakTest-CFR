@@ -261,7 +261,7 @@ PERMISSION_CARD_LABELS: Dict[str, str] = {
     "perm_calibration_report_approve": "Calibration report approval",
     "perm_datetime": "Edit date and time",
     "perm_reports_view": "View and print reports",
-    "perm_audit_view": "View and print audit trails",
+    "perm_audit_view": "View audit trails only",
     "perm_export_usb": "Export reports and audit (USB)",
     "perm_export_approve": "Export approval",
 }
