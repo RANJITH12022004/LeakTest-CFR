@@ -4712,7 +4712,7 @@ def export_reports_stream():
                 detail = "Exported {} report{} to USB (stream)".format(
                     ok_count, "" if ok_count == 1 else "s"
                 )
-                _log_usb_export_audit(cur, verifier, "Reports exported", detail)
+                _log_export_completed_audit(cur, verifier, "Report", detail)
                 return
             fail_detail = "Exported {} of {} report(s) (stream)".format(ok_count, total)
             if failed:
