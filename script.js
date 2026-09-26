@@ -4385,8 +4385,7 @@ function exportFromSelection(type) {
         exportAuditTrails();
         return;
     }
-    var exportFilter = (currentReportFilter === 'test' || currentReportFilter === 'validation')
-        ? currentReportFilter : (lastReportListFilter || 'all');
+    var exportFilter = _normalizedReportsListFilter(currentReportFilter);
     showLoadingOverlay('Export Reports', 'Loading report list...', { cancellable: false });
     apiRequest(API_BASE + '/api/data/reports?filter=' + encodeURIComponent(exportFilter)).then(function (data) {
         var list = (data && data.reports) ? data.reports : [];
@@ -5417,6 +5416,13 @@ function enableMember(id) {
 }
 
 // ----- Reports and audit from API -----
+function _normalizedReportsListFilter(filterType) {
+    if (filterType === 'test' || filterType === 'validation' || filterType === 'calibration') {
+        return filterType;
+    }
+    return 'all';
+}
+
 function loadReports(filterType) {
     currentReportFilter = filterType || null;
     var tbody = document.getElementById('reports-table-body');
@@ -5492,7 +5498,7 @@ function loadReports(filterType) {
 
     if (bar) bar.style.display = 'none';
     if (theadRow) theadRow.innerHTML = '<th>SL No</th><th>Report Name</th><th>Creation Time</th><th>Action</th>';
-    var filter = (filterType === 'test' || filterType === 'validation') ? filterType : 'all';
+    var filter = _normalizedReportsListFilter(filterType);
     apiRequest(API_BASE + '/api/data/reports?filter=' + encodeURIComponent(filter)).then(function (data) {
         var list = (data && data.reports) ? data.reports : [];
         if (!list.length) {
@@ -5803,7 +5809,7 @@ function exportFilteredReports() {
         exportAuditTrails();
         return;
     }
-    var filter = (currentReportFilter === 'test' || currentReportFilter === 'validation') ? currentReportFilter : 'all';
+    var filter = _normalizedReportsListFilter(currentReportFilter);
     showLoadingOverlay('Export Reports', 'Loading report list...', { cancellable: false });
     apiRequest(API_BASE + '/api/data/reports?filter=' + encodeURIComponent(filter)).then(function (data) {
         var list = (data && data.reports) ? data.reports : [];
