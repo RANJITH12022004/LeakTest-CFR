@@ -3356,15 +3356,20 @@ def approval_verify():
             verifier, purpose, report_type if purpose == "report" else None
         )
         vname = verifier.get("username") or username
+        issued_by = _export_actor_from_verifier(verifier)
         _audit_event(
             action="Approval verification",
             outcome="success",
             entity_type="verification",
             entity_name=purpose,
-            details="Verification token issued",
+            details=_format_verification_token_issued_audit_details(verifier, purpose, method),
             target_user=vname,
             signature={"mode": method, "username": vname, "role": verifier_role},
-            extra={"purpose": purpose, "method": method},
+            extra={
+                "purpose": purpose,
+                "method": method,
+                "verificationTokenIssuedBy": issued_by,
+            },
         )
         return jsonify(
             {
@@ -3547,6 +3552,45 @@ def _export_actor_from_verifier(verifier: dict) -> dict:
     )
 
 
+def _format_verification_token_issued_audit_details(verifier: dict, purpose: str, method: str) -> str:
+    """Human-readable audit text: who issued the short-lived approval verification token."""
+    actor = _export_actor_from_verifier(verifier)
+    username = str(actor.get("username") or "--").strip() or "--"
+    employee_id = str(actor.get("employee_id") or username).strip() or username
+    purpose_text = str(purpose or "").strip().lower().replace("_", " ") or "approval"
+    detail = "Verification token issued by {} ({}) for {}".format(username, employee_id, purpose_text)
+    method_text = str(method or "").strip().lower()
+    if method_text and method_text not in ("credentials",):
+        detail = "{} | method: {}".format(detail, method_text)
+    return detail
+
+
+def _enrich_approval_verification_audit_details(details: str, entry: dict) -> str:
+    """Ensure token-issue rows name the verifier (fixes legacy rows that only stored signatureUser)."""
+    text = str(details or "").strip()
+    if not text:
+        return text
+    lowered = text.lower()
+    if "verification token issued" not in lowered:
+        return text
+    if " issued by " in lowered:
+        return text
+    issuer = str((entry or {}).get("signatureUser") or (entry or {}).get("targetUser") or "").strip()
+    extra = (entry or {}).get("extra")
+    if not issuer and isinstance(extra, dict):
+        issued = extra.get("verificationTokenIssuedBy") or extra.get("exportApprovedBy")
+        if isinstance(issued, dict):
+            issuer = str(issued.get("username") or "").strip()
+    if not issuer:
+        return text
+    employee_id = _resolve_employee_id(issuer)
+    purpose = str((entry or {}).get("entityName") or "").strip().lower().replace("_", " ")
+    if not purpose and isinstance(extra, dict):
+        purpose = str(extra.get("purpose") or "").strip().lower().replace("_", " ")
+    purpose_part = " for {}".format(purpose) if purpose else ""
+    return "Verification token issued by {} ({}){}".format(issuer, employee_id, purpose_part)
+
+
 def _format_export_actors_detail(exported_by, approved_by):
     ex_u = (exported_by or {}).get("username") or "--"
     ex_e = (exported_by or {}).get("employee_id") or "--"
@@ -3710,12 +3754,14 @@ def _format_wall_datetime_for_audit(dt_value) -> str:
         return s
 
 
-def _humanize_audit_details(action: str, details: str) -> str:
+def _humanize_audit_details(action: str, details: str, entry: dict = None) -> str:
     """Normalize verbose/internal audit detail text for UI and PDF export."""
     action = str(action or "").strip()
     details = audit_service._details_audit_display(details)
     if not details:
         return details
+    if action == "Approval verification":
+        return _enrich_approval_verification_audit_details(details, entry or {})
     if action == "Power interruption":
         import re
         if "privileged factory session" in details.lower():
@@ -3812,7 +3858,7 @@ def _prepare_audit_entries_for_display(entries):
             continue
         row = dict(entry)
         row["role"] = _display_role_label(row.get("role"))
-        row["details"] = _humanize_audit_details(row.get("action"), row.get("details"))
+        row["details"] = _humanize_audit_details(row.get("action"), row.get("details"), row)
         out.append(row)
     return out
 
