@@ -1567,7 +1567,8 @@ function _updateCreateStepsPageUspUi() {
 }
 
 var PAGE_TITLES = {
-    'home': 'Sieve Shaker',
+    'home': 'Leak Test Apparatus',
+    'disable-recipes': 'Disabled Recipes',
     'quick-test': 'Quick Test',
     'quick-test-steps': 'Quick Test — Steps',
     'create-recipe-step1': 'Create Recipe',
@@ -4550,10 +4551,10 @@ function validationReportDisplayName(r) {
     var td = r.testData || {};
     var valType = td.validationType || td.shakerMode || '';
     var s = String(valType).trim().toUpperCase();
-    if (s === 'INTERMITTENT' || s === 'INTERMEDIATE' || s === 'I') return 'Sieve Shaker Validation - Intermittent';
-    if (s === 'CONTINUOUS' || s === 'C') return 'Sieve Shaker Validation - Continuous';
-    if (valType) return 'Sieve Shaker Validation - ' + String(valType).charAt(0).toUpperCase() + String(valType).slice(1).toLowerCase();
-    return 'Sieve Shaker Validation';
+    if (s === 'INTERMITTENT' || s === 'INTERMEDIATE' || s === 'I') return 'Leak Test Validation - Intermittent';
+    if (s === 'CONTINUOUS' || s === 'C') return 'Leak Test Validation - Continuous';
+    if (valType) return 'Leak Test Validation - ' + String(valType).charAt(0).toUpperCase() + String(valType).slice(1).toLowerCase();
+    return 'Leak Test Validation';
 }
 
 function isSieveShakerReport(preview) {
@@ -5774,14 +5775,15 @@ function exportAuditTrails() {
                                         if (confirmRes && confirmRes.success && confirmRes.scheduled) {
                                             showAppModal(
                                                 'Audit trail export successful.',
-                                                'Export Audit'
-                                            ).then(function () {
-                                                return showAuditExportRetentionModal(confirmRes.entries_scheduled);
-                                            }).then(function () {
-                                                if (typeof applyAuditFiltersAndRefresh === 'function') {
-                                                    applyAuditFiltersAndRefresh();
+                                                'Export Audit',
+                                                function () {
+                                                    showAuditExportRetentionModal(confirmRes.entries_scheduled).then(function () {
+                                                        if (typeof applyAuditFiltersAndRefresh === 'function') {
+                                                            applyAuditFiltersAndRefresh();
+                                                        }
+                                                    });
                                                 }
-                                            });
+                                            );
                                         } else {
                                             var confirmErrText = (confirmRes && confirmRes.error)
                                                 ? String(confirmRes.error)
@@ -6024,50 +6026,28 @@ function populateRecipePrintPreview(recipe, factorySettings) {
     var tbody = document.getElementById('recipe-print-tolerance-body');
     var titleEl = document.querySelector('#page-recipe-print-preview h2:nth-of-type(2)');
 
-    if (isSieveShakerRecipe(recipe)) {
-        if (titleEl) titleEl.textContent = 'Sieve Shaker - Recipe';
-        if (friRows) friRows.style.display = 'none';
-        if (sieveRows) sieveRows.style.display = '';
-        setRecipePrintEl('recipe-print-batch', recipe.batchNumber || '--');
-        setRecipePrintEl('recipe-print-mode', recipe.shakerMode || '--');
-        setRecipePrintEl('recipe-print-amplitude', formatAmplitudeDisplay(recipe.amplitude));
-        var analysisOn = recipe.sieveAnalysis !== false && String(recipe.sieveAnalysis || '').toLowerCase() !== 'off';
-        setRecipePrintEl('recipe-print-sieve-analysis', analysisOn ? 'ON' : 'OFF');
-        if (tbody) {
-            var rows = [
-                ['Vibration Mode', recipe.shakerMode || '--', ''],
-                ['Amplitude', formatAmplitudeDisplay(recipe.amplitude), 'mm'],
-                ['Duration', recipeTimeDisplay(recipe), 'MM:SS'],
-                ['No. of Sieves', recipe.numSieves != null ? String(recipe.numSieves) : '--', ''],
-                ['Sieve Analysis', analysisOn ? 'ON' : 'OFF', ''],
-                ['Weigh Method', (recipe.weighMethod || 'automatic').charAt(0).toUpperCase() + (recipe.weighMethod || 'automatic').slice(1), '']
-            ];
-            if (Array.isArray(recipe.sieveSizes) && recipe.sieveSizes.length) {
-                rows.push(['Sieve Sizes', recipe.sieveSizes.join(', ') + ' \u00b5m', '']);
-            }
-            if (String(recipe.shakerMode || '').toUpperCase() === 'LOGICAL') {
-                if (recipe.logicalRunSeconds != null) rows.push(['Run Time', String(recipe.logicalRunSeconds), 'sec']);
-                if (recipe.logicalWaitSeconds != null) rows.push(['Wait Time', String(recipe.logicalWaitSeconds), 'sec']);
-                if (recipe.logicalCycles != null) rows.push(['Cycles', String(recipe.logicalCycles), '']);
-            }
-            tbody.innerHTML = rows.map(function (row) {
-                return '<tr><td>' + row[0] + '</td><td>' + row[1] + '</td><td>' + row[2] + '</td></tr>';
-            }).join('');
-        }
-    } else {
-        if (titleEl) titleEl.textContent = 'Sieve Shaker - Recipe';
-        if (friRows) friRows.style.display = '';
-        if (sieveRows) sieveRows.style.display = 'none';
-        setRecipePrintEl('recipe-print-usp', recipeTestModeLabel(recipe));
-        var rpm = recipeRpm(recipe);
-        setRecipePrintEl('recipe-print-speed', rpm != null ? (rpm + ' RPM') : '--');
-        if (tbody) {
-            tbody.innerHTML =
-                '<tr><td>Speed (RPM)</td><td>' + (rpm != null ? rpm : '--') + '</td><td>RPM</td></tr>' +
-                '<tr><td>Time</td><td>' + recipeTimeDisplay(recipe) + '</td><td>MM:SS</td></tr>' +
-                '<tr><td>Rotations</td><td>' + recipeRotationsDisplay(recipe) + '</td><td>count</td></tr>' +
-                '<tr><td>Drums</td><td>' + recipeDrumCountDisplay(recipe) + '</td><td></td></tr>';
-        }
+    if (titleEl) titleEl.textContent = 'Leak Test Apparatus - Recipe';
+    if (friRows) friRows.style.display = 'none';
+    if (sieveRows) sieveRows.style.display = 'none';
+    var productType = recipe.productType || recipe.type || 'Vacuum';
+    var vacuumRaw = recipe.vacuumMmHg != null ? recipe.vacuumMmHg : recipe.setVacuumMmHg;
+    var vacuumText = (vacuumRaw != null && vacuumRaw !== '') ? String(vacuumRaw) : '--';
+    var holdText = recipe.durationDisplay || (function () {
+        var sec = parseInt(recipe.durationSec, 10);
+        if (!isNaN(sec) && typeof formatMmSs === 'function') return formatMmSs(sec);
+        return recipeTimeDisplay(recipe);
+    })();
+    var batchSizeText = (recipe.batchSize != null && recipe.batchSize !== '') ? String(recipe.batchSize) : '--';
+    var samplesRaw = recipe.noOfSamples != null ? recipe.noOfSamples : recipe.sampleSize;
+    var samplesText = (samplesRaw != null && samplesRaw !== '') ? String(samplesRaw) : '--';
+    setRecipePrintEl('recipe-print-usp', productType);
+    setRecipePrintEl('recipe-print-speed', vacuumText);
+    if (tbody) {
+        tbody.innerHTML =
+            '<tr><td>Vacuum</td><td>' + vacuumText + '</td><td>mmHg</td></tr>' +
+            '<tr><td>Hold time</td><td>' + holdText + '</td><td>MM:SS</td></tr>' +
+            '<tr><td>Batch size</td><td>' + batchSizeText + '</td><td></td></tr>' +
+            '<tr><td>No. of samples</td><td>' + samplesText + '</td><td></td></tr>';
     }
 }
 
@@ -8005,7 +7985,7 @@ function approveSavedRecipeWithCredentials(recipeId, modalTitle, remarks) {
     }).catch(function (err) {
         var msg = err && err.message ? String(err.message) : 'Error';
         if (msg.toLowerCase() === 'forbidden') {
-            msg += ' — restart the Sieve Shaker CFR server after updating, or hard-refresh the page (cached UI).';
+            msg += ' — restart the kiosk after updating, or hard-refresh the page (cached UI).';
         }
         showAppModal('Approval failed: ' + msg, title);
         return { ok: false };
@@ -8124,11 +8104,9 @@ function disableRecipe(id, opts) {
                 var entry = {
                     id: recipe.id,
                     name: recipe.productName || recipe.name || '--',
-                    testMode: recipeTestModeLabel(recipe),
-                    rpm: recipeRpm(recipe),
-                    time: recipeTimeDisplay(recipe),
-                    rotations: recipeRotationsDisplay(recipe),
-                    drumCount: parseInt(recipe.drumCount, 10) === 1 ? 1 : 2,
+                    vacuumMmHg: recipe.vacuumMmHg != null ? recipe.vacuumMmHg : recipe.setVacuumMmHg,
+                    durationDisplay: recipe.durationDisplay || recipeTimeDisplay(recipe),
+                    time: recipe.durationDisplay || recipeTimeDisplay(recipe),
                     disabledBy: String(u.name || u.username || '—').trim(),
                     disabledAt: new Date().toISOString()
                 };
@@ -8462,19 +8440,19 @@ function loadManageRecipes() {
             if (headRow) {
                 if (mode === 'load') {
                     headRow.innerHTML =
-                        '<th>Product Name</th>' +
-                        '<th>Shaker Mode</th>' +
-                        '<th>Amplitude</th>' +
-                        '<th>Duration</th>' +
-                        '<th>Sieves</th>' +
+                        '<th>Product</th>' +
+                        '<th>Type</th>' +
+                        '<th>Batch Size</th>' +
+                        '<th>Vacuum</th>' +
+                        '<th>Time</th>' +
                         '<th class="actions-col">Load</th>';
                 } else {
                     headRow.innerHTML =
-                        '<th>Product Name</th>' +
-                        '<th>Shaker Mode</th>' +
-                        '<th>Amplitude</th>' +
-                        '<th>Duration</th>' +
-                        '<th>Sieves</th>' +
+                        '<th>Product</th>' +
+                        '<th>Type</th>' +
+                        '<th>Batch Size</th>' +
+                        '<th>Vacuum</th>' +
+                        '<th>Time</th>' +
                         '<th>Approval</th>' +
                         '<th class="actions-col">Actions</th>';
                 }
@@ -8501,19 +8479,24 @@ function loadManageRecipes() {
         recipes.forEach(function (r) {
             var tr = document.createElement('tr');
             var name = r.productName || r.name || '--';
-            var modeLabel = r.shakerMode || recipeTestModeLabel(r) || '--';
-            var ampStr = formatAmplitudeDisplay(r.amplitude);
-            var timeStr = recipeTimeDisplay(r);
-            var sieveStr = r.numSieves != null ? String(r.numSieves) : '--';
+            var typeLabel = r.productType || 'Vacuum';
+            var batchSizeLabel = (r.batchSize != null && r.batchSize !== '') ? String(r.batchSize) : '--';
+            var vacuumRaw = r.vacuumMmHg != null ? r.vacuumMmHg : r.setVacuumMmHg;
+            var vacuumLabel = (vacuumRaw != null && vacuumRaw !== '') ? String(vacuumRaw) : '--';
+            var timeStr = r.durationDisplay || (function () {
+                var sec = parseInt(r.durationSec, 10);
+                if (!isNaN(sec) && typeof formatMmSs === 'function') return formatMmSs(sec);
+                return recipeTimeDisplay(r);
+            })();
 
             if (mode === 'load') {
                 var loadBtnHtml = '<button type="button" class="btn-action btn-load" onclick="loadRecipeById(' + (r.id || 0) + ')" title="Load">Load</button>';
                 tr.innerHTML =
                     '<td>' + name + '</td>' +
-                    '<td>' + modeLabel + '</td>' +
-                    '<td>' + ampStr + '</td>' +
+                    '<td>' + typeLabel + '</td>' +
+                    '<td>' + batchSizeLabel + '</td>' +
+                    '<td>' + vacuumLabel + '</td>' +
                     '<td>' + timeStr + '</td>' +
-                    '<td>' + sieveStr + '</td>' +
                     '<td class="actions-cell actions-col">' + loadBtnHtml + '</td>';
             } else {
                 var appr = getEffectiveRecipeApprovalStatus(r);
@@ -8523,10 +8506,10 @@ function loadManageRecipes() {
                     '<circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg> Actions</button>';
                 tr.innerHTML =
                     '<td>' + name + '</td>' +
-                    '<td>' + modeLabel + '</td>' +
-                    '<td>' + ampStr + '</td>' +
+                    '<td>' + typeLabel + '</td>' +
+                    '<td>' + batchSizeLabel + '</td>' +
+                    '<td>' + vacuumLabel + '</td>' +
                     '<td>' + timeStr + '</td>' +
-                    '<td>' + sieveStr + '</td>' +
                     '<td>' + apprLabel + '</td>' +
                     '<td class="actions-cell">' + actionsBtnHtml + '</td>';
             }
@@ -8565,16 +8548,14 @@ function loadDisableRecipes() {
     disabled.forEach(function (r) {
         var tr = document.createElement('tr');
         var name = r.name || '--';
-        var modeLabel = r.testMode || '--';
-        var rpmStr = r.rpm != null ? String(r.rpm) : '--';
-        var disabledBy = r.disabledBy || '--';
-        var disabledAt = formatDisabledRecipeTimestamp(r.disabledAt);
+        var vacuumRaw = r.vacuumMmHg != null ? r.vacuumMmHg : r.setVacuumMmHg;
+        var vacuumLabel = (vacuumRaw != null && vacuumRaw !== '') ? String(vacuumRaw) : '--';
+        var timeStr = r.durationDisplay || r.time || '--';
         tr.innerHTML =
             '<td>' + name + '</td>' +
-            '<td>' + modeLabel + '</td>' +
-            '<td>' + rpmStr + '</td>' +
-            '<td>' + disabledBy + '</td>' +
-            '<td>' + disabledAt + '</td>';
+            '<td>' + vacuumLabel + '</td>' +
+            '<td>' + timeStr + '</td>' +
+            '<td>' + formatDisabledRecipeTimestamp(r.disabledAt) + '</td>';
         tbody.appendChild(tr);
     });
 }
@@ -10483,7 +10464,7 @@ function verifyValidationAdapter() {
 }
 
 function showValidationAdapterCheckModal() {
-    showAppModal('Adapter check is not used on the Sieve Shaker CFR.', 'Validation');
+    showAppModal('Adapter check is not used on this Leak Test apparatus.', 'Validation');
 }
 
 function bindTestRunDecimalInputs() {
