@@ -1115,6 +1115,20 @@ def _report_operated_by_username(report):
     return _norm_username(report.get("operatedByUsername") or report.get("employeeId"))
 
 
+def _report_operator_identity_keys(report):
+    """Logins that count as the person who ran the test. Factory is not exempt."""
+    td = report.get("testData") if isinstance(report.get("testData"), dict) else {}
+    keys = []
+    for src in (td, report or {}):
+        if not isinstance(src, dict):
+            continue
+        for field in ("operatedByUsername", "employeeId"):
+            n = _norm_username(src.get(field))
+            if n and n not in keys:
+                keys.append(n)
+    return keys
+
+
 def _stamp_report_operator(enriched):
     cur = data_service.get_current_user() or {}
     td = enriched.get("testData")
@@ -1227,7 +1241,7 @@ def _check_report_approved_for_print_export(report=None, report_id=None, report_
     st = (report.get("reportApprovalStatus") or "").strip().lower()
     if st == "approved":
         return None
-    if st == "pending" and _effective_request_role() != "factory":
+    if st == "pending":
         body = {
             "ok": False,
             "success": False,
@@ -2183,8 +2197,8 @@ def approve_report(report_id):
             return jsonify({"ok": True, "report": report}), 200
         if st != "pending":
             return jsonify({"ok": False, "error": "Invalid approval state"}), 400
-        op_username = _report_operated_by_username(report)
-        if op_username and verified_username == op_username and _effective_request_role() != "factory":
+        op_keys = _report_operator_identity_keys(report)
+        if verified_username and verified_username in op_keys:
             return jsonify({"ok": False, "error": "Operator cannot approve their own report."}), 403
         report_type = _normalize_report_approval_type(report.get("type"))
         token_report_type = verified.get("reportType")

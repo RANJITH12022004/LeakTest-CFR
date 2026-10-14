@@ -958,10 +958,38 @@ function isReportApproved(preview) {
     return st === 'approved';
 }
 
+function reportOperatorIdentityKeys(preview) {
+    var p = preview || window._lastReportPreview || {};
+    var td = p.testData || {};
+    var keys = [];
+    [p.operatedByUsername, td.operatedByUsername, td.employeeId, p.employeeId].forEach(function (v) {
+        var n = normalizeReportUsername(v);
+        if (n && keys.indexOf(n) < 0) keys.push(n);
+    });
+    return keys;
+}
+
+function verifierIsReportOperator(preview, verifierUsername) {
+    var entered = normalizeReportUsername(verifierUsername);
+    if (!entered) return false;
+    return reportOperatorIdentityKeys(preview).indexOf(entered) >= 0;
+}
+
+var OWN_REPORT_APPROVAL_MESSAGE = 'You cannot approve your own report. A Reviewer or Admin must sign below.';
+
+function notifyOwnReportApprovalBlocked() {
+    setReportApproveVerifyError(OWN_REPORT_APPROVAL_MESSAGE);
+    if (typeof showAppModal === 'function') showAppModal(OWN_REPORT_APPROVAL_MESSAGE, 'Report approval');
+}
+
+function isOwnReportApprovalError(err) {
+    var m = String((err && (err.message || err)) || '').toLowerCase();
+    return m.indexOf('cannot approve') !== -1 || m.indexOf('own report') !== -1;
+}
+
 function isCurrentUserReportOperator(preview) {
-    var op = getReportOperatedByUsername(preview);
     var cur = getCurrentReportUsername();
-    return !!(op && cur && op === cur);
+    return verifierIsReportOperator(preview, cur);
 }
 
 function isReportPreviewLockedForCurrentUser(preview) {
@@ -1084,11 +1112,10 @@ function setReportApprovePanelInteractionState(preview) {
     wireReportApproveVerifierListeners();
     var pending = isReportPendingApproval(preview);
     var isOp = isCurrentUserReportOperator(preview);
-    var isFactory = typeof isFactorySessionUser === 'function' && isFactorySessionUser();
     var fieldsEnabled = !!pending;
-    apprPanel.classList.toggle('is-operator-view', !!(pending && isOp && !isFactory));
+    apprPanel.classList.toggle('is-operator-view', !!(pending && isOp));
     var hintEl = document.getElementById('report-approve-operator-hint');
-    if (hintEl) hintEl.style.display = (pending && isOp && !isFactory) ? 'block' : 'none';
+    if (hintEl) hintEl.style.display = (pending && isOp) ? 'block' : 'none';
     ['#report-approve-remarks-input', 'input[name="report-approve-pass-fail"]',
         '#report-approve-verifier-username', '#report-approve-verifier-password'].forEach(function (sel) {
         apprPanel.querySelectorAll(sel).forEach(function (el) { el.disabled = !fieldsEnabled; });
@@ -3042,7 +3069,7 @@ function runBiometricVerifyWithRetry(opts) {
                 if (cancelled) return;
                 if (data && data.ok && data.token) {
                     hideBiometricProgressOverlay();
-                    finish({ ok: true, token: String(data.token) });
+                    finish({ ok: true, token: String(data.token), verifier: data.verifier || null });
                     return;
                 }
                 lastError = (data && data.error) ? String(data.error) : 'Fingerprint verification failed.';
@@ -3457,6 +3484,10 @@ function _friendlyExportError(err) {
         return 'Could not access the pendrive. Reconnect it and try again.';
     if (t.indexOf('disk full') !== -1 || t.indexOf('no space') !== -1)
         return 'Pendrive is full. Free space or use a different pendrive.';
+    if (t.indexOf('own report') !== -1 || t.indexOf('cannot approve') !== -1)
+        return 'You cannot approve your own report. A Reviewer or Admin must sign below.';
+    if (t.indexOf('must be approved') !== -1 || t.indexOf('before print or export') !== -1)
+        return 'This report must be approved before export.';
     return 'Failed to export. Please format the pendrive (FAT32 or exFAT) and try again.';
 }
 
@@ -4052,11 +4083,19 @@ function _handleExportEvent(evt, titleText) {
             } else if (evt.ok) {
                 showAppModal(_summariseExportResult(evt), titleText);
             } else {
-                showAppModal(
-                    (evt.failed && evt.failed.length)
-                        ? 'Failed to export. Please format the pendrive (FAT32 or exFAT) and try again.'
-                        : 'Export finished but no files were written.',
-                    titleText);
+                var failed = evt.failed || [];
+                var pendingOnly = failed.length && failed.every(function (f) {
+                    return f && String(f.reason || '') === 'pending';
+                });
+                var exportFailMsg = 'Export finished but no files were written.';
+                if (pendingOnly && !(evt.count > 0)) {
+                    exportFailMsg = (typeof isCurrentUserReportOperator === 'function' && isCurrentUserReportOperator())
+                        ? 'You cannot approve your own report. A Reviewer or Admin must sign below.'
+                        : 'This report must be approved before export.';
+                } else if (failed.length) {
+                    exportFailMsg = 'Failed to export. Please format the pendrive (FAT32 or exFAT) and try again.';
+                }
+                showAppModal(exportFailMsg, titleText);
             }
         }, 350);
         return;
@@ -5273,10 +5312,30 @@ function exportFilteredReports() {
     showLoadingOverlay('Export Reports', 'Loading report list...', { cancellable: false });
     apiRequest(API_BASE + '/api/data/reports?filter=' + encodeURIComponent(filter)).then(function (data) {
         var list = (data && data.reports) ? data.reports : [];
-        var ids = list.map(function (r) { return r && r.id ? parseInt(r.id, 10) : null; }).filter(function (x) { return x; });
+        var pending = [];
+        var ids = [];
+        list.forEach(function (r) {
+            if (!r || r.id == null) return;
+            var id = parseInt(r.id, 10);
+            if (!id) return;
+            if (String(r.reportApprovalStatus || '').trim().toLowerCase() === 'pending') pending.push(r);
+            else ids.push(id);
+        });
         hideLoadingOverlay();
-        if (!ids.length) {
+        if (!ids.length && !pending.length) {
             showAppModal('No reports match the current filter to export.', 'Export Reports');
+            return;
+        }
+        if (!ids.length) {
+            var selfPending = pending.some(function (r) {
+                return typeof isCurrentUserReportOperator === 'function' && isCurrentUserReportOperator(r);
+            });
+            showAppModal(
+                selfPending
+                    ? 'You cannot approve your own report. A Reviewer or Admin must sign below.'
+                    : 'This report must be approved before export.',
+                'Export Reports'
+            );
             return;
         }
         showConfirmModal(
@@ -6378,6 +6437,12 @@ function verifyReportApproverInline(method) {
                 }
                 return null;
             }
+            var bioUser = result.verifier && (result.verifier.username || result.verifier.name);
+            if (verifierIsReportOperator(window._lastReportPreview, bioUser)) {
+                notifyOwnReportApprovalBlocked();
+                setReportApproveBiometricRetryVisible(true);
+                return null;
+            }
             setReportApproveBiometricRetryVisible(false);
             return result.token;
         });
@@ -6387,6 +6452,10 @@ function verifyReportApproverInline(method) {
     var username = usernameEl ? String(usernameEl.value || '').trim() : '';
     var password = passwordEl ? String(passwordEl.value || '') : '';
     if (!username || !password) {
+        if (isCurrentUserReportOperator(window._lastReportPreview)) {
+            notifyOwnReportApprovalBlocked();
+            return Promise.resolve(null);
+        }
         setReportApproveVerifyError(
             reportType === 'calibration'
                 ? 'Enter User ID and password for a Calibration report approver.'
@@ -6394,15 +6463,9 @@ function verifyReportApproverInline(method) {
         );
         return Promise.resolve(null);
     }
-    if (typeof isCurrentUserReportOperator === 'function' && isCurrentUserReportOperator(window._lastReportPreview)) {
-        var opUser = typeof getReportOperatedByUsername === 'function'
-            ? getReportOperatedByUsername(window._lastReportPreview) : '';
-        var enteredNorm = typeof normalizeReportUsername === 'function'
-            ? normalizeReportUsername(username) : String(username).trim().toLowerCase();
-        if (opUser && enteredNorm && enteredNorm === opUser) {
-            setReportApproveVerifyError('You cannot approve your own report. A Reviewer or Admin must sign below.');
-            return Promise.resolve(null);
-        }
+    if (verifierIsReportOperator(window._lastReportPreview, username)) {
+        notifyOwnReportApprovalBlocked();
+        return Promise.resolve(null);
     }
     return apiRequest(API_BASE + '/api/data/auth/approval-verify', {
         method: 'POST',
@@ -6437,12 +6500,22 @@ function approveReportWithVerifier(reportId, passFail, remarks, verifyMethod) {
         }).then(function (data) {
             if (data && data.ok) return data;
             var msg = (data && data.error) ? String(data.error) : 'Approval failed.';
+            if (isOwnReportApprovalError(msg)) {
+                notifyOwnReportApprovalBlocked();
+                return null;
+            }
             setReportApproveVerifyError(msg);
             return null;
+        }).catch(function (err) {
+            if (isOwnReportApprovalError(err)) {
+                notifyOwnReportApprovalBlocked();
+                return null;
+            }
+            throw err;
         });
     }
 
-    if (role === 'factory') {
+    if (role === 'factory' && !isCurrentUserReportOperator(window._lastReportPreview)) {
         return postReportApprove({}).then(function (data) { return data && data.ok; });
     }
 
@@ -6484,6 +6557,10 @@ function submitReportApprove() {
             }, 600);
         }
     }).catch(function (err) {
+        if (isOwnReportApprovalError(err)) {
+            notifyOwnReportApprovalBlocked();
+            return;
+        }
         setReportApproveVerifyError('Approval failed: ' + (err && err.message ? err.message : 'Error'));
     });
 }
@@ -6519,6 +6596,10 @@ function submitReportApproveBiometric() {
             }, 600);
         }
     }).catch(function (err) {
+        if (isOwnReportApprovalError(err)) {
+            notifyOwnReportApprovalBlocked();
+            return;
+        }
         setReportApproveVerifyError('Approval failed: ' + (err && err.message ? err.message : 'Error'));
     });
 }
@@ -6574,6 +6655,10 @@ function confirmTestRunCompletionApproval() {
             }, 400);
         }
     }).catch(function (err) {
+        if (typeof isOwnReportApprovalError === 'function' && isOwnReportApprovalError(err)) {
+            notifyOwnReportApprovalBlocked();
+            return;
+        }
         showAppModal('Approval failed: ' + (err && err.message ? err.message : 'Error'), 'Report');
     });
 }
