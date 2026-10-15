@@ -20,36 +20,22 @@ _legacy_audit_log_path = None
 AUDIT_LOG_CAP = 5000
 AUDIT_EXPORT_RETENTION_MS = 24 * 60 * 60 * 1000
 FACTORY_USERNAME = "RLERLT"
-FACTORY_ROLE = "Factory"
 
 
-def _is_suppressed_actor(user: Optional[str], role: Optional[str]) -> bool:
+def _is_suppressed_actor(user: Optional[str], role: Optional[str] = None) -> bool:
     """Return True when the direct actor is the hardcoded factory super-user.
 
-    Per product directive: rows whose actor (`user`) is RLERLT acting as
-    Factory must never be written to the audit log. Other relationships
-    (sessionUser / signatureUser / targetUser) are not considered here -
-    they remain logged normally when the actor is someone else.
+    RLERLT is never written to the audit log, regardless of role. Other
+    relationships (sessionUser / signatureUser / targetUser) are not
+    considered here — they remain logged when the actor is someone else.
     """
-    u = (user or "").strip()
-    r = (role or "").strip()
-    return u == FACTORY_USERNAME and r.lower() == FACTORY_ROLE.lower()
+    del role
+    u = (user or "").strip().upper()
+    return u == FACTORY_USERNAME.upper()
 
 
-# Member administration must remain auditable even when Factory performs it.
-_COMPLIANCE_ALWAYS_LOG_ACTIONS = frozenset({
-    "User disabled",
-    "User enabled",
-    "User locked",
-    "User unlocked",
-    "User permissions updated",
-    "Added new user",
-    "Password changed",
-})
-
-
-def is_hidden_factory_actor(user: Optional[str], role: Optional[str]) -> bool:
-    """True when this user/role pair is the hidden factory actor (UI/export filter)."""
+def is_hidden_factory_actor(user: Optional[str], role: Optional[str] = None) -> bool:
+    """True when this username is the hidden factory actor (UI/export filter)."""
     return _is_suppressed_actor(user, role)
 
 
@@ -412,7 +398,7 @@ def log_structured_event(
     if not _audit_db_path:
         return
     action_norm = (action or "").strip()
-    if _is_suppressed_actor(user, role) and action_norm not in _COMPLIANCE_ALWAYS_LOG_ACTIONS:
+    if _is_suppressed_actor(user, role):
         return
     ts = int(timestamp_ms if timestamp_ms is not None else (time.time() * 1000))
     dt_str = (date_time or "").strip() or datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -844,17 +830,9 @@ def list_entries(filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any
     try:
         where = ["1=1"]
         params: List[Any] = []
-        # Hide routine factory-actor noise, but keep member-admin compliance rows visible.
-        compliance = sorted(_COMPLIANCE_ALWAYS_LOG_ACTIONS)
-        placeholders = ", ".join("?" for _ in compliance) or "NULL"
-        where.append(
-            "("
-            "NOT (TRIM(COALESCE(user, '')) = ? AND LOWER(TRIM(COALESCE(role, ''))) = LOWER(?))"
-            " OR COALESCE(action, '') IN (" + placeholders + ")"
-            ")"
-        )
-        params.extend((FACTORY_USERNAME, FACTORY_ROLE))
-        params.extend(compliance)
+        # Hide every factory-actor row, including older entries.
+        where.append("UPPER(TRIM(COALESCE(user, ''))) != ?")
+        params.append(FACTORY_USERNAME.upper())
         user_val = filters.get("user")
         if user_val:
             where.append("COALESCE(user, '--') = ?")

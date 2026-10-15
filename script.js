@@ -605,10 +605,14 @@ function submitApprovalVerifyBiometricModal() {
         errEl.textContent = '';
         errEl.style.display = 'none';
     }
+    var bioMessage = 'Place an Admin/QA fingerprint on the scanner to authorize this action.';
+    if (_approvalVerifyPurpose === 'report') {
+        bioMessage = 'Place a fingerprint for a user with Test report approval permission.';
+    }
     runBiometricVerifyWithRetry({
         purpose: _approvalVerifyPurpose,
         title: 'Verify Fingerprint',
-        message: 'Place an Admin/QA fingerprint on the scanner to authorize this action.',
+        message: bioMessage,
         failureHint: 'Place your finger on the scanner and tap Try again.'
     }).then(function (result) {
         if (!result || !result.ok) {
@@ -975,11 +979,26 @@ function verifierIsReportOperator(preview, verifierUsername) {
     return reportOperatorIdentityKeys(preview).indexOf(entered) >= 0;
 }
 
-var OWN_REPORT_APPROVAL_MESSAGE = 'You cannot approve your own report. A Reviewer or Admin must sign below.';
+function reportApprovalPermissionPhrase(reportType) {
+    var t = String(reportType || 'test').trim().toLowerCase();
+    if (t === 'calibration') return 'Calibration report approval';
+    if (t === 'validation') return 'Validation report approval';
+    return 'Test report approval';
+}
 
-function notifyOwnReportApprovalBlocked() {
-    setReportApproveVerifyError(OWN_REPORT_APPROVAL_MESSAGE);
-    if (typeof showAppModal === 'function') showAppModal(OWN_REPORT_APPROVAL_MESSAGE, 'Report approval');
+function ownReportApprovalMessage(reportType) {
+    return 'You cannot approve your own report. A user with ' + reportApprovalPermissionPhrase(reportType) + ' permission must sign below.';
+}
+
+var OWN_REPORT_APPROVAL_MESSAGE = ownReportApprovalMessage('test');
+
+function notifyOwnReportApprovalBlocked(reportType) {
+    if (reportType == null && window._lastReportPreview) {
+        reportType = window._lastReportPreview.type;
+    }
+    var msg = ownReportApprovalMessage(reportType);
+    setReportApproveVerifyError(msg);
+    if (typeof showAppModal === 'function') showAppModal(msg, 'Report approval');
 }
 
 function isOwnReportApprovalError(err) {
@@ -1146,11 +1165,21 @@ function updateReportApprovePanelForPreview(preview) {
         window._reportApproveFormReportId = null;
     }
     var reportTypeNorm = String((preview || {}).type || 'test').trim().toLowerCase();
+    var permPhrase = reportApprovalPermissionPhrase(reportTypeNorm);
     var titleEl = document.getElementById('report-approve-panel-title') || apprPanel.querySelector('h3');
-    if (titleEl) {
-        if (reportTypeNorm === 'calibration') titleEl.textContent = 'Calibration report approval';
-        else if (reportTypeNorm === 'validation') titleEl.textContent = 'Validation report approval';
-        else titleEl.textContent = 'Test report approval';
+    if (titleEl) titleEl.textContent = permPhrase;
+    var hintEl = document.getElementById('report-approve-operator-hint');
+    if (hintEl) {
+        hintEl.textContent = 'You cannot approve your own report. A user with ' + permPhrase + ' permission must sign below.';
+    }
+    var headingEl = document.getElementById('report-approve-signature-heading');
+    if (headingEl) headingEl.textContent = 'Electronic signature (' + permPhrase + ')';
+    var userEl = document.getElementById('report-approve-verifier-username');
+    if (userEl) userEl.setAttribute('placeholder', 'User ID with ' + permPhrase + ' permission');
+    var bannerEl = document.getElementById('report-pending-lock-banner');
+    if (bannerEl) {
+        bannerEl.innerHTML = '<strong>Awaiting approval.</strong> A user with ' + permPhrase +
+            ' permission must complete Pass/Fail and sign below. You cannot leave, log out, or open Profile until the report is approved.';
     }
     apprPanel.style.display = pending ? 'block' : 'none';
     if (!pending) clearReportApproveVerifyError();
@@ -3485,7 +3514,7 @@ function _friendlyExportError(err) {
     if (t.indexOf('disk full') !== -1 || t.indexOf('no space') !== -1)
         return 'Pendrive is full. Free space or use a different pendrive.';
     if (t.indexOf('own report') !== -1 || t.indexOf('cannot approve') !== -1)
-        return 'You cannot approve your own report. A Reviewer or Admin must sign below.';
+        return ownReportApprovalMessage('test');
     if (t.indexOf('must be approved') !== -1 || t.indexOf('before print or export') !== -1)
         return 'This report must be approved before export.';
     return 'Failed to export. Please format the pendrive (FAT32 or exFAT) and try again.';
@@ -3561,7 +3590,7 @@ function _populateAuditFilterDropdowns(userEl, actionEl, fullList) {
         'Report preview viewed', 'Print A4', 'Print thermal', 'Reports exported',
         'Audit log viewed', 'Audit trail exported',
         'Recipe created', 'Recipe edited', 'Recipe approved', 'Power interruption',
-        'Approval verification', 'Disable Recipe', 'Recipe disabled',
+        'Approval verification', 'Disable Recipe', 'Recipe disabled', 'Recipe enabled',
         'Added new user', 'Password changed', 'Password reset', 'Profile updated',
         'User create', 'User update', 'User permissions updated',
         'System date change', 'Factory settings changed'
@@ -4090,7 +4119,7 @@ function _handleExportEvent(evt, titleText) {
                 var exportFailMsg = 'Export finished but no files were written.';
                 if (pendingOnly && !(evt.count > 0)) {
                     exportFailMsg = (typeof isCurrentUserReportOperator === 'function' && isCurrentUserReportOperator())
-                        ? 'You cannot approve your own report. A Reviewer or Admin must sign below.'
+                        ? ownReportApprovalMessage((window._lastReportPreview || {}).type)
                         : 'This report must be approved before export.';
                 } else if (failed.length) {
                     exportFailMsg = 'Failed to export. Please format the pendrive (FAT32 or exFAT) and try again.';
@@ -5332,7 +5361,7 @@ function exportFilteredReports() {
             });
             showAppModal(
                 selfPending
-                    ? 'You cannot approve your own report. A Reviewer or Admin must sign below.'
+                    ? ownReportApprovalMessage((pending[0] && pending[0].type) || 'test')
                     : 'This report must be approved before export.',
                 'Export Reports'
             );
@@ -5528,17 +5557,20 @@ function populateRecipePrintPreview(recipe, factorySettings) {
     setRecipePrintEl('recipe-print-instrument-no', fs.instrumentId || 'N/A');
     setRecipePrintEl('recipe-print-previous-val', fs.lastValidationDate || 'N/A');
     setRecipePrintEl('recipe-print-next-validation', fs.nextValidationDate || 'N/A');
-    setRecipePrintEl('recipe-print-product', recipe.productName || recipe.name || '--');
-    var usp = recipe.usp || (recipe.steps && recipe.steps.length ? (recipe.steps[0].speed === 250 ? 'Pressure Decay' : 'Vacuum Decay') : '');
-    setRecipePrintEl('recipe-print-usp', usp || '--');
-    var speed = recipe.speed || (recipe.steps && recipe.steps.length ? recipe.steps[0].speed : null);
-    setRecipePrintEl('recipe-print-speed', speed != null ? (speed + ' mbar/s') : '--');
-    var tbody = document.getElementById('recipe-print-tolerance-body');
-    if (tbody) {
-        var stepCount = (recipe.stepCount != null) ? recipe.stepCount : (recipe.steps ? recipe.steps.length : '--');
-        tbody.innerHTML =
-            '<tr><td>Steps</td><td>' + stepCount + '</td><td></td></tr>';
+    var productName = recipe.productName || recipe.name || '--';
+    setRecipePrintEl('recipe-print-product', productName);
+    setRecipePrintEl('recipe-print-product-value', productName);
+    setRecipePrintEl('recipe-print-product-type', recipe.productType || '--');
+    var batchSize = recipe.batchSize;
+    setRecipePrintEl('recipe-print-batch-size', (batchSize != null && String(batchSize).trim() !== '') ? String(batchSize) : '--');
+    var vacuum = recipe.vacuumMmHg;
+    setRecipePrintEl('recipe-print-vacuum', (vacuum != null && !isNaN(parseFloat(vacuum))) ? String(vacuum) : '--');
+    var durationSec = parseInt(recipe.durationSec, 10);
+    var timeText = recipe.durationDisplay || '';
+    if ((!timeText || !String(timeText).trim()) && !isNaN(durationSec) && durationSec > 0 && typeof formatMmSs === 'function') {
+        timeText = formatMmSs(durationSec);
     }
+    setRecipePrintEl('recipe-print-time', timeText || '--');
 }
 
 function openRecipePrintPreview(recipeIdOrRecipe) {
@@ -6416,9 +6448,7 @@ function verifyReportApproverInline(method) {
         ? getReportApprovalType(window._lastReportPreview)
         : String((window._lastReportPreview || {}).type || 'test').trim().toLowerCase();
     if (method === 'biometric') {
-        var bioMsg = reportType === 'calibration'
-            ? 'Place a fingerprint for a user with Calibration report approval permission.'
-            : 'Place a fingerprint for a user with Test report approval permission.';
+        var bioMsg = 'Place a fingerprint for a user with ' + reportApprovalPermissionPhrase(reportType) + ' permission.';
         return runBiometricVerifyWithRetry({
             purpose: 'report',
             reportType: reportType,
@@ -6457,9 +6487,7 @@ function verifyReportApproverInline(method) {
             return Promise.resolve(null);
         }
         setReportApproveVerifyError(
-            reportType === 'calibration'
-                ? 'Enter User ID and password for a Calibration report approver.'
-                : 'Enter Reviewer or Admin User ID and password.'
+            'Enter User ID and password for a user with ' + reportApprovalPermissionPhrase(reportType) + ' permission.'
         );
         return Promise.resolve(null);
     }
@@ -9799,7 +9827,7 @@ function loadManageRecipes() {
             } else {
                 var appr = getEffectiveRecipeApprovalStatus(r);
                 var apprLabel = appr === 'pending' ? 'Pending' : 'Approved';
-                var actionsBtnHtml = '<button type="button" class="btn-action btn-actions" onclick="openRecipeActionsModal(' + (r.id || 0) + ')" title="Edit / Delete / Load">' +
+                var actionsBtnHtml = '<button type="button" class="btn-action btn-actions" onclick="openRecipeActionsModal(' + (r.id || 0) + ')" title="Edit / Disable">' +
                     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
                     '<circle cx="12" cy="12" r="1"></circle><circle cx="12" cy="5" r="1"></circle><circle cx="12" cy="19" r="1"></circle></svg> Actions</button>';
                 tr.innerHTML =

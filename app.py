@@ -1562,6 +1562,28 @@ def _recipe_change_verified_audit_parts(verified):
     return v_user, v_role, v_name
 
 
+def _audit_recipe_status_change(action, recipe_id, recipe, verified):
+    """Log a recipe disable/enable as the logged-in operator, not the verifier.
+
+    Factory (RLERLT) is never written. A non-factory verifier is named in the
+    details; the factory verifier username is omitted so it cannot appear.
+    """
+    actor = _audit_actor()
+    op_user = (actor.get("user") or "").strip()
+    if op_user.upper() == data_service.FACTORY_USERNAME.upper():
+        return
+    rlabel = ""
+    if recipe:
+        rlabel = recipe.get("productName") or recipe.get("name") or ""
+    details = "Recipe id {}".format(recipe_id)
+    if rlabel:
+        details = "{}: {}".format(details, rlabel)
+    v_user, _v_role, v_name = _recipe_change_verified_audit_parts(verified)
+    if str(v_user or "").strip().upper() != data_service.FACTORY_USERNAME.upper():
+        details = "{} | verified by {}".format(details, v_name)
+    _audit(op_user, actor.get("role"), action, details)
+
+
 _approval_verify_tokens = {}
 
 
@@ -1872,15 +1894,7 @@ def delete_recipe(recipe_id):
             ),
         )
         if updated:
-            rlabel = ""
-            if existing:
-                rlabel = existing.get("productName") or existing.get("name") or ""
-            details = "Recipe id {}".format(recipe_id)
-            if rlabel:
-                details = "{}: {}".format(details, rlabel)
-            v_user, v_role, v_name = _recipe_change_verified_audit_parts(verified)
-            details = "{} | verified by {}".format(details, v_name)
-            _audit(v_user, v_role, "Disable Recipe", details)
+            _audit_recipe_status_change("Recipe disabled", recipe_id, existing or updated, verified)
             return jsonify({"success": True, "recipe": updated}), 200
         return jsonify({"error": "Recipe not found"}), 404
     except Exception as e:
@@ -1902,13 +1916,7 @@ def enable_recipe(recipe_id):
             return gate_verify
         updated = data_service.enable_recipe(recipe_id)
         if updated:
-            rlabel = updated.get("productName") or updated.get("name") or ""
-            details = "Recipe id {}".format(recipe_id)
-            if rlabel:
-                details = "{}: {}".format(details, rlabel)
-            v_user, v_role, v_name = _recipe_change_verified_audit_parts(verified)
-            details = "{} | verified by {}".format(details, v_name)
-            _audit(v_user, v_role, "Enable Recipe", details)
+            _audit_recipe_status_change("Recipe enabled", recipe_id, updated, verified)
             return jsonify({"success": True, "recipe": updated}), 200
         return jsonify({"error": "Recipe not found"}), 404
     except Exception as e:
