@@ -979,35 +979,79 @@ def get_password_policy_for_members() -> Dict[str, Any]:
     }
 
 
+def _device_wall_now() -> datetime:
+    """Kiosk wall clock. Falls back to the OS clock if the RTC cannot be read."""
+    try:
+        import rtc_service
+
+        dt = rtc_service.read_rtc_wall_datetime()
+        if dt is not None:
+            if getattr(dt, "tzinfo", None) is not None:
+                dt = dt.replace(tzinfo=None)
+            return dt
+    except Exception:
+        pass
+    now_dt = datetime.now()
+    if now_dt.tzinfo is not None:
+        now_dt = now_dt.replace(tzinfo=None)
+    return now_dt
+
+
+def _password_changed_local(member: Dict[str, Any]) -> datetime:
+    """Local wall time of the last password change (UTC stamps converted to local)."""
+    raw = member.get("passwordLastChangedAt") or member.get("createdAt")
+    s = str(raw or "").strip()
+    if not s:
+        return datetime.min
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return datetime.min
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
 def get_member_password_expiry_state(member: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
     """
-    Compute password expiry status for a non-factory member.
-    Global cycle anchor: installationDate + N * periodDays.
+    Compute password expiry for a non-factory member.
+
+    Boundaries repeat from the installation date:
+    installationDate + k * passwordResetPeriodDays.
+    The active boundary is the latest one on or before today.
+    The password is expired when that boundary exists and the last change
+    is before it.
     """
     policy = get_password_policy_for_members()
     if not policy.get("enabled"):
         return {"expired": False, "reason": "policy-disabled"}
     anchor = policy.get("installationDate")
     period_days = int(policy.get("periodDays") or 0)
-    now_dt = now or datetime.now()
+    now_dt = now or _device_wall_now()
     if now_dt.tzinfo is not None:
         now_dt = now_dt.replace(tzinfo=None)
     if not anchor or period_days < 1:
         return {"expired": False, "reason": "invalid-policy"}
-    if now_dt < anchor:
+    anchor_day = anchor.replace(hour=0, minute=0, second=0, microsecond=0)
+    today = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    if today < anchor_day:
         return {"expired": False, "reason": "before-anchor"}
-    # First enforcement boundary uses "after N full days from installation".
-    # Example: 01-03 + 30 days => enforce from 01-04.
-    cycle_start = anchor + timedelta(days=period_days + 1)
-    plc_dt = _parse_isoish_datetime(member.get("passwordLastChangedAt")) or _parse_isoish_datetime(member.get("createdAt"))
-    if not plc_dt:
-        plc_dt = datetime.min
-    expired = now_dt >= cycle_start and plc_dt < cycle_start
+    elapsed_days = (today - anchor_day).days
+    cycles = elapsed_days // period_days
+    if cycles < 1:
+        return {
+            "expired": False,
+            "reason": "before-first-boundary",
+            "periodDays": period_days,
+        }
+    boundary = anchor_day + timedelta(days=cycles * period_days)
+    plc_dt = _password_changed_local(member)
+    expired = plc_dt < boundary
     return {
         "expired": bool(expired),
-        "expiresOn": cycle_start.strftime("%Y-%m-%d"),
-        "cycleStart": cycle_start.strftime("%Y-%m-%dT%H:%M:%S"),
-        "passwordLastChangedAt": plc_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+        "expiresOn": boundary.strftime("%Y-%m-%d"),
+        "cycleStart": boundary.strftime("%Y-%m-%dT%H:%M:%S"),
+        "passwordLastChangedAt": plc_dt.strftime("%Y-%m-%dT%H:%M:%S") if plc_dt != datetime.min else "",
         "periodDays": period_days,
     }
 

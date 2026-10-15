@@ -323,6 +323,14 @@ def _audit_request_source():
     return "{} {}".format(request.method, request.path)
 
 
+def _print_operator_identity():
+    """Logged-in person sending this report to the printer."""
+    actor = _audit_actor()
+    name = (actor.get("name") or "").strip() or "--"
+    username = (actor.get("user") or "").strip() or "--"
+    return {"name": name, "username": username}
+
+
 def _audit_actor():
     cur = data_service.get_current_user() or {}
     return {
@@ -3162,6 +3170,25 @@ def login_biometric():
                 }
             ), 403
 
+        if str(username or "").strip().upper() != data_service.FACTORY_USERNAME.upper():
+            expiry = data_service.get_member_password_expiry_state(member)
+            if bool(expiry.get("expired")):
+                _audit_event(
+                    action="Biometric login",
+                    outcome="denied",
+                    entity_type="session",
+                    entity_name="biometric",
+                    details="Password expired - reset required",
+                    target_user=username,
+                    extra={"templateId": template_id, "passwordExpiry": expiry},
+                )
+                return jsonify({
+                    "error": "Password expired. Reset required.",
+                    "passwordExpired": True,
+                    "username": username,
+                    "expiry": expiry,
+                }), 403
+
         user = dict(member)
         user.pop("password", None)
         user.pop("creationPasswordSalt", None)
@@ -5062,7 +5089,7 @@ def print_a4():
                     print_service.save_report_text_files(report_data, int(report_id), REPORTS_DIR)
                 except Exception:
                     pass
-                result = print_service.print_a4_report(report_data)
+                result = print_service.print_a4_report(report_data, printed_by=_print_operator_identity())
                 if result.get("success"):
                     _audit(actor_user, actor_role, "Print A4", "Report id {}".format(report_id))
                 return jsonify(result), 200 if result.get("success") else 500
@@ -5078,7 +5105,7 @@ def print_a4():
             except Exception:
                 pass
         report_data = report_service.enrich_report_context(dict(report_data))
-        result = print_service.print_a4_report(report_data)
+        result = print_service.print_a4_report(report_data, printed_by=_print_operator_identity())
         rid = report_data.get("id")
         _audit(
             actor_user,
@@ -5138,7 +5165,7 @@ def print_thermal():
                     print_service.save_report_text_files(report_data, int(report_id), REPORTS_DIR)
                 except Exception:
                     pass
-                result = print_service.print_thermal_report(report_data)
+                result = print_service.print_thermal_report(report_data, printed_by=_print_operator_identity())
                 if result.get("success"):
                     _audit(actor_user, actor_role, "Print thermal", "Report id {}".format(report_id))
                 return jsonify(result), 200 if result.get("success") else 500
@@ -5154,7 +5181,7 @@ def print_thermal():
             except Exception:
                 pass
         report_data = report_service.enrich_report_context(dict(report_data))
-        result = print_service.print_thermal_report(report_data)
+        result = print_service.print_thermal_report(report_data, printed_by=_print_operator_identity())
         rid = report_data.get("id")
         _audit(
             actor_user,

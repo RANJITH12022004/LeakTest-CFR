@@ -1426,8 +1426,15 @@ def format_for_a4_printer(
     return _format_report_text(report_data, width=A4_TEXT_WIDTH).rstrip("\n")
 
 
-def _thermal_printed_timestamp_lines() -> list:
-    """Print date/time from device RTC (physical print footer only)."""
+def _printed_by_fields(printed_by: Optional[Dict[str, Any]]) -> tuple:
+    """Name and user ID of the person who sent the report to the printer."""
+    printed_by = printed_by or {}
+    name = str(printed_by.get("name") or "").strip() or "--"
+    username = str(printed_by.get("username") or printed_by.get("user") or "").strip() or "--"
+    return name, username
+
+
+def _print_clock() -> tuple:
     try:
         import rtc_service
 
@@ -1438,26 +1445,33 @@ def _thermal_printed_timestamp_lines() -> list:
         now = datetime.now()
         pdate = now.strftime("%d/%m/%Y")
         ptime = now.strftime("%H:%M:%S")
-    return ["", f"Print Date: {_normalize_display_date_slash(pdate)}", f"Print Time: {ptime}"]
+    return _normalize_display_date_slash(pdate), ptime
 
 
-def _a4_printed_timestamp_block(width: int = A4_TEXT_WIDTH) -> str:
-    try:
-        import rtc_service
+def _thermal_printed_timestamp_lines(printed_by: Optional[Dict[str, Any]] = None) -> list:
+    """Print date/time and printer identity (physical print footer only)."""
+    pdate, ptime = _print_clock()
+    name, username = _printed_by_fields(printed_by)
+    return [
+        "",
+        f"Print Date: {pdate}",
+        f"Print Time: {ptime}",
+        f"Printed by: {name}",
+        f"User ID: {username}",
+    ]
 
-        payload = rtc_service.get_device_wall_datetime_payload()
-        pdate = payload.get("date") or "--"
-        ptime = payload.get("time") or "--"
-    except Exception:
-        now = datetime.now()
-        pdate = now.strftime("%d/%m/%Y")
-        ptime = now.strftime("%H:%M:%S")
+
+def _a4_printed_timestamp_block(width: int = A4_TEXT_WIDTH, printed_by: Optional[Dict[str, Any]] = None) -> str:
+    pdate, ptime = _print_clock()
+    name, username = _printed_by_fields(printed_by)
     lines: list = [""]
     _append_two_column_pairs(
         lines,
         [
-            ("Print Date", _normalize_display_date_slash(pdate)),
+            ("Print Date", pdate),
             ("Print Time", ptime),
+            ("Printed by", name),
+            ("User ID", username),
         ],
         width,
     )
@@ -1523,7 +1537,11 @@ def print_report_from_file(txt_path: pathlib.Path, port: str, baud: int, printer
         return {"success": False, "error": str(e), "port": port}
 
 
-def print_a4_report(report_data: Dict[str, Any], printer_port: Optional[str] = None) -> Dict[str, Any]:
+def print_a4_report(
+    report_data: Dict[str, Any],
+    printer_port: Optional[str] = None,
+    printed_by: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     port = printer_port or _a4_port
     baud = _a4_baud
     if not serial:
@@ -1531,7 +1549,7 @@ def print_a4_report(report_data: Dict[str, Any], printer_port: Optional[str] = N
     if not _port_exists(port):
         return {"success": False, "error": f"A4 printer port not found: {port}", "port": port}
     try:
-        text = format_for_a4_printer(report_data).rstrip() + _a4_printed_timestamp_block() + "\r\n\x0c"
+        text = format_for_a4_printer(report_data).rstrip() + _a4_printed_timestamp_block(printed_by=printed_by) + "\r\n\x0c"
         ser = _open_a4_serial(port, baud)
         try:
             ser.reset_output_buffer()
@@ -1546,7 +1564,11 @@ def print_a4_report(report_data: Dict[str, Any], printer_port: Optional[str] = N
         return {"success": False, "error": str(e), "port": port}
 
 
-def print_thermal_report(report_data: Dict[str, Any], printer_port: Optional[str] = None) -> Dict[str, Any]:
+def print_thermal_report(
+    report_data: Dict[str, Any],
+    printer_port: Optional[str] = None,
+    printed_by: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     port = printer_port or _thermal_port
     baud = _thermal_baud
     if not serial:
@@ -1557,7 +1579,7 @@ def print_thermal_report(report_data: Dict[str, Any], printer_port: Optional[str
         return {"success": False, "error": f"Thermal printer port not found: {e.filename or port}", "port": port}
     try:
         text = format_for_thermal_printer(report_data)
-        stamp = "\n".join(_thermal_printed_timestamp_lines())
+        stamp = "\n".join(_thermal_printed_timestamp_lines(printed_by))
         # On-screen / file preview uses [LOGO] marker; physical print sends raster instead.
         text_body = "\n".join(
             ln for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")

@@ -1930,7 +1930,6 @@ function updateSettingsVisibility() {
             rl === 'factory';
         disableCard.style.display = show ? '' : 'none';
     }
-    showIf('.settings-validation', 'validation-test');
     var factoryCard = document.querySelector('.settings-factory');
     if (factoryCard) {
         factoryCard.style.display = rl === 'factory' ? '' : 'none';
@@ -2940,6 +2939,10 @@ function loginBiometric() {
         }
         if (result.status === 403 && data && data.passwordChangeRequired && data.username) {
             showMandatoryPasswordResetScreen(data.username);
+            return;
+        }
+        if (result.status === 403 && data && data.passwordExpired && data.username) {
+            showPasswordExpiredResetScreen(data.username, '');
             return;
         }
         var msg = (data && data.error) ? String(data.error) : 'Biometric login failed.';
