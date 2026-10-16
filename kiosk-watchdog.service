@@ -4,4 +4,5 @@ After=kiosk-bridge.service kiosk-display.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec=240
 ExecStart=/bin/bash /opt/kiosk/scripts/kiosk_watchdog.sh

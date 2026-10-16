@@ -24,9 +24,15 @@ usb_needs_repair() {
   fi
   local opts probe
   opts="$(findmnt -n -o OPTIONS --target "$INTERNAL_USB_PATH" 2>/dev/null || true)"
-  case ",${opts}," in
-    *,ro,*) return 0 ;;
-  esac
+  local opt
+  local IFS=','
+  # shellcheck disable=SC2086
+  set -- $opts
+  for opt in "$@"; do
+    if [ "$opt" = "ro" ]; then
+      return 0
+    fi
+  done
   probe="${INTERNAL_USB_PATH}/.kiosk_write_probe"
   if touch "$probe" 2>/dev/null; then
     rm -f "$probe" 2>/dev/null || true

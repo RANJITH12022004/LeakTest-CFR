@@ -16,7 +16,7 @@ UDEV_TEMPLATE="${APP_ROOT}/config/99-kiosk-internal-usb.rules"
 UDEV_LIVE="/etc/udev/rules.d/99-kiosk-internal-usb.rules"
 INTERNAL_USB_PATH="${INTERNAL_USB_PATH:-/media/usb_internal}"
 FSTAB_MARKER="# kiosk-internal-usb"
-MOUNT_OPTS_FSTAB="defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133,errors=remount-ro,x-systemd.device-timeout=3"
+MOUNT_OPTS_FSTAB="defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133,flush,errors=continue,x-systemd.device-timeout=3"
 LOG_TAG="mount-internal-usb"
 ADOPTED=0
 REQUESTED_PART=""

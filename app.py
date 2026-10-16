@@ -5989,7 +5989,7 @@ def _try_repair_internal_usb() -> bool:
             ["sudo", "-n", "/bin/bash", str(script)],
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=240,
             check=False,
         )
         if proc.returncode != 0:

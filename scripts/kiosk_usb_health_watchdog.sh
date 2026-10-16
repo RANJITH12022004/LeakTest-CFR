@@ -20,9 +20,15 @@ _is_rw() {
     return 1
   fi
   opts="$(findmnt -n -o OPTIONS --target "$INTERNAL_USB_PATH" 2>/dev/null || true)"
-  case ",${opts}," in
-    *,ro,*) return 1 ;;
-  esac
+  local opt
+  local IFS=','
+  # shellcheck disable=SC2086
+  set -- $opts
+  for opt in "$@"; do
+    if [ "$opt" = "ro" ]; then
+      return 1
+    fi
+  done
   probe="${INTERNAL_USB_PATH}/.kiosk_write_probe"
   if touch "$probe" 2>/dev/null; then
     rm -f "$probe" 2>/dev/null || true
@@ -44,11 +50,6 @@ main() {
   /bin/bash "$REPAIR_SCRIPT" || true
   if _is_rw; then
     _log "USB restored to rw"
-    # Nudge API to re-bind STORAGE_DIR without full display restart when possible.
-    if systemctl is-active --quiet kiosk-bridge.service 2>/dev/null; then
-      # Soft signal: restart bridge so run_kiosk_app.sh reselects USB storage.
-      systemctl try-restart kiosk-bridge.service 2>/dev/null || true
-    fi
   else
     _log "WARNING: USB still not writable after repair"
   fi

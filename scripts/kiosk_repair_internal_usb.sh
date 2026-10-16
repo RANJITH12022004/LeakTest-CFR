@@ -8,8 +8,9 @@ INTERNAL_USB_PATH="${INTERNAL_USB_PATH:-/media/usb_internal}"
 PART="${INTERNAL_USB_PARTITION:-/dev/sda1}"
 APP_ROOT="${APP_ROOT:-/opt/kiosk}"
 LOG_TAG="kiosk_repair_internal_usb"
-# flush = reduce dirty FAT windows after power loss (slower writes, safer kiosk)
-MOUNT_OPTS="rw,uid=1000,gid=1000,dmask=0022,fmask=0133,flush,errors=remount-ro,nofail,x-systemd.device-timeout=3"
+# errors=continue: one bad FAT cluster must not lock the whole stick read-only.
+# flush: shorter dirty window after power loss. No format, no wipe.
+MOUNT_OPTS="rw,uid=1000,gid=1000,dmask=0022,fmask=0133,flush,errors=continue"
 
 _log() { echo "${LOG_TAG}: $*" >&2; }
 
@@ -66,12 +67,37 @@ _is_mounted() {
   mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null
 }
 
+# Exact mount flag only. "errors=remount-ro" must not count as read-only.
+_mount_flag_is_ro() {
+  local opt
+  local IFS=','
+  # shellcheck disable=SC2086
+  set -- $1
+  for opt in "$@"; do
+    [ "$opt" = "ro" ] && return 0
+  done
+  return 1
+}
+
+_opts_lock_on_error() {
+  local opts
+  _is_mounted || return 1
+  opts="$(findmnt -n -o OPTIONS --target "$INTERNAL_USB_PATH" 2>/dev/null || true)"
+  case "$opts" in
+    *errors=remount-ro*) return 0 ;;
+  esac
+  return 1
+}
+
 _is_rw() {
   local opts probe
+  if ! _is_mounted; then
+    return 1
+  fi
   opts="$(findmnt -n -o OPTIONS --target "$INTERNAL_USB_PATH" 2>/dev/null || true)"
-  case ",${opts}," in
-    *,ro,*) return 1 ;;
-  esac
+  if _mount_flag_is_ro "$opts"; then
+    return 1
+  fi
   probe="${INTERNAL_USB_PATH}/.kiosk_write_probe"
   if touch "$probe" 2>/dev/null; then
     rm -f "$probe" 2>/dev/null || true
@@ -81,32 +107,40 @@ _is_rw() {
 }
 
 _try_remount_rw() {
+  local err
   if ! _is_mounted; then
     return 1
   fi
-  mount -o remount,rw "$INTERNAL_USB_PATH" 2>/dev/null || true
-  # Explicit remount with flush opts when kernel left the FS RO after FAT error.
-  if [ -b "$PART" ]; then
-    mount -o "remount,${MOUNT_OPTS}" "$PART" "$INTERNAL_USB_PATH" 2>/dev/null || true
-  fi
+  err="$(mount -o "remount,${MOUNT_OPTS}" "$INTERNAL_USB_PATH" 2>&1)" || _log "remount rw failed: ${err}"
   _is_rw
 }
 
+_part_is_mounted() {
+  findmnt -n -S "$PART" >/dev/null 2>&1
+}
+
+# Never lazy-unmount before fsck. A lazy unmount still holds the filesystem.
 _umount_usb() {
+  local i
   sync || true
-  if ! _is_mounted; then
+  if ! _is_mounted && ! _part_is_mounted; then
     return 0
   fi
-  local i
-  for i in 1 2 3; do
-    if umount "$INTERNAL_USB_PATH" 2>/dev/null; then
+  for i in 1 2 3 4 5; do
+    if _is_mounted; then
+      umount "$INTERNAL_USB_PATH" 2>/dev/null || true
+    fi
+    if _part_is_mounted; then
+      umount "$PART" 2>/dev/null || true
+    fi
+    if ! _is_mounted && ! _part_is_mounted; then
       return 0
     fi
-    sleep 0.3
+    sleep 0.4
   done
-  umount -l "$INTERNAL_USB_PATH" 2>/dev/null || true
-  sleep 0.5
-  return 0
+  _log "USB still busy — leaving data in place, not checking the filesystem while mounted"
+  fuser -vm "$INTERNAL_USB_PATH" >&2 || true
+  return 1
 }
 
 _fsck_part() {
@@ -118,13 +152,11 @@ _fsck_part() {
     _log "refusing fsck on unsafe/non-USB partition: ${PART:-empty}"
     return 1
   fi
-  # Ensure nothing holds the device (never lazy-umount mmcblk/root).
-  if findmnt -n -S "$PART" >/dev/null 2>&1; then
-    _log "device still mounted elsewhere — unmounting $PART"
-    umount "$PART" 2>/dev/null || umount -l "$PART" 2>/dev/null || true
-    sleep 0.5
+  if _is_mounted || _part_is_mounted; then
+    _log "refusing fsck while $PART is mounted"
+    return 1
   fi
-  _log "running fsck.vfat -a -w on $PART"
+  _log "running fsck.vfat -a -w on $PART (repair only, no format)"
   # Exit 0 = clean, 1 = corrected; both OK for remount.
   fsck.vfat -a -w "$PART"
   local rc=$?
@@ -137,17 +169,40 @@ _fsck_part() {
 }
 
 _mount_usb() {
+  local err
   mkdir -p "$INTERNAL_USB_PATH"
-  if [ -b "$PART" ]; then
-    if mount -t vfat -o "$MOUNT_OPTS" "$PART" "$INTERNAL_USB_PATH" 2>/dev/null; then
-      return 0
-    fi
-  fi
-  # fstab helper fallback
-  if mount "$INTERNAL_USB_PATH" 2>/dev/null; then
+  if _is_mounted; then
     return 0
   fi
+  if [ -b "$PART" ]; then
+    if err="$(mount -t vfat -o "$MOUNT_OPTS" "$PART" "$INTERNAL_USB_PATH" 2>&1)"; then
+      return 0
+    fi
+    _log "mount $PART failed: ${err}"
+  fi
+  if err="$(mount "$INTERNAL_USB_PATH" 2>&1)"; then
+    return 0
+  fi
+  _log "mount $INTERNAL_USB_PATH failed: ${err}"
   return 1
+}
+
+# Stop future boots from locking the stick read-only. Does not touch other fstab rows.
+_harden_fstab() {
+  local fstab="/etc/fstab" line
+  [ -f "$fstab" ] || return 0
+  line="$(grep -E "[[:space:]]${INTERNAL_USB_PATH}[[:space:]]" "$fstab" | head -n1 || true)"
+  [ -n "$line" ] || return 0
+  case "$line" in
+    *errors=remount-ro*) ;;
+    *) return 0 ;;
+  esac
+  cp "$fstab" "/etc/fstab.bak.kiosk-usb-$(date +%Y%m%d%H%M%S)"
+  sed -i "\|[[:space:]]${INTERNAL_USB_PATH}[[:space:]]|s/errors=remount-ro/errors=continue/" "$fstab"
+  if ! grep -E "[[:space:]]${INTERNAL_USB_PATH}[[:space:]]" "$fstab" | grep -q 'flush'; then
+    sed -i "\|[[:space:]]${INTERNAL_USB_PATH}[[:space:]]|s/errors=continue/flush,errors=continue/" "$fstab"
+  fi
+  _log "fstab updated so a FAT error does not lock $INTERNAL_USB_PATH read-only"
 }
 
 _ensure_dirs() {
@@ -179,17 +234,15 @@ _promote_sd_mirror_to_usb() {
     if [ ! -f "$src" ]; then
       continue
     fi
-    # Prefer larger / newer SD copy when USB missing, empty, or clearly smaller.
-    if [ ! -f "$dst" ] || [ ! -s "$dst" ]; then
-      cp -a "$src" "$dst" 2>/dev/null || true
+    # Fill a missing or empty USB file only. Never replace data already on the stick.
+    # Skip a source that is not valid JSON so a truncated SD copy is not planted on USB.
+    if [ -f "$dst" ] && [ -s "$dst" ]; then
       continue
     fi
-    local ssz dsz
-    ssz="$(wc -c < "$src" 2>/dev/null || echo 0)"
-    dsz="$(wc -c < "$dst" 2>/dev/null || echo 0)"
-    if [ "${ssz:-0}" -gt "${dsz:-0}" ]; then
-      cp -a "$src" "$dst" 2>/dev/null || true
+    if ! python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$src" 2>/dev/null; then
+      continue
     fi
+    cp -a "$src" "$dst" 2>/dev/null || true
   done
   sync || true
   chown -R rle:rle "$usb_storage" 2>/dev/null || true
@@ -197,12 +250,15 @@ _promote_sd_mirror_to_usb() {
 
 _repair_once() {
   _log "repairing $PART for $INTERNAL_USB_PATH"
-  # Fast path: try remount,rw without fsck first.
-  if _try_remount_rw; then
-    _log "remount,rw succeeded without fsck"
-    return 0
+  # A FAT volume the kernel marked read-only stays read-only until it is
+  # unmounted, repaired, and mounted again. Remount alone does not clear that.
+  if ! _umount_usb; then
+    if _try_remount_rw; then
+      _log "remount,rw succeeded while the device was busy"
+      return 0
+    fi
+    return 1
   fi
-  _umount_usb
   _fsck_part
   if ! _mount_usb; then
     _log "WARNING: remount failed"
@@ -215,14 +271,30 @@ _repair_once() {
 }
 
 main() {
+  mkdir -p /run/lock
+  exec 9>/run/lock/kiosk-internal-usb.lock
+  if ! flock -w 180 9; then
+    _log "another USB repair is still running"
+    exit 0
+  fi
+
   if ! _resolve_part; then
     _log "no internal USB partition found — app will use SD fallback"
     exit 0
   fi
 
+  _harden_fstab
+
   local need_repair=0
   if _is_mounted; then
-    if ! _is_rw; then
+    if _opts_lock_on_error; then
+      _log "live mount still locks read-only on FAT error — applying read-write options"
+      if _try_remount_rw && ! _opts_lock_on_error && _is_rw; then
+        _log "remounted read-write without unmounting"
+      else
+        need_repair=1
+      fi
+    elif ! _is_rw; then
       _log "USB mounted but not writable (likely remount-ro after power loss)"
       need_repair=1
     fi

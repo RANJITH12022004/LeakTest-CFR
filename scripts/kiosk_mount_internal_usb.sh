@@ -25,6 +25,14 @@ _ensure_project_dirs() {
   fi
 }
 
+APP_ROOT="${APP_ROOT:-/opt/kiosk}"
+REPAIR_SCRIPT="${APP_ROOT}/scripts/kiosk_repair_internal_usb.sh"
+if [ -f "$REPAIR_SCRIPT" ]; then
+  if ! mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null || ! _writable_mount; then
+    /bin/bash "$REPAIR_SCRIPT" || true
+  fi
+fi
+
 if mountpoint -q "$INTERNAL_USB_PATH" 2>/dev/null; then
   if _writable_mount; then
     _ensure_project_dirs

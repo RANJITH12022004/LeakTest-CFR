@@ -32,7 +32,7 @@ sudo mkdir -p "$MOUNT_POINT"
 sudo chown "${SUDO_USER:-rle}:${SUDO_USER:-rle}" "$MOUNT_POINT" 2>/dev/null || true
 
 FSTAB_MARKER="# kiosk-internal-usb"
-FSTAB_LINE="UUID=${UUID}  ${MOUNT_POINT}  vfat  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133,errors=remount-ro,x-systemd.device-timeout=3  0  2"
+FSTAB_LINE="UUID=${UUID}  ${MOUNT_POINT}  vfat  defaults,nofail,uid=1000,gid=1000,dmask=0022,fmask=0133,flush,errors=continue,x-systemd.device-timeout=3  0  2"
 
 if [ -f /etc/fstab ]; then
   sudo cp /etc/fstab "/etc/fstab.bak.$(date +%Y%m%d%H%M%S)"
