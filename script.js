@@ -451,6 +451,13 @@ function _setPasswordResetCancelVisible(visible) {
     if (cancelBtn) cancelBtn.style.display = visible ? '' : 'none';
 }
 
+function _showPasswordResetShell() {
+    var sidebar = document.querySelector('.app-container .sidebar');
+    var header = document.querySelector('.app-container .app-header');
+    if (sidebar) sidebar.style.display = '';
+    if (header) header.style.display = '';
+}
+
 function apiRequest(path, options) {
     options = options || {};
     var base = API_BASE || '';
@@ -1489,7 +1496,8 @@ var PAGE_AUDIT_LABELS = {
     'validation-run': 'Validation Test',
     'vd-validation-input': 'Vacuum Validation Input',
     'vacuum-calibration': 'Vacuum Calibration',
-    'disable-recipes': 'Disabled Recipes'
+    'disable-recipes': 'Disabled Recipes',
+    'password-expired-reset': 'Reset Password'
 };
 
 function logAuditEvent(action, details, options) {
@@ -2284,14 +2292,12 @@ function goBack() {
     } else if (pageId === 'page-settings' || pageId === 'page-reports' || pageId === 'page-user-profile' || pageId === 'page-manage-recipes') {
         goToPage('home');
     } else if (pageId === 'page-password-expired-reset') {
-        if (window._mandatoryPasswordResetPending) {
-            showAppModal('Please reset your password before leaving this screen.', 'Reset Password');
-            return;
-        }
         if (window._passwordResetScreenMode === 'profile') {
             cancelProfilePasswordChange();
             return;
         }
+        window._mandatoryPasswordResetPending = false;
+        window._passwordResetScreenMode = '';
         _restoreSidebarAndHeaderAfterExpiredReset();
         showLoginScreen();
     } else {
@@ -2373,18 +2379,9 @@ function showPasswordExpiredResetScreen(username, oldPassword) {
     if (subEl) subEl.textContent = 'Your password has expired. Set a new password to continue.';
     var login = document.getElementById('page-login');
     var app = document.querySelector('.app-container');
-    var sidebar = document.querySelector('.app-container .sidebar');
-    var header = document.querySelector('.app-container .app-header');
     if (login) login.style.display = 'none';
-    if (sidebar) {
-        sidebar.setAttribute('data-prev-display', sidebar.style.display || '');
-        sidebar.style.display = 'none';
-    }
-    if (header) {
-        header.setAttribute('data-prev-display', header.style.display || '');
-        header.style.display = 'none';
-    }
     if (app) app.style.display = 'flex';
+    _showPasswordResetShell();
     goToPage('password-expired-reset');
     setTimeout(function () {
         var userEl = document.getElementById('expired-reset-username');
@@ -2411,18 +2408,9 @@ function showMandatoryPasswordResetScreen(username) {
     }
     var login = document.getElementById('page-login');
     var app = document.querySelector('.app-container');
-    var sidebar = document.querySelector('.app-container .sidebar');
-    var header = document.querySelector('.app-container .app-header');
     if (login) login.style.display = 'none';
-    if (sidebar) {
-        sidebar.setAttribute('data-prev-display', sidebar.style.display || '');
-        sidebar.style.display = 'none';
-    }
-    if (header) {
-        header.setAttribute('data-prev-display', header.style.display || '');
-        header.style.display = 'none';
-    }
     if (app) app.style.display = 'flex';
+    _showPasswordResetShell();
     goToPage('password-expired-reset');
     setTimeout(function () {
         var userEl = document.getElementById('expired-reset-username');
@@ -2642,6 +2630,8 @@ function logout() {
             return stopActiveRunForLogout();
         }).finally(function () {
             apiRequest(API_BASE + '/api/data/auth/logout', { method: 'POST', body: { reason: 'user' } }).catch(function () {});
+            window._mandatoryPasswordResetPending = false;
+            window._passwordResetScreenMode = '';
             window.currentUser = null;
             try { localStorage.removeItem('currentUser'); } catch (e) {}
             if (typeof currentUser !== 'undefined') currentUser = null;
