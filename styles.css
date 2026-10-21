@@ -28,6 +28,10 @@ html {
     --color-success: #22c55e;
     --color-danger: #ef4444;
     --color-warning: #f59e0b;
+    --icon-home: #4ade80;
+    --icon-validate: #facc15;
+    --icon-reports: #c084fc;
+    --icon-settings: #fb923c;
     --icon-profile: #60a5fa;
     --icon-logout: #f87171;
     --bg-primary: #0f1419;
@@ -539,21 +543,21 @@ body {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: var(--spacing-lg) 0;
+    padding: 16px 0;
     border-right: 1px solid var(--glass-border);
 }
 
 .user-profile {
-    margin-bottom: var(--spacing-lg);
+    margin-bottom: 12px;
 }
 
 .user-profile .user-avatar {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: var(--spacing-sm);
+    gap: 4px;
     padding: 12px 10px;
-    border-radius: var(--radius-md);
+    border-radius: 12px;
     color: white;
     font-size: 16px;
     font-weight: 600;
@@ -565,7 +569,10 @@ body {
     transform: scale(1.05);
 }
 
-.user-profile .user-avatar svg {
+.user-profile .user-avatar svg,
+.user-avatar svg {
+    width: 40px;
+    height: 40px;
     color: var(--icon-profile);
 }
 
@@ -584,7 +591,8 @@ body {
 .nav-menu {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    flex: 0 1 auto;
+    gap: 8px;
     width: 100%;
     padding: 0 4px;
 }
@@ -595,14 +603,15 @@ body {
     color: white;
     cursor: pointer;
     padding: 12px 10px;
-    border-radius: var(--radius-md);
+    border-radius: 12px;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: var(--spacing-sm);
+    gap: 8px;
     font-size: 16px;
     font-weight: 600;
     width: 100%;
+    transform: none;
     transition: transform 0.2s, background 0.2s;
 }
 
@@ -614,11 +623,19 @@ body {
 .nav-item.active {
     background: var(--bg-elevated);
     color: var(--text-primary);
+    transform: none;
+    box-shadow: inset 3px 0 0 var(--color-primary);
+}
+
+.nav-item.active[data-page="home"],
+.nav-item.active[data-page="validate"],
+.nav-item.active[data-page="reports"],
+.nav-item.active[data-page="settings"] {
     box-shadow: inset 3px 0 0 var(--color-primary);
 }
 
 .nav-item[data-page="home"] svg {
-    color: #4ade80;
+    color: var(--icon-home);
 }
 
 .nav-item.logout-btn svg {
@@ -626,20 +643,33 @@ body {
 }
 
 .nav-item[data-page="validate"] svg {
-    color: #facc15;
+    color: var(--icon-validate);
 }
 
 .nav-item[data-page="reports"] svg {
-    color: #c084fc;
+    color: var(--icon-reports);
 }
 
 .nav-item[data-page="settings"] svg {
-    color: #fb923c;
+    color: var(--icon-settings);
 }
 
 .nav-item svg {
     width: 32px;
     height: 32px;
+    position: relative;
+    z-index: 1;
+}
+
+.logout-btn {
+    margin-top: 0;
+    border-top: none;
+    padding: 12px 10px;
+}
+
+.nav-item span {
+    position: relative;
+    z-index: 1;
 }
 
 .main-content {
@@ -655,7 +685,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--spacing-md) var(--spacing-xl);
+    padding: 8px 16px;
     background: var(--bg-secondary);
     border-bottom: 1px solid var(--glass-border);
     min-height: 72px;
@@ -664,7 +694,7 @@ body {
 .header-left {
     display: flex;
     align-items: center;
-    gap: var(--spacing-md);
+    gap: 8px;
 }
 
 .company-logo {
@@ -685,7 +715,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    padding-right: var(--spacing-sm);
+    padding-right: 4px;
 }
 
 .header-back-btn:focus,
@@ -709,7 +739,7 @@ body {
 .header-right {
     display: flex;
     align-items: center;
-    gap: var(--spacing-lg);
+    gap: 12px;
 }
 
 .datetime {
@@ -719,7 +749,7 @@ body {
     font-size: 16px;
     font-weight: 700;
     color: var(--text-primary);
-    gap: var(--spacing-sm);
+    gap: 4px;
 }
 
 .datetime span {
@@ -728,7 +758,7 @@ body {
 
 #current-time::after {
     content: '|';
-    margin-left: var(--spacing-sm);
+    margin-left: 4px;
     opacity: 0.5;
 }
 
