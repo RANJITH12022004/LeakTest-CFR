@@ -39,6 +39,12 @@ def generate_report(
             "batchSize": recipe.get("batchSize"),
             "noOfSamples": recipe.get("noOfSamples") if recipe.get("noOfSamples") not in (None, "") else recipe.get("sampleSize"),
             "unit": recipe.get("unit"),
+            "productType": recipe.get("productType"),
+            "vacuumMmHg": recipe.get("vacuumMmHg"),
+            "durationSec": recipe.get("durationSec"),
+            "durationDisplay": recipe.get("durationDisplay"),
+            "analysisReportNo": recipe.get("analysisReportNo"),
+            "testSource": recipe.get("testSource"),
         }
     if not factory_settings:
         factory_settings = data_service.get_factory_settings()

@@ -7,7 +7,7 @@
     <meta name="viewport"
         content="width=1024, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Leak Test Apparatus</title>
-    <link rel="stylesheet" href="styles.css?v=49">
+    <link rel="stylesheet" href="styles.css?v=50">
 </head>
 
 <body>
@@ -1123,6 +1123,7 @@
                                 <button class="btn-print btn-print-thermal" onclick="handlePrintThermal()">Print
                                     Thermal</button>
                                 <button class="btn-export" onclick="handleExportReport()">Export to USB</button>
+                                <button class="btn-action" id="btn-preview-recipe" onclick="handlePreviewRecipe()">Preview Recipe</button>
                             </div>
                             <button class="btn-close" onclick="closeReportPreviewToReports()">Close</button>
                         </div>
@@ -1208,7 +1209,7 @@
                             <button class="btn-print" onclick="handlePrintRecipeA4()">Print A4</button>
                             <button class="btn-print btn-print-thermal" onclick="handlePrintRecipeThermal()">Print
                                 Thermal</button>
-                            <button class="btn-close" onclick="goToPage('view-recipes')">Close</button>
+                            <button class="btn-close" onclick="goBack()">Close</button>
                         </div>
                     </div>
                 </div>
@@ -2178,7 +2179,7 @@
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=3"></script>
     <script src="rbac.js?v=10"></script>
-    <script src="script.js?v=112"></script>
+    <script src="script.js?v=113"></script>
     <script src="leaktest_patch.js?v=2"></script>
     <script src="validation_vd.js?v=29"></script>
 </body>

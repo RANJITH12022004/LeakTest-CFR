@@ -38,6 +38,8 @@ var biometricEnabledSetting = true;
 var currentReportId = null;
 var currentReportData = null;
 var currentRecipeForPrint = null;
+var currentReportRecipe = null;
+var _recipePrintPreviewReturnPage = 'view-recipes';
 var lastKnownDateTime = null;
 var dateTimeClockInterval = null;
 var _wallClockResyncInterval = null;
@@ -2018,7 +2020,8 @@ function goToPage(pageName) {
         return;
     }
     _suppressValidationNavGuardOnce = false;
-    if (pageName !== 'report-preview' && typeof isReportPreviewLockedForCurrentUser === 'function' &&
+    if (pageName !== 'report-preview' && pageName !== 'recipe-print-preview' &&
+        typeof isReportPreviewLockedForCurrentUser === 'function' &&
         isReportPreviewLockedForCurrentUser(window._lastReportPreview)) {
         showAppModal('This report is awaiting approval. You must stay on the report screen until a reviewer approves it.', 'Report');
         var active = document.querySelector('.page.active');
@@ -2250,7 +2253,7 @@ function goBack() {
         }
         goToPage('reports');
     } else if (pageId === 'page-recipe-print-preview') {
-        goToPage('view-recipes');
+        goToPage(_recipePrintPreviewReturnPage || 'view-recipes');
     } else if (pageId === 'page-view-recipes') {
         goToPage('reports');
     } else if (pageId === 'page-factory-settings') {
@@ -5561,6 +5564,44 @@ function setRecipePrintEl(id, value) {
     if (el) el.textContent = value != null && value !== '' ? value : 'N/A';
 }
 
+function recipeFromReportPreview(preview) {
+    if (!preview || typeof preview !== 'object') return null;
+    var td = preview.testData && typeof preview.testData === 'object' ? preview.testData : {};
+    var nested = (td.recipe && typeof td.recipe === 'object') ? td.recipe : {};
+    var top = (preview.recipe && typeof preview.recipe === 'object') ? preview.recipe : {};
+    var recipe = Object.assign({}, top, nested);
+    if (!recipe.productName) recipe.productName = td.productName || top.productName || nested.name || top.name;
+    if (recipe.productType == null || recipe.productType === '') recipe.productType = td.productType;
+    if (recipe.batchSize == null || recipe.batchSize === '') recipe.batchSize = td.batchSize;
+    if (recipe.batchNumber == null || recipe.batchNumber === '') recipe.batchNumber = td.batchNumber;
+    if (recipe.noOfSamples == null || recipe.noOfSamples === '') recipe.noOfSamples = td.noOfSamples;
+    if (recipe.vacuumMmHg == null || recipe.vacuumMmHg === '') {
+        recipe.vacuumMmHg = td.setVacuumMmHg != null ? td.setVacuumMmHg : td.vacuumMmHg;
+    }
+    if (recipe.durationSec == null || recipe.durationSec === '') {
+        recipe.durationSec = td.setDurationSec != null ? td.setDurationSec
+            : (td.holdDurationSec != null ? td.holdDurationSec : td.durationSec);
+    }
+    if (!recipe.durationDisplay) recipe.durationDisplay = td.setDurationDisplay || '';
+    if (preview.factorySettings) recipe.factorySettings = preview.factorySettings;
+    var hasIdentity = !!(recipe.productName || recipe.name || recipe.id);
+    var hasParams = recipe.vacuumMmHg != null && recipe.vacuumMmHg !== ''
+        || recipe.durationSec != null && recipe.durationSec !== ''
+        || !!(recipe.productType);
+    if (!hasIdentity && !hasParams) return null;
+    return recipe;
+}
+
+function handlePreviewRecipe() {
+    if (!currentReportRecipe) {
+        showAppModal('No recipe data available for this report.', 'Report');
+        return;
+    }
+    populateRecipePrintPreview(currentReportRecipe, currentReportRecipe.factorySettings);
+    _recipePrintPreviewReturnPage = 'report-preview';
+    goToPage('recipe-print-preview');
+}
+
 function populateRecipePrintPreview(recipe, factorySettings) {
     if (!recipe) return;
     currentRecipeForPrint = recipe;
@@ -5593,6 +5634,7 @@ function openRecipePrintPreview(recipeIdOrRecipe) {
     var recipe = typeof recipeIdOrRecipe === 'object' && recipeIdOrRecipe !== null ? recipeIdOrRecipe : null;
     function openWithRecipe(r, fs) {
         populateRecipePrintPreview(r, fs);
+        _recipePrintPreviewReturnPage = 'view-recipes';
         goToPage('recipe-print-preview');
     }
     if (recipe && recipe.id) {
@@ -6211,6 +6253,8 @@ function populateReportPreview(preview) {
     }
 
     window._lastReportPreview = preview;
+    var reportTypeNorm = String(preview.type || 'test').trim().toLowerCase();
+    currentReportRecipe = (reportTypeNorm === 'test') ? recipeFromReportPreview(preview) : null;
     if (currentReportId != null && typeof buildReportPrintPayload === 'function') {
         currentReportData = buildReportPrintPayload(preview, currentReportId);
     }
@@ -6448,7 +6492,10 @@ function updateReportPreviewPrintExportButtons(preview) {
         (reportTypeNorm === 'test' || reportTypeNorm === 'validation' || reportTypeNorm === 'calibration');
     var canPrint = typeof userCanPrintReports === 'function' && userCanPrintReports() && !blockActions;
     var canExport = typeof userCanExportToUsb === 'function' && userCanExportToUsb() && !blockActions;
-    peGroup.style.display = (canPrint || canExport) ? 'flex' : 'none';
+    var isTestReport = reportTypeNorm === 'test';
+    var previewRecipeBtn = document.getElementById('btn-preview-recipe');
+    if (previewRecipeBtn) previewRecipeBtn.style.display = isTestReport ? '' : 'none';
+    peGroup.style.display = (canPrint || canExport || isTestReport) ? 'flex' : 'none';
     peGroup.querySelectorAll('.btn-print, .btn-print-thermal').forEach(function (btn) {
         btn.style.display = canPrint ? '' : 'none';
     });
