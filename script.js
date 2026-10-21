@@ -1439,7 +1439,8 @@ var PAGE_TITLES = {
     'load-validation': 'Pressure Decay',
     'distance-validation': 'Vacuum Decay',
     'add-member': 'Add New Member',
-    'validate': 'Validation',
+    'validate': 'Validation & Calibration',
+    'export': 'Export',
     'validate-type-select': 'Vacuum Validation',
     'calibration-type-select': 'Select Calibration Type',
     'load-calibration': 'Load Calibration',
@@ -1476,7 +1477,8 @@ var PAGE_AUDIT_LABELS = {
     'load-validation': 'Pressure Decay Validation',
     'distance-validation': 'Vacuum Decay Validation',
     'add-member': 'Add New Member',
-    validate: 'Validation',
+    validate: 'Validation & Calibration',
+    export: 'Export',
     'validate-type-select': 'Vacuum Validation',
     'calibration-type-select': 'Select Calibration Type',
     'load-calibration': 'Load Calibration',
@@ -2101,6 +2103,9 @@ function goToPage(pageName) {
     if (pageName === 'report-preview' && typeof refreshReportsActionButtons === 'function') {
         setTimeout(refreshReportsActionButtons, 50);
     }
+    if (pageName === 'export' && typeof refreshReportsActionButtons === 'function') {
+        setTimeout(refreshReportsActionButtons, 50);
+    }
     if (pageName === 'settings') {
         setTimeout(function () {
             if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
@@ -2285,6 +2290,8 @@ function goBack() {
         goToPage('validate');
     } else if (pageId === 'page-load-calibration' || pageId === 'page-distance-zero-calibration') {
         goToPage('calibration-type-select');
+    } else if (pageId === 'page-export') {
+        goToPage('reports');
     } else if (pageId === 'page-datetime') {
         goToPage('settings');
     } else if (pageId === 'page-locked-members' || pageId === 'page-disabled-members') {
@@ -5137,6 +5144,8 @@ function refreshReportsActionButtons() {
     if (calBtn) calBtn.style.display = canReports ? '' : 'none';
     var recipeBtn = document.querySelector('.reports-filter-recipes');
     if (recipeBtn) recipeBtn.style.display = canRecipes ? '' : 'none';
+    var exportAuditCard = document.getElementById('export-audit-trails-card');
+    if (exportAuditCard) exportAuditCard.style.display = canAudit ? '' : 'none';
     if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
     if (typeof updateReportPreviewPrintExportButtons === 'function') {
         updateReportPreviewPrintExportButtons(window._lastReportPreview || null);
@@ -5323,6 +5332,19 @@ function exportAuditTrails() {
             showAppModal(_friendlyExportError(err), titleText);
         });
     });
+}
+
+function exportFromSelection(type) {
+    if (type === 'audit') {
+        if (typeof exportAuditTrails === 'function') exportAuditTrails();
+        return;
+    }
+    if (typeof currentReportFilter !== 'undefined' && currentReportFilter === 'audit') {
+        currentReportFilter = 'all';
+    }
+    if (typeof exportFilteredReports === 'function') {
+        exportFilteredReports();
+    }
 }
 
 function exportFilteredReports() {

@@ -140,6 +140,7 @@ var SCREEN_FEATURE_MAP = {
   'create-recipe-step1': 'recipe-edit',
   reports: 'reports-view',
   'report-preview': 'reports-view',
+  export: 'export-usb',
   'view-recipes': 'recipe-list',
   'recipe-print-preview': 'reports-view',
   validate: 'validation-test',
@@ -367,6 +368,9 @@ function checkNavigationAccess(screenId) {
   var user = window.currentUser || role;
   if (screenId === 'reports' || screenId === 'report-preview') {
     return canAccess(user, 'reports-view') || canAccess(user, 'audit-view');
+  }
+  if (screenId === 'export') {
+    return canAccess(user, 'export-usb');
   }
   if (screenId === 'disable-recipes') {
     return canAccess(user, 'disable-recipes') || canAccess(user, 'recipe-manage');
