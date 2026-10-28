@@ -15,15 +15,16 @@
     }
 
     window.getFactoryMaxVacuumMmHg = function () {
+        var cap = (typeof window.ABSOLUTE_MAX_VACUUM_MMHG === 'number') ? window.ABSOLUTE_MAX_VACUUM_MMHG : 750;
         try {
             var stored = localStorage.getItem('factorySettings');
             if (stored) {
                 var s = JSON.parse(stored);
                 var v = parseInt(s.maxVacuumMmHg, 10);
-                if (!isNaN(v) && v >= 1 && v <= 650) return v;
+                if (!isNaN(v) && v >= 1 && v <= cap) return v;
             }
         } catch (e) {}
-        return 650;
+        return cap;
     };
 
     window.parseMmSs = function (str) {
@@ -742,7 +743,8 @@
         apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
             var settings = (result && result.settings) ? result.settings : (result || {});
             var v = parseInt(settings.maxVacuumMmHg, 10);
-            if (!isNaN(v) && v >= 1 && v <= 650) {
+            var cap = (typeof window.ABSOLUTE_MAX_VACUUM_MMHG === 'number') ? window.ABSOLUTE_MAX_VACUUM_MMHG : 750;
+            if (!isNaN(v) && v >= 1 && v <= cap) {
                 try {
                     var stored = localStorage.getItem('factorySettings');
                     var merged = stored ? JSON.parse(stored) : {};
@@ -769,7 +771,8 @@
                 var s = JSON.parse(stored);
                 var t = parseInt(s.calibrationTargetVacuumMmHg, 10);
                 var r = parseInt(s.calibrationReleaseTimeSec, 10);
-                if (!isNaN(t) && t >= 1 && t <= 650) target = t;
+                var cap = (typeof window.ABSOLUTE_MAX_VACUUM_MMHG === 'number') ? window.ABSOLUTE_MAX_VACUUM_MMHG : 750;
+                if (!isNaN(t) && t >= 1 && t <= cap) target = t;
                 if (!isNaN(r) && r >= 1 && r <= 5999) release = r;
             }
         } catch (e) { /* ignore */ }
@@ -1104,7 +1107,7 @@
         if (!input) return null;
         var raw = String(input.value || '').trim();
         var val = parseFloat(raw);
-        var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
+        var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 750;
         if (!raw || isNaN(val) || val < 1) {
             showAppModal('Enter the actual pressure from the external gauge (mmHg).', 'Calibration');
             try { input.focus(); } catch (e) { /* ignore */ }

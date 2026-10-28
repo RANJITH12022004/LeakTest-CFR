@@ -5329,6 +5329,17 @@ def validation_load_start():
     return jsonify(result), (200 if result.get("ok") else 400)
 
 
+def _factory_max_vacuum_mmhg(factory=None):
+    cap = float(getattr(data_service, "ABSOLUTE_MAX_VACUUM_MMHG", 750))
+    if factory is None:
+        factory = data_service.get_factory_settings() or {}
+    try:
+        max_vac = float(factory.get("maxVacuumMmHg") or cap)
+    except (TypeError, ValueError):
+        max_vac = cap
+    return min(cap, max(1.0, max_vac))
+
+
 @app.route("/api/hardware/validation/vacuum/start", methods=["POST"])
 def validation_vacuum_start():
     gate = _require_session_internal("validation-test", "Forbidden. You do not have permission to run validation.")
@@ -5343,8 +5354,7 @@ def validation_vacuum_start():
     if vacuum_mmhg < 1 or duration_sec < 1:
         return jsonify({"ok": False, "error": "Vacuum and duration must be at least 1"}), 400
     factory = data_service.get_factory_settings() or {}
-    max_vac = float(factory.get("maxVacuumMmHg") or 650)
-    max_vac = min(650.0, max(1.0, max_vac))
+    max_vac = _factory_max_vacuum_mmhg(factory)
     if vacuum_mmhg > max_vac:
         return jsonify({
             "ok": False,
@@ -5368,8 +5378,7 @@ def hardware_calibration_start():
         target = float(data.get("targetVacuumMmHg") or factory.get("calibrationTargetVacuumMmHg") or 400)
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "Invalid calibration target vacuum"}), 400
-    max_vac = float(factory.get("maxVacuumMmHg") or 650)
-    max_vac = min(650.0, max(1.0, max_vac))
+    max_vac = _factory_max_vacuum_mmhg(factory)
     if target < 1 or target > max_vac:
         return jsonify({
             "ok": False,
@@ -5521,8 +5530,7 @@ def hardware_leak_start():
     except (TypeError, ValueError):
         vacuum_mmhg = None
     if vacuum_mmhg is not None:
-        max_vac = float(factory.get("maxVacuumMmHg") or 650)
-        max_vac = min(650.0, max(1.0, max_vac))
+        max_vac = _factory_max_vacuum_mmhg(factory)
         if vacuum_mmhg < 1:
             return jsonify({"ok": False, "error": "Vacuum must be at least 1 mmHg"}), 400
         if vacuum_mmhg > max_vac:

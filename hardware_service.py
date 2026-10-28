@@ -767,8 +767,8 @@ def cmd_start_calibration(target_mmhg: float = 400.0):
         target = _esp_mmhg_value(target_mmhg)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
-    if target > 650:
-        return {"ok": False, "error": "Calibration target must be 1–650 mmHg"}
+    if target < 1 or target > 750:
+        return {"ok": False, "error": "Calibration target must be 1–750 mmHg"}
     if _simulate_enabled():
         with _sim_lock:
             _sim_active = False

@@ -40,6 +40,46 @@ var currentReportData = null;
 var currentRecipeForPrint = null;
 var currentReportRecipe = null;
 var _recipePrintPreviewReturnPage = 'view-recipes';
+var ABSOLUTE_MAX_VACUUM_MMHG = 750;
+window.ABSOLUTE_MAX_VACUUM_MMHG = ABSOLUTE_MAX_VACUUM_MMHG;
+
+function getFactoryMaxVacuumMmHg() {
+    var cap = ABSOLUTE_MAX_VACUUM_MMHG;
+    try {
+        var stored = localStorage.getItem('factorySettings');
+        if (stored) {
+            var s = JSON.parse(stored);
+            var v = parseInt(s.maxVacuumMmHg, 10);
+            if (!isNaN(v) && v >= 1 && v <= cap) return v;
+        }
+    } catch (e) {}
+    return cap;
+}
+window.getFactoryMaxVacuumMmHg = getFactoryMaxVacuumMmHg;
+
+function applyFactoryMaxVacuumToInputs(maxVac) {
+    var cap = ABSOLUTE_MAX_VACUUM_MMHG;
+    var n = parseInt(maxVac, 10);
+    if (isNaN(n) || n < 1) n = getFactoryMaxVacuumMmHg();
+    n = Math.max(1, Math.min(cap, n));
+    [
+        'quick-vacuum-mmhg',
+        'recipe-vacuum-mmhg',
+        'vd-val-vacuum-mmhg',
+        'factory-cal-target-vacuum',
+        'factory-recipe-vacuum-preset-1',
+        'factory-recipe-vacuum-preset-2',
+        'factory-recipe-vacuum-preset-3',
+        'cal-gauge-pressure-input',
+        'cal-page-gauge-input'
+    ].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.max = String(n);
+    });
+    var factoryMaxEl = document.getElementById('factory-max-vacuum-mmhg');
+    if (factoryMaxEl) factoryMaxEl.max = String(cap);
+}
+window.applyFactoryMaxVacuumToInputs = applyFactoryMaxVacuumToInputs;
 var lastKnownDateTime = null;
 var dateTimeClockInterval = null;
 var _wallClockResyncInterval = null;
@@ -8392,6 +8432,12 @@ function syncCreateRecipeConsolePresets() {
 
 function applyCreateRecipeFactoryPresets(settings) {
     var s = settings || {};
+    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : ABSOLUTE_MAX_VACUUM_MMHG;
+    var settingsMax = parseInt(s.maxVacuumMmHg, 10);
+    if (!isNaN(settingsMax) && settingsMax >= 1 && settingsMax <= ABSOLUTE_MAX_VACUUM_MMHG) {
+        maxVac = settingsMax;
+    }
+    if (typeof applyFactoryMaxVacuumToInputs === 'function') applyFactoryMaxVacuumToInputs(maxVac);
     var vacuumPresets = Array.isArray(s.recipeVacuumPresets) && s.recipeVacuumPresets.length === 3
         ? s.recipeVacuumPresets
         : [200, 400, 600];
@@ -8402,7 +8448,7 @@ function applyCreateRecipeFactoryPresets(settings) {
     var vacuumButtons = document.querySelectorAll('.qt-preset-btn[data-recipe-vacuum]');
     vacuumButtons.forEach(function (btn, index) {
         var value = parseInt(vacuumPresets[index], 10);
-        if (isNaN(value) || value < 1 || value > 650) value = [200, 400, 600][index];
+        if (isNaN(value) || value < 1 || value > maxVac) value = Math.min(maxVac, [200, 400, 600][index]);
         btn.setAttribute('data-recipe-vacuum', String(value));
         btn.textContent = String(value);
     });
@@ -8410,7 +8456,7 @@ function applyCreateRecipeFactoryPresets(settings) {
     var quickVacuumButtons = document.querySelectorAll('.qt-preset-btn[data-vacuum]');
     quickVacuumButtons.forEach(function (btn, index) {
         var value = parseInt(vacuumPresets[index], 10);
-        if (isNaN(value) || value < 1 || value > 650) value = [200, 400, 600][index];
+        if (isNaN(value) || value < 1 || value > maxVac) value = Math.min(maxVac, [200, 400, 600][index]);
         btn.setAttribute('data-vacuum', String(value));
         btn.textContent = String(value);
     });
@@ -8486,7 +8532,7 @@ function startQuickTestRun() {
         else { errEl.textContent = ''; errEl.style.display = 'none'; }
     }
 
-    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
+    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : ABSOLUTE_MAX_VACUUM_MMHG;
     var vacuumMmHg = parseFloat(vacEl && vacEl.value ? vacEl.value : '');
     var durationSec = (typeof parseMmSs === 'function') ? parseMmSs(timeEl && timeEl.value ? timeEl.value : '') : null;
 
@@ -9670,7 +9716,7 @@ function updateCreateRecipeContinueButton() {
         ? getResolvedRecipeProductType()
         : '';
     var batchSize = parseInt(batchSizeEl && batchSizeEl.value ? batchSizeEl.value : '', 10);
-    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
+    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : ABSOLUTE_MAX_VACUUM_MMHG;
     var vacuum = parseFloat(vacEl && vacEl.value ? vacEl.value : '');
     var durationSec = (typeof parseMmSs === 'function') ? parseMmSs(timeEl && timeEl.value ? timeEl.value : '') : null;
 
@@ -9979,7 +10025,7 @@ function completeRecipeFromStep2() {
         : '';
     var batchSizeRaw = batchSizeEl ? String(batchSizeEl.value || '').trim() : '';
     var batchSize = batchSizeRaw === '' ? null : parseInt(batchSizeRaw, 10);
-    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
+    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : ABSOLUTE_MAX_VACUUM_MMHG;
     var vacuumMmHg = parseFloat(vacEl && vacEl.value ? vacEl.value : '');
     var durationSec = (typeof parseMmSs === 'function') ? parseMmSs(timeEl && timeEl.value ? timeEl.value : '') : null;
 
@@ -11481,7 +11527,7 @@ function setFactorySettingsForm(settings) {
         else if (pair[1] === 'maxSupervisors') el.value = String(val || 3);
         else if (pair[1] === 'passwordResetPeriodDays') el.value = String(val != null ? val : 30);
         else if (pair[1] === 'autoLogoutMinutes') el.value = String(val != null ? val : 0);
-        else if (pair[1] === 'maxVacuumMmHg') el.value = String(val != null ? val : 650);
+        else if (pair[1] === 'maxVacuumMmHg') el.value = String(val != null ? val : ABSOLUTE_MAX_VACUUM_MMHG);
         else if (pair[1] === 'calibrationTargetVacuumMmHg') el.value = String(val != null ? val : 400);
         else if (pair[1] === 'calibrationReleaseTimeSec') el.value = String(val != null ? val : 80);
         else el.value = val || '';
@@ -11508,6 +11554,9 @@ function setFactorySettingsForm(settings) {
     }
     applyBiometricSetting(biometricEnabled);
     updateLoginFactorySettingsDisplay(settings);
+    if (typeof applyFactoryMaxVacuumToInputs === 'function') {
+        applyFactoryMaxVacuumToInputs(settings.maxVacuumMmHg);
+    }
 }
 
 function saveFactorySettings() {
@@ -11551,12 +11600,12 @@ function saveFactorySettings() {
     var passwordResetPeriodDays = Math.max(1, Math.min(3650, parseInt(passwordResetDaysEl && passwordResetDaysEl.value ? passwordResetDaysEl.value : 30, 10)));
     var autoLogoutMinutes = Math.max(0, Math.min(10080, parseInt(autoLogoutEl && autoLogoutEl.value !== '' ? autoLogoutEl.value : '0', 10)));
     if (isNaN(autoLogoutMinutes)) autoLogoutMinutes = 0;
-    var maxVacuumRaw = parseInt(maxVacuumEl && maxVacuumEl.value ? maxVacuumEl.value : 650, 10);
-    if (!isNaN(maxVacuumRaw) && maxVacuumRaw > 650) {
-        showAppModal('Maximum vacuum cannot exceed 650 mmHg.', 'Factory Settings');
+    var maxVacuumRaw = parseInt(maxVacuumEl && maxVacuumEl.value ? maxVacuumEl.value : ABSOLUTE_MAX_VACUUM_MMHG, 10);
+    if (!isNaN(maxVacuumRaw) && maxVacuumRaw > ABSOLUTE_MAX_VACUUM_MMHG) {
+        showAppModal('Maximum vacuum cannot exceed ' + ABSOLUTE_MAX_VACUUM_MMHG + ' mmHg.', 'Factory Settings');
         return;
     }
-    var maxVacuumMmHg = Math.max(1, Math.min(650, isNaN(maxVacuumRaw) ? 650 : maxVacuumRaw));
+    var maxVacuumMmHg = Math.max(1, Math.min(ABSOLUTE_MAX_VACUUM_MMHG, isNaN(maxVacuumRaw) ? ABSOLUTE_MAX_VACUUM_MMHG : maxVacuumRaw));
     var calTargetRaw = parseInt(calTargetEl && calTargetEl.value ? calTargetEl.value : 400, 10);
     if (!Number.isInteger(calTargetRaw) || calTargetRaw < 1 || calTargetRaw > maxVacuumMmHg) {
         showAppModal(

@@ -1647,6 +1647,18 @@ def factory_reset() -> Dict[str, Any]:
 
 # =================== FACTORY SETTINGS ==========================
 
+ABSOLUTE_MAX_VACUUM_MMHG = 750
+DEFAULT_MAX_VACUUM_MMHG = 750
+
+
+def clamp_max_vacuum_mmhg(value, default=None) -> int:
+    if default is None:
+        default = DEFAULT_MAX_VACUUM_MMHG
+    try:
+        return max(1, min(ABSOLUTE_MAX_VACUUM_MMHG, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return int(default)
+
 
 def get_factory_settings() -> Dict[str, Any]:
     """Get factory settings."""
@@ -1664,11 +1676,18 @@ def get_factory_settings() -> Dict[str, Any]:
     if not isinstance(settings.get("recipeTimePresetsSec"), list) or len(settings["recipeTimePresetsSec"]) != 3:
         settings["recipeTimePresetsSec"] = [30, 60, 90]
     try:
-        settings["calibrationTargetVacuumMmHg"] = max(
-            1, min(650, int(settings.get("calibrationTargetVacuumMmHg", 400)))
+        settings["maxVacuumMmHg"] = clamp_max_vacuum_mmhg(
+            settings.get("maxVacuumMmHg", DEFAULT_MAX_VACUUM_MMHG)
         )
     except (TypeError, ValueError):
-        settings["calibrationTargetVacuumMmHg"] = 400
+        settings["maxVacuumMmHg"] = DEFAULT_MAX_VACUUM_MMHG
+    max_vacuum = settings["maxVacuumMmHg"]
+    try:
+        settings["calibrationTargetVacuumMmHg"] = max(
+            1, min(max_vacuum, int(settings.get("calibrationTargetVacuumMmHg", 400)))
+        )
+    except (TypeError, ValueError):
+        settings["calibrationTargetVacuumMmHg"] = min(400, max_vacuum)
     try:
         settings["calibrationReleaseTimeSec"] = max(
             1, min(5999, int(settings.get("calibrationReleaseTimeSec", 80)))
@@ -1716,9 +1735,9 @@ def save_factory_settings(settings: Dict[str, Any]):
                 val = default
             merged[key] = val
     try:
-        max_vacuum = max(1, min(650, int(merged.get("maxVacuumMmHg", 650))))
+        max_vacuum = clamp_max_vacuum_mmhg(merged.get("maxVacuumMmHg", DEFAULT_MAX_VACUUM_MMHG))
     except (ValueError, TypeError):
-        max_vacuum = 650
+        max_vacuum = DEFAULT_MAX_VACUUM_MMHG
     merged["maxVacuumMmHg"] = max_vacuum
 
     vacuum_defaults = [200, 400, 600]
