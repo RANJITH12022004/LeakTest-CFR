@@ -14,18 +14,20 @@
         return lastValidationType === 'distance' && !!window._vdValidationParams;
     }
 
-    window.getFactoryMaxVacuumMmHg = function () {
-        var cap = (typeof window.ABSOLUTE_MAX_VACUUM_MMHG === 'number') ? window.ABSOLUTE_MAX_VACUUM_MMHG : 750;
-        try {
-            var stored = localStorage.getItem('factorySettings');
-            if (stored) {
-                var s = JSON.parse(stored);
-                var v = parseInt(s.maxVacuumMmHg, 10);
-                if (!isNaN(v) && v >= 1 && v <= cap) return v;
-            }
-        } catch (e) {}
-        return cap;
-    };
+    if (typeof window.getFactoryMaxVacuumMmHg !== 'function') {
+        window.getFactoryMaxVacuumMmHg = function () {
+            var cap = (typeof window.ABSOLUTE_MAX_VACUUM_MMHG === 'number') ? window.ABSOLUTE_MAX_VACUUM_MMHG : 750;
+            try {
+                var stored = localStorage.getItem('factorySettings');
+                if (stored) {
+                    var s = JSON.parse(stored);
+                    var v = parseInt(s.maxVacuumMmHg, 10);
+                    if (!isNaN(v) && v >= 1 && v <= cap) return v;
+                }
+            } catch (e) {}
+            return cap;
+        };
+    }
 
     window.parseMmSs = function (str) {
         var s = String(str || '').trim();
@@ -731,7 +733,8 @@
     function applyVdInputMaxVacuum(maxVac) {
         var vacEl = document.getElementById('vd-val-vacuum-mmhg');
         if (vacEl) {
-            vacEl.max = String(maxVac);
+            vacEl.setAttribute('max', String(maxVac));
+            vacEl.setAttribute('data-max', String(maxVac));
             vacEl.placeholder = 'Max ' + maxVac + ' mmHg';
         }
         setVdInputError('');
@@ -745,6 +748,9 @@
             var v = parseInt(settings.maxVacuumMmHg, 10);
             var cap = (typeof window.ABSOLUTE_MAX_VACUUM_MMHG === 'number') ? window.ABSOLUTE_MAX_VACUUM_MMHG : 750;
             if (!isNaN(v) && v >= 1 && v <= cap) {
+                if (typeof window.applyFactoryMaxVacuumToInputs === 'function') {
+                    window.applyFactoryMaxVacuumToInputs(v);
+                }
                 try {
                     var stored = localStorage.getItem('factorySettings');
                     var merged = stored ? JSON.parse(stored) : {};

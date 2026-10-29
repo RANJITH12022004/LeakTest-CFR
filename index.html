@@ -83,8 +83,8 @@
             </p>
             <div class="form-group">
                 <label for="cal-gauge-pressure-input">Actual Pressure (mmHg) <span class="required">*</span></label>
-                <input type="number" id="cal-gauge-pressure-input" class="input-field cal-actual-vacuum-input"
-                    min="1" max="750" step="0.1" placeholder="Enter actual" inputmode="decimal"
+                <input type="text" id="cal-gauge-pressure-input" class="input-field cal-actual-vacuum-input"
+                    min="1" max="750" data-vacuum-input="true" data-max="750" step="0.1" placeholder="Enter actual" inputmode="decimal"
                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
             </div>
             <div class="role-modal-buttons">
@@ -354,8 +354,8 @@
                                 <div class="qt-param-grid">
                                     <div class="qt-param-block">
                                         <label class="qt-field-label" for="quick-vacuum-mmhg">Vacuum (mmHg)</label>
-                                        <input type="number" id="quick-vacuum-mmhg" class="input-field qt-input-metric"
-                                            min="1" max="750" inputmode="numeric"
+                                        <input type="text" id="quick-vacuum-mmhg" class="input-field qt-input-metric"
+                                            min="1" max="750" data-vacuum-input="true" data-max="750" inputmode="numeric"
                                             oninput="if(typeof syncQuickVacuumPreset==='function') syncQuickVacuumPreset();"
                                             onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                                         <div class="qt-preset-row" role="group" aria-label="Vacuum presets">
@@ -649,8 +649,8 @@
                                 <div class="qt-param-grid">
                                     <div class="qt-param-block">
                                         <label class="qt-field-label" for="recipe-vacuum-mmhg">Vacuum (mmHg)</label>
-                                        <input type="number" id="recipe-vacuum-mmhg" class="input-field qt-input-metric"
-                                            min="1" max="750" inputmode="numeric"
+                                        <input type="text" id="recipe-vacuum-mmhg" class="input-field qt-input-metric"
+                                            min="1" max="750" data-vacuum-input="true" data-max="750" inputmode="numeric"
                                             oninput="if(typeof syncRecipeVacuumPreset==='function') syncRecipeVacuumPreset(); if(typeof updateCreateRecipeContinueButton==='function') updateCreateRecipeContinueButton();"
                                             onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                                         <div class="qt-preset-row" role="group" aria-label="Vacuum presets">
@@ -1287,8 +1287,9 @@
                         <div class="quick-test-form form-grid create-recipe-form-grid">
                             <div class="form-group full-width">
                                 <label for="vd-val-vacuum-mmhg">Vacuum (mmHg)</label>
-                                <input type="number" id="vd-val-vacuum-mmhg" class="input-field" min="1" max="750"
-                                    placeholder="Enter vacuum in mmHg"
+                                <input type="text" id="vd-val-vacuum-mmhg" class="input-field" min="1" max="750"
+                                    data-vacuum-input="true" data-max="750"
+                                    placeholder="Enter vacuum in mmHg" inputmode="numeric"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
                             <div class="form-group full-width">
@@ -1528,8 +1529,8 @@
                             <div id="cal-gauge-entry-panel" class="validation-card calibration-gauge-entry-card cal-gauge-slot">
                                 <div class="validation-card-label">Actual pressure (external gauge)</div>
                                 <div class="calibration-gauge-entry-row">
-                                    <input type="number" id="cal-page-gauge-input" class="input-field cal-actual-vacuum-input"
-                                        min="1" max="750" step="0.1" placeholder="mmHg" inputmode="decimal" disabled
+                                    <input type="text" id="cal-page-gauge-input" class="input-field cal-actual-vacuum-input"
+                                        min="1" max="750" data-vacuum-input="true" data-max="750" step="0.1" placeholder="mmHg" inputmode="decimal" disabled
                                         onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                                     <button type="button" class="btn btn-primary" id="btn-calibration-apply" disabled
                                         onclick="submitVacuumCalibrationGauge()">Calibrate</button>
@@ -2034,7 +2035,8 @@
                             </div>
                             <div class="form-group">
                                 <label>Calibration Target Vacuum (mmHg)</label>
-                                <input type="number" id="factory-cal-target-vacuum" class="input-field" min="1" max="750"
+                                <input type="text" id="factory-cal-target-vacuum" class="input-field" min="1" max="750"
+                                    data-vacuum-input="true" data-max="750" inputmode="numeric"
                                     placeholder="400" value="400"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                                 <p class="section-subtitle" style="margin-top:6px;font-size:13px;">Automatic evacuation target for vacuum pressure calibration (default 400 mmHg).</p>
@@ -2048,27 +2050,28 @@
                             </div>
                             <div class="form-group">
                                 <label>Maximum Vacuum (mmHg)</label>
-                                <input type="number" id="factory-max-vacuum-mmhg" class="input-field" min="1" max="750"
+                                <input type="text" id="factory-max-vacuum-mmhg" class="input-field" min="1" max="750"
+                                    data-vacuum-input="true" data-max="750" inputmode="numeric"
                                     placeholder="750" value="750"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                                 <p class="section-subtitle" style="margin-top:6px;font-size:13px;">Maximum settable vacuum for Quick Test, recipes, validation, and calibration. Cannot exceed 750 mmHg.</p>
                             </div>
                             <div class="form-group factory-preset-field">
                                 <label>Vacuum Preset 1 (mmHg)</label>
-                                <input type="number" id="factory-recipe-vacuum-preset-1" class="input-field"
-                                    min="1" max="750" value="200"
+                                <input type="text" id="factory-recipe-vacuum-preset-1" class="input-field"
+                                    min="1" max="750" data-vacuum-input="true" data-max="750" inputmode="numeric" value="200"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
                             <div class="form-group factory-preset-field">
                                 <label>Vacuum Preset 2 (mmHg)</label>
-                                <input type="number" id="factory-recipe-vacuum-preset-2" class="input-field"
-                                    min="1" max="750" value="400"
+                                <input type="text" id="factory-recipe-vacuum-preset-2" class="input-field"
+                                    min="1" max="750" data-vacuum-input="true" data-max="750" inputmode="numeric" value="400"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
                             <div class="form-group factory-preset-field">
                                 <label>Vacuum Preset 3 (mmHg)</label>
-                                <input type="number" id="factory-recipe-vacuum-preset-3" class="input-field"
-                                    min="1" max="750" value="600"
+                                <input type="text" id="factory-recipe-vacuum-preset-3" class="input-field"
+                                    min="1" max="750" data-vacuum-input="true" data-max="750" inputmode="numeric" value="600"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
                             <div class="form-group factory-preset-field">
@@ -2177,11 +2180,11 @@
         </main>
     </div>
     <div id="keyboard-root"></div>
-    <script src="keyboard.js?v=3"></script>
+    <script src="keyboard.js?v=4"></script>
     <script src="rbac.js?v=10"></script>
-    <script src="script.js?v=114"></script>
+    <script src="script.js?v=115"></script>
     <script src="leaktest_patch.js?v=2"></script>
-    <script src="validation_vd.js?v=30"></script>
+    <script src="validation_vd.js?v=31"></script>
 </body>
 
 </html>

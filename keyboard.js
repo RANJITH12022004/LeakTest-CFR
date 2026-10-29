@@ -181,8 +181,25 @@
             buildKeyboard();
             return;
         } else {
-            // Regular key
+            // Numeric/vacuum fields: only accept digits (and one decimal for gauges).
+            if (typeof _inputWantsNumericKeyboard === 'function' && _inputWantsNumericKeyboard(currentInput)) {
+                var wantsDecimal = _inputWantsDecimalKeyboard(currentInput);
+                if (wantsDecimal) {
+                    if (!/^[0-9.]$/.test(key)) return;
+                    if (key === '.' && String(currentInput.value).indexOf('.') !== -1) return;
+                } else if (!/^[0-9]$/.test(key)) {
+                    return;
+                }
+            }
+            // Temporarily drop max on type=number so Chromium cannot swallow
+            // digits (e.g. typing 750 when max was still 650).
+            var prevMax = null;
+            if (currentInput.type === 'number') {
+                prevMax = currentInput.getAttribute('max');
+                if (prevMax != null) currentInput.removeAttribute('max');
+            }
             currentInput.value += key;
+            if (prevMax != null) currentInput.setAttribute('max', prevMax);
 
             // Auto-disable shift after typing (but not caps lock)
             if (shiftActive && !capsLockActive) {
@@ -278,13 +295,22 @@
         return inputElement.classList.contains('decimal-input');
     }
 
+    function _inputWantsNumericKeyboard(inputElement) {
+        if (!inputElement) return false;
+        if (_inputWantsDecimalKeyboard(inputElement)) return true;
+        if (inputElement.getAttribute('data-vacuum-input') === 'true') return true;
+        var mode = String(inputElement.getAttribute('inputmode') || '').toLowerCase();
+        if (mode === 'numeric' || mode === 'decimal') return true;
+        return inputElement.type === 'number';
+    }
+
     // Open keyboard for input
     function openOSKForInput(inputElement) {
         if (!inputElement) return;
 
         currentInput = inputElement;
 
-        if (_inputWantsDecimalKeyboard(inputElement)) {
+        if (_inputWantsNumericKeyboard(inputElement)) {
             numbersActive = true;
             capsLockActive = false;
             shiftActive = false;

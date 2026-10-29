@@ -42,9 +42,12 @@ var currentReportRecipe = null;
 var _recipePrintPreviewReturnPage = 'view-recipes';
 var ABSOLUTE_MAX_VACUUM_MMHG = 750;
 window.ABSOLUTE_MAX_VACUUM_MMHG = ABSOLUTE_MAX_VACUUM_MMHG;
+var _liveFactoryMaxVacuumMmHg = null;
 
 function getFactoryMaxVacuumMmHg() {
     var cap = ABSOLUTE_MAX_VACUUM_MMHG;
+    var live = parseInt(_liveFactoryMaxVacuumMmHg, 10);
+    if (!isNaN(live) && live >= 1 && live <= cap) return live;
     try {
         var stored = localStorage.getItem('factorySettings');
         if (stored) {
@@ -57,11 +60,29 @@ function getFactoryMaxVacuumMmHg() {
 }
 window.getFactoryMaxVacuumMmHg = getFactoryMaxVacuumMmHg;
 
+function setLiveFactoryMaxVacuumMmHg(value) {
+    var cap = ABSOLUTE_MAX_VACUUM_MMHG;
+    var v = parseInt(value, 10);
+    if (isNaN(v) || v < 1) v = cap;
+    v = Math.max(1, Math.min(cap, v));
+    _liveFactoryMaxVacuumMmHg = v;
+    try {
+        var stored = localStorage.getItem('factorySettings');
+        var s = stored ? JSON.parse(stored) : {};
+        if (!s || typeof s !== 'object') s = {};
+        s.maxVacuumMmHg = v;
+        localStorage.setItem('factorySettings', JSON.stringify(s));
+    } catch (e) {}
+    return v;
+}
+window.setLiveFactoryMaxVacuumMmHg = setLiveFactoryMaxVacuumMmHg;
+
 function applyFactoryMaxVacuumToInputs(maxVac) {
     var cap = ABSOLUTE_MAX_VACUUM_MMHG;
     var n = parseInt(maxVac, 10);
     if (isNaN(n) || n < 1) n = getFactoryMaxVacuumMmHg();
     n = Math.max(1, Math.min(cap, n));
+    setLiveFactoryMaxVacuumMmHg(n);
     [
         'quick-vacuum-mmhg',
         'recipe-vacuum-mmhg',
@@ -74,10 +95,15 @@ function applyFactoryMaxVacuumToInputs(maxVac) {
         'cal-page-gauge-input'
     ].forEach(function (id) {
         var el = document.getElementById(id);
-        if (el) el.max = String(n);
+        if (!el) return;
+        el.setAttribute('max', String(n));
+        el.setAttribute('data-max', String(n));
     });
     var factoryMaxEl = document.getElementById('factory-max-vacuum-mmhg');
-    if (factoryMaxEl) factoryMaxEl.max = String(cap);
+    if (factoryMaxEl) {
+        factoryMaxEl.setAttribute('max', String(cap));
+        factoryMaxEl.setAttribute('data-max', String(cap));
+    }
 }
 window.applyFactoryMaxVacuumToInputs = applyFactoryMaxVacuumToInputs;
 var lastKnownDateTime = null;
@@ -11675,6 +11701,7 @@ function saveFactorySettings() {
             try { localStorage.setItem('factorySettings', JSON.stringify(data)); } catch (e) {}
             applyBiometricSetting(data.biometricEnabled);
             applyFactoryAutoLogoutSetting(data);
+            if (typeof applyFactoryMaxVacuumToInputs === 'function') applyFactoryMaxVacuumToInputs(data.maxVacuumMmHg);
             if (typeof applyCreateRecipeFactoryPresets === 'function') applyCreateRecipeFactoryPresets(data);
             updateLoginFactorySettingsDisplay(data);
             showAppModal('Factory settings saved successfully.', 'Factory Settings');
@@ -11682,6 +11709,7 @@ function saveFactorySettings() {
             try { localStorage.setItem('factorySettings', JSON.stringify(data)); } catch (e) {}
             applyBiometricSetting(data.biometricEnabled);
             applyFactoryAutoLogoutSetting(data);
+            if (typeof applyFactoryMaxVacuumToInputs === 'function') applyFactoryMaxVacuumToInputs(data.maxVacuumMmHg);
             if (typeof applyCreateRecipeFactoryPresets === 'function') applyCreateRecipeFactoryPresets(data);
             updateLoginFactorySettingsDisplay(data);
             showAppModal('Factory settings saved locally.', 'Factory Settings');
@@ -11788,11 +11816,41 @@ function attachKeyboardToInputs() {
     });
 }
 
+function refreshFactoryVacuumCapFromServer() {
+    if (typeof apiRequest !== 'function') {
+        if (typeof applyFactoryMaxVacuumToInputs === 'function') {
+            applyFactoryMaxVacuumToInputs(getFactoryMaxVacuumMmHg());
+        }
+        return;
+    }
+    apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
+        var settings = (result && result.settings) ? result.settings : (result || {});
+        var maxVac = parseInt(settings && settings.maxVacuumMmHg, 10);
+        if (isNaN(maxVac) || maxVac < 1) maxVac = ABSOLUTE_MAX_VACUUM_MMHG;
+        if (typeof applyFactoryMaxVacuumToInputs === 'function') applyFactoryMaxVacuumToInputs(maxVac);
+        try {
+            var stored = localStorage.getItem('factorySettings');
+            var merged = stored ? JSON.parse(stored) : {};
+            if (!merged || typeof merged !== 'object') merged = {};
+            Object.keys(settings || {}).forEach(function (k) {
+                merged[k] = settings[k];
+            });
+            merged.maxVacuumMmHg = maxVac;
+            localStorage.setItem('factorySettings', JSON.stringify(merged));
+        } catch (e) {}
+    }).catch(function () {
+        if (typeof applyFactoryMaxVacuumToInputs === 'function') {
+            applyFactoryMaxVacuumToInputs(getFactoryMaxVacuumMmHg());
+        }
+    });
+}
+
 document.addEventListener('DOMContentLoaded', function () {
     bindTestRunDecimalInputs();
     attachKeyboardToInputs();
     loadBiometricSetting();
     loadLoginFactorySettingsDisplay();
+    refreshFactoryVacuumCapFromServer();
 
     document.querySelectorAll('.nav-item[data-page]').forEach(function (btn) {
         btn.addEventListener('click', function () {
