@@ -12,7 +12,7 @@ var ROLE_RESTRICTIONS = {
     'factory-reset': 'no-access',
   },
   supervisor: {
-    'user-manage': 'view-only',
+    // user-manage is NOT view-only: Reviewer with perm_profile_admin must Edit Profile.
     'user-add': 'no-access',
     'user-delete': 'no-access',
     'user-unlock': 'no-access',
@@ -164,6 +164,9 @@ var SCREEN_FEATURE_MAP = {
   'add-member': 'user-add',
   'locked-members': 'user-manage',
   'disabled-members': 'user-manage',
+  'manage-user-groups': 'user-manage',
+  'disabled-user-groups': 'user-manage',
+  'edit-user-group': 'user-manage',
   'disable-recipes': 'disable-recipes',
   'member-biometric': 'profile',
   'password-expired-reset': 'profile',
@@ -172,6 +175,8 @@ var SCREEN_FEATURE_MAP = {
 var ACTION_FEATURE_MAP = {
   'add-member': 'user-add',
   'edit-member': 'user-manage',
+  'edit-user-group': 'user-manage',
+  'manage-user-groups': 'user-manage',
   'delete-member': 'user-delete',
   'unlock-member': 'user-unlock',
   'enable-member': 'user-enable',
@@ -356,6 +361,14 @@ function canPerformAction(roleOrUser, featureKey, action) {
   return true;
 }
 
+
+/** Validate hub: allow if user may run validation and/or calibration. */
+function canAccessValidationOrCalibration(roleOrUser) {
+  return canAccess(roleOrUser, 'validation-test')
+    || canAccess(roleOrUser, 'validate-menu')
+    || canAccess(roleOrUser, 'calibration-menu');
+}
+
 function checkNavigationAccess(screenId) {
   if (screenId === 'login') return true;
   var role = getCurrentRole();
@@ -374,6 +387,9 @@ function checkNavigationAccess(screenId) {
   }
   if (screenId === 'disable-recipes') {
     return canAccess(user, 'disable-recipes') || canAccess(user, 'recipe-manage');
+  }
+  if (screenId === 'validate') {
+    return canAccessValidationOrCalibration(typeof userObj !== 'undefined' && userObj ? userObj : (typeof user !== 'undefined' ? user : null));
   }
   return canAccess(user, featureKey);
 }

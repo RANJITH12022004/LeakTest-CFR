@@ -1572,6 +1572,19 @@ body {
     background: linear-gradient(135deg, #2dd4bf, #14b8a6);
 }
 
+.settings-user-groups {
+    background: linear-gradient(135deg, #6366f1, #4f46e5) !important;
+    color: #fff !important;
+}
+.settings-user-groups:hover {
+    background: linear-gradient(135deg, #818cf8, #6366f1) !important;
+}
+.settings-user-groups .settings-icon,
+.settings-user-groups .settings-icon svg,
+.settings-user-groups h3 {
+    color: #fff !important;
+}
+
 .settings-validation {
     background: linear-gradient(135deg, #eab308, #ca8a04);
 }
@@ -6717,4 +6730,11 @@ input[type="number"] {
     margin: 0;
     opacity: 0.8;
     font-size: 0.95rem;
+}
+
+.permission-card.is-locked {
+    cursor: default;
+}
+.permission-card.is-locked:not(.is-selected) {
+    opacity: 0.45;
 }

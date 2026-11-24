@@ -132,11 +132,56 @@ def _configured_storage_dir() -> Optional[pathlib.Path]:
     return None
 
 
+def _internal_usb_root() -> pathlib.Path:
+    return pathlib.Path(os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal"))
+
+
 def _internal_usb_storage_dir() -> Optional[pathlib.Path]:
-    internal = pathlib.Path(os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal"))
-    if internal.is_dir():
-        return internal / "storage"
-    return None
+    """Leak Test USB storage only — never Hardness ``/media/usb_internal/storage``.
+
+    Sharing that path made Leak Test ``list_members`` / factory-reset richness
+    recover Hardness users, so an old R307 template logged in as the old person.
+    """
+    configured = _configured_storage_dir()
+    if configured is not None:
+        return configured
+    return _internal_usb_root() / "leaktest" / "storage"
+
+
+def _is_foreign_hardness_storage(path: pathlib.Path) -> bool:
+    """True for Hardness USB/SD trees that must not be read or wiped by Leak Test."""
+    if path is None:
+        return False
+    try:
+        key = str(path.resolve())
+    except OSError:
+        key = str(path)
+    own: List[pathlib.Path] = []
+    configured = _configured_storage_dir()
+    if configured is not None:
+        own.append(configured)
+    app_root = pathlib.Path(
+        (_config.get("APP_ROOT") if _config else None)
+        or os.environ.get("APP_ROOT")
+        or "/opt/leaktest"
+    )
+    own.append(app_root / "storage")
+    own.append(_internal_usb_root() / "leaktest" / "storage")
+    for p in own:
+        try:
+            if str(p.resolve()) == key:
+                return False
+        except OSError:
+            if str(p) == key:
+                return False
+    for foreign in (_internal_usb_root() / "storage", pathlib.Path("/opt/kiosk/storage")):
+        try:
+            if str(foreign.resolve()) == key:
+                return True
+        except OSError:
+            if str(foreign) == key:
+                return True
+    return False
 
 
 def _storage_dir_candidates() -> List[pathlib.Path]:
@@ -145,6 +190,8 @@ def _storage_dir_candidates() -> List[pathlib.Path]:
     out: List[pathlib.Path] = []
 
     def _add(p: pathlib.Path) -> None:
+        if _is_foreign_hardness_storage(p):
+            return
         try:
             key = str(p.resolve())
         except OSError:
@@ -205,6 +252,7 @@ _CRITICAL_JSON_NAMES = frozenset(
         "roles.json",
         "current_user.json",
         "session_power_audit_pending.json",
+        "report_export_schedule.json",
     }
 )
 
@@ -214,7 +262,7 @@ def _sd_storage_dir() -> pathlib.Path:
     if _config:
         app_root = _config.get("APP_ROOT")
     if not app_root:
-        app_root = os.environ.get("APP_ROOT", "/opt/kiosk")
+        app_root = os.environ.get("APP_ROOT", "/opt/leaktest")
     return pathlib.Path(app_root) / "storage"
 
 
@@ -255,6 +303,8 @@ def _candidate_storage_dirs_for_read() -> List[pathlib.Path]:
     def _add(p: Optional[pathlib.Path]) -> None:
         if p is None:
             return
+        if _is_foreign_hardness_storage(p):
+            return
         try:
             key = str(p.resolve())
         except OSError:
@@ -274,12 +324,17 @@ def _candidate_storage_dirs_for_read() -> List[pathlib.Path]:
 
 
 def _load_critical_json(name: str, default=None):
-    """Load critical JSON from the richest readable copy (USB RO / USB RW / SD mirror)."""
+    """Load critical JSON from the richest readable Leak Test copy (USB RO / USB RW / SD mirror).
+
+    Never reads Hardness ``/media/usb_internal/storage`` or ``/opt/kiosk/storage``.
+    """
     if default is None:
         default = []
     best = None
     best_score = -1
     for root in _candidate_storage_dirs_for_read():
+        if _is_foreign_hardness_storage(root):
+            continue
         path = root / name
         if not path.is_file():
             continue
@@ -368,6 +423,8 @@ def _seed_storage_from_readonly_usb(dest: pathlib.Path) -> None:
     usb_storage = _internal_usb_storage_dir()
     if usb_storage is None or not usb_storage.is_dir():
         return
+    if _is_foreign_hardness_storage(usb_storage) or _is_foreign_hardness_storage(dest):
+        return
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -402,25 +459,33 @@ def _seed_storage_from_readonly_usb(dest: pathlib.Path) -> None:
 
 
 def _refresh_storage_dir() -> None:
-    """Re-resolve STORAGE_DIR; always prefer writable USB when present.
+    """Re-resolve STORAGE_DIR; prefer this product's configured USB path.
 
     After power-loss the launcher may start on SD fallback while USB is still RO.
     Once USB is repaired/writable again, switch back so members/recipes/reports return.
+    Never switch onto Hardness ``/media/usb_internal/storage``.
     """
     global _storage_dir
+    configured = _configured_storage_dir()
+    if configured is not None and not _is_foreign_hardness_storage(configured) and _path_is_writable(configured):
+        _storage_dir = configured
+        return
     usb = _internal_usb_storage_dir()
     sd_fallback = _sd_storage_dir()
-    if usb is not None and _path_is_writable(usb):
+    if (
+        usb is not None
+        and not _is_foreign_hardness_storage(usb)
+        and _path_is_writable(usb)
+    ):
         _storage_dir = usb
         return
     # USB absent or remount-ro — seed SD from readable USB so login/recipes are not empty.
     _seed_storage_from_readonly_usb(sd_fallback)
-    configured = _configured_storage_dir()
-    if configured is not None and _path_is_writable(configured):
+    if configured is not None and not _is_foreign_hardness_storage(configured) and _path_is_writable(configured):
         _storage_dir = configured
         return
     candidates = _storage_dir_candidates()
-    writable = [p for p in candidates if _path_is_writable(p)]
+    writable = [p for p in candidates if _path_is_writable(p) and not _is_foreign_hardness_storage(p)]
     if writable:
         if len(writable) == 1:
             _storage_dir = writable[0]
@@ -649,6 +714,124 @@ def enable_recipe(recipe_id: int):
     return None
 
 
+def _load_user_groups_raw() -> list:
+    path = _get_storage_path("userGroups.json")
+    data = _load_json_file(path, default={"groups": []})
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        groups = data.get("groups")
+        return groups if isinstance(groups, list) else []
+    return []
+
+
+def _save_user_groups_raw(groups: list) -> None:
+    path = _get_storage_path("userGroups.json")
+    _save_json_file(path, {"groups": groups if isinstance(groups, list) else []})
+
+
+def list_user_groups(status: str = "active") -> list:
+    groups = _load_user_groups_raw()
+    want = str(status or "active").strip().lower()
+    out = []
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        st = str(g.get("status") or "active").strip().lower()
+        if want == "all" or st == want:
+            out.append(g)
+    return out
+
+
+def save_user_group(group_data: Dict[str, Any]) -> int:
+    groups = _load_user_groups_raw()
+    name = str((group_data or {}).get("name") or "").strip()
+    if not name:
+        raise ValueError("Group name is required.")
+    allow = (group_data or {}).get("allow") or []
+    if not isinstance(allow, list) or not allow:
+        raise ValueError("Select at least one permission for the group.")
+    allow_clean = [str(k).strip() for k in allow if str(k).strip()]
+    group_id = (group_data or {}).get("id")
+    now = datetime.utcnow().isoformat() + "Z"
+    if group_id is not None:
+        for i, g in enumerate(groups):
+            if int(g.get("id") or 0) == int(group_id):
+                updated = dict(g)
+                updated["name"] = name
+                updated["allow"] = allow_clean
+                updated["status"] = str(g.get("status") or "active")
+                updated["updatedAt"] = now
+                groups[i] = updated
+                _save_user_groups_raw(groups)
+                return int(group_id)
+        raise ValueError("Group not found")
+    if group_id is None:
+        active_count = 0
+        for g in groups:
+            if str(g.get("status") or "active").strip().lower() == "active":
+                active_count += 1
+        if active_count >= 10:
+            raise ValueError("Maximum of 10 profile power groups allowed.")
+    next_id = 1
+    for g in groups:
+        try:
+            next_id = max(next_id, int(g.get("id") or 0) + 1)
+        except (TypeError, ValueError):
+            pass
+    groups.append({
+        "id": next_id,
+        "name": name,
+        "allow": allow_clean,
+        "status": "active",
+        "createdAt": now,
+        "updatedAt": now,
+    })
+    _save_user_groups_raw(groups)
+    return next_id
+
+
+def disable_user_group(group_id: int) -> Dict[str, Any]:
+    groups = _load_user_groups_raw()
+    for i, g in enumerate(groups):
+        if int(g.get("id") or 0) == int(group_id):
+            updated = dict(g)
+            updated["status"] = "disabled"
+            updated["updatedAt"] = datetime.utcnow().isoformat() + "Z"
+            groups[i] = updated
+            _save_user_groups_raw(groups)
+            return updated
+    raise ValueError("Group not found")
+
+
+def enable_user_group(group_id: int) -> Dict[str, Any]:
+    """Re-enable a disabled user group. Caps active groups at 10."""
+    groups = _load_user_groups_raw()
+    target = None
+    target_idx = None
+    active_count = 0
+    for i, g in enumerate(groups):
+        st = str(g.get("status") or "active").strip().lower()
+        if st == "active":
+            active_count += 1
+        if int(g.get("id") or 0) == int(group_id):
+            target = g
+            target_idx = i
+    if target is None:
+        raise ValueError("Group not found")
+    if str(target.get("status") or "active").strip().lower() == "active":
+        return dict(target)
+    if active_count >= 10:
+        raise ValueError("Maximum of 10 profile power groups allowed.")
+    updated = dict(target)
+    updated["status"] = "active"
+    updated["updatedAt"] = datetime.utcnow().isoformat() + "Z"
+    groups[target_idx] = updated
+    _save_user_groups_raw(groups)
+    return updated
+
+
+
 # =================== REPORT OPERATIONS ==========================
 
 
@@ -732,10 +915,21 @@ def save_report(report_data: Dict[str, Any]) -> int:
 
 def delete_report(report_id: int) -> bool:
     """Delete report by ID."""
+    try:
+        want = int(report_id)
+    except (TypeError, ValueError):
+        return False
     reports_path = _get_storage_path("reports.json")
     reports = list_reports("all")
     original_len = len(reports)
-    reports = [r for r in reports if r.get("id") != report_id]
+
+    def _rid(row: Any) -> Optional[int]:
+        try:
+            return int((row or {}).get("id"))
+        except (TypeError, ValueError):
+            return None
+
+    reports = [r for r in reports if _rid(r) != want]
     if len(reports) < original_len:
         _save_json_file(reports_path, reports)
         return True
@@ -807,50 +1001,61 @@ def count_active_supervisor_members() -> int:
 
 
 def _check_member_limits(members: List[Dict], member_data: Dict[str, Any], existing_member: Optional[Dict] = None):
-    """Check factory limits for users, admins, reviewers, and QA. Raise ValueError if exceeded."""
+    """Check factory headcount limits. Role-specific caps only for legacy fixed roles."""
+    LEGACY_FIXED_ROLES_FOR_CAPS = {"admin", "supervisor", "qa", "user", "reviewer", "operator"}
     fs = get_factory_settings()
     max_users = int(fs.get("maxUsers") or 10)
     max_admins = int(fs.get("maxAdmins") or 2)
     max_supervisors = int(fs.get("maxSupervisors") or 3)
     max_qa = int(fs.get("maxQa") or 3)
 
-    def count_role(ms: List, r: str) -> int:
-        return sum(1 for m in ms if str(m.get("role", "")).strip().lower() == r)
+    def _is_active(m):
+        return str(m.get("status") or "active").strip().lower() != "disabled"
 
-    new_role = str(member_data.get("role", "User")).strip().lower()
-    users = count_role(members, "user")
+    def count_role(ms: List, r: str) -> int:
+        return sum(1 for m in ms if _is_active(m) and str(m.get("role", "")).strip().lower() == r)
+
+    active_members = [m for m in members if _is_active(m)]
+    total = len(active_members)
+    if existing_member and _is_active(existing_member):
+        # Replacing an existing active member does not increase headcount.
+        pass
+    else:
+        total += 1
+    if total > max_users:
+        raise ValueError("Your limit for users reached. Contact support for upgrade.")
+
+    new_role = str(member_data.get("role", "") or "").strip().lower()
+    if new_role not in LEGACY_FIXED_ROLES_FOR_CAPS:
+        # User Group names are not Admin/QA/Supervisor/User — skip legacy role caps.
+        return
+
     admins = count_role(members, "admin")
     supervisors = count_role(members, "supervisor")
     qa = count_role(members, "qa")
 
     if existing_member:
         old_role = str(existing_member.get("role", "")).strip().lower()
-        if old_role == "user":
-            users -= 1
-        elif old_role == "admin":
+        if old_role == "admin":
             admins -= 1
         elif old_role == "supervisor":
             supervisors -= 1
         elif old_role == "qa":
             qa -= 1
 
-    if new_role == "user":
-        users += 1
-    elif new_role == "admin":
+    if new_role == "admin":
         admins += 1
     elif new_role == "supervisor":
         supervisors += 1
     elif new_role == "qa":
         qa += 1
 
-    if users > max_users:
-        raise ValueError("Your limit for users reached. Contact support for upgrade.")
     if admins > max_admins:
         raise ValueError("Your limit for admins reached. Contact support for upgrade.")
     if supervisors > max_supervisors:
         raise ValueError("Your limit for reviewers reached. Contact support for upgrade.")
     if qa > max_qa:
-        raise ValueError("Your limit for QA profiles reached. Contact support for upgrade.")
+        raise ValueError("Your limit for QA reached. Contact support for upgrade.")
 
 
 def _member_username_key(member: Dict[str, Any]) -> str:
@@ -1269,7 +1474,11 @@ def get_member_by_fingerprint_template(template_id: int) -> Optional[Dict[str, A
 
 
 def get_next_fingerprint_template_id(max_templates: int = 1000) -> int:
-    """Find next available template id in [1, max_templates]."""
+    """Find next available template id in [1, max_templates].
+
+    Skips IDs still occupied on the R307 so a new enroll cannot reuse an old
+    fingerprint that factory reset failed to erase.
+    """
     used = set()
     for m in list_members():
         t = m.get("fingerprintTemplateId")
@@ -1281,6 +1490,15 @@ def get_next_fingerprint_template_id(max_templates: int = 1000) -> int:
                 used.add(tid)
         except (TypeError, ValueError):
             continue
+    try:
+        import biometric_service as _bio
+        for tid in _bio.list_occupied_template_ids(max_templates=max_templates) or []:
+            try:
+                used.add(int(tid))
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        pass
     for candidate in range(1, max_templates + 1):
         if candidate not in used:
             return candidate
@@ -1422,8 +1640,14 @@ _FACTORY_RESET_EMPTY_JSON = {
     "reports.json": [],
     "members.json": [],
     "users.json": [],
+    "userGroups.json": [],
 }
 _FACTORY_RESET_DELETE_FILES = (
+    "members.json.bak",
+    "userGroups.json.bak",
+    "recipes.json.bak",
+    "reports.json.bak",
+    "users.json.bak",
     "test_run.json",
     "test_run.json.bak",
     "datetime.json",
@@ -1471,11 +1695,11 @@ def all_known_storage_dirs() -> List[pathlib.Path]:
     dirs.extend(_storage_dir_candidates())
     if _storage_dir is not None:
         dirs.append(_storage_dir)
-    return _unique_paths(dirs)
+    return [p for p in _unique_paths(dirs) if not _is_foreign_hardness_storage(p)]
 
 
 def _app_root_path() -> pathlib.Path:
-    raw = (_config.get("APP_ROOT") if _config else None) or os.environ.get("APP_ROOT") or "/opt/kiosk"
+    raw = (_config.get("APP_ROOT") if _config else None) or os.environ.get("APP_ROOT") or "/opt/leaktest"
     return pathlib.Path(raw)
 
 
@@ -1485,7 +1709,7 @@ def all_known_reports_dirs() -> List[pathlib.Path]:
     for raw in (
         os.environ.get("REPORTS_DIR"),
         (_config.get("REPORTS_DIR") if _config else None),
-        str(pathlib.Path(os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal")) / "reports"),
+        str(_internal_usb_root() / "leaktest" / "reports"),
         str(app_root / "reports"),
     ):
         if raw:
@@ -1501,7 +1725,7 @@ def all_known_audit_db_dirs() -> List[pathlib.Path]:
     for raw in (
         os.environ.get("AUDIT_DB_DIR"),
         (_config.get("AUDIT_DB_DIR") if _config else None),
-        str(pathlib.Path(os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal")) / "db"),
+        str(_internal_usb_root() / "leaktest" / "db"),
         str(app_root / "db"),
     ):
         if raw:
@@ -1573,6 +1797,20 @@ def _wipe_storage_tree(storage_dir: pathlib.Path, preserved_settings: Dict[str, 
         elif name == "members.json" and isinstance(before, list):
             stats["members"] += len(before)
         _save_json_file(path, empty)
+        bak = path.with_suffix(path.suffix + ".bak")
+        try:
+            if bak.is_file():
+                bak.unlink()
+        except OSError:
+            pass
+    try:
+        for bak in storage_dir.glob("*.json.bak"):
+            try:
+                bak.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
     for name in _FACTORY_RESET_DELETE_FILES:
         path = storage_dir / name
         if path.is_file():
@@ -1627,6 +1865,17 @@ def factory_reset() -> Dict[str, Any]:
         _wipe_reports_tree(reports_dir, stats)
         stats["reportRoots"] += 1
     clear_current_user()
+    ug_path = _get_storage_path("userGroups.json")
+    try:
+        _save_json_file(ug_path, [])
+    except Exception:
+        pass
+    try:
+        ug_bak = ug_path.with_suffix(ug_path.suffix + ".bak")
+        if ug_bak.exists():
+            ug_bak.unlink()
+    except Exception:
+        pass
     delete_session_power_audit_pending()
     if preserved_settings:
         save_factory_settings(preserved_settings)
@@ -1658,6 +1907,8 @@ def clamp_max_vacuum_mmhg(value, default=None) -> int:
         return max(1, min(ABSOLUTE_MAX_VACUUM_MMHG, int(round(float(value)))))
     except (TypeError, ValueError):
         return int(default)
+
+
 
 
 def get_factory_settings() -> Dict[str, Any]:
@@ -2017,3 +2268,178 @@ def clear_test_run_data() -> None:
                 path.unlink()
         except Exception:
             pass
+
+
+# =================== REPORT EXPORT SCHEDULE (24h purge) ==========================
+
+REPORT_EXPORT_RETENTION_MS = 24 * 60 * 60 * 1000
+
+
+def _report_export_schedule_path() -> pathlib.Path:
+    return _get_storage_path("report_export_schedule.json")
+
+
+def _load_report_export_schedule() -> Dict[str, Any]:
+    path = _report_export_schedule_path()
+    if not path.is_file():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_report_export_schedule(data: Dict[str, Any]) -> None:
+    path = _report_export_schedule_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _save_json_file(path, data if isinstance(data, dict) else {})
+
+
+def clear_report_export_schedule() -> None:
+    """Remove pending report export purge schedule (factory reset)."""
+    path = _report_export_schedule_path()
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+    bak = path.with_suffix(path.suffix + ".bak")
+    try:
+        if bak.exists():
+            bak.unlink()
+    except OSError:
+        pass
+
+
+def stage_report_export_pending(
+    *,
+    export_id: str,
+    report_ids: List[Any],
+    exported_by: Dict[str, Any],
+    approved_by: Dict[str, Any],
+) -> None:
+    """Store a successful USB report export awaiting operator verification (no purge yet)."""
+    now_ms = int(time.time() * 1000)
+    ids: List[int] = []
+    for x in report_ids or []:
+        try:
+            n = int(x)
+            if n > 0:
+                ids.append(n)
+        except (TypeError, ValueError):
+            continue
+    state = _load_report_export_schedule()
+    state["staged"] = {
+        "export_id": str(export_id or "").strip(),
+        "report_ids": ids,
+        "exported_by": dict(exported_by or {}),
+        "approved_by": dict(approved_by or {}),
+        "exported_at_ms": now_ms,
+    }
+    _save_report_export_schedule(state)
+
+
+def confirm_report_export_verified(export_id: str) -> Optional[Dict[str, Any]]:
+    """Operator confirmed USB PDFs OK: schedule purge in 24h."""
+    want = str(export_id or "").strip()
+    if not want:
+        return None
+    state = _load_report_export_schedule()
+    staged = state.get("staged") if isinstance(state.get("staged"), dict) else {}
+    if str(staged.get("export_id") or "").strip() != want:
+        return None
+    now_ms = int(time.time() * 1000)
+    scheduled = {
+        "export_id": want,
+        "report_ids": list(staged.get("report_ids") or []),
+        "exported_by": dict(staged.get("exported_by") or {}),
+        "approved_by": dict(staged.get("approved_by") or {}),
+        "exported_at_ms": int(staged.get("exported_at_ms") or now_ms),
+        "confirmed_at_ms": now_ms,
+        "purge_at_ms": now_ms + REPORT_EXPORT_RETENTION_MS,
+    }
+    state["scheduled"] = scheduled
+    state.pop("staged", None)
+    _save_report_export_schedule(state)
+    return scheduled
+
+
+def purge_report_files(report_id: int) -> None:
+    """Remove PDF and text artifacts for a report id from every reports tree."""
+    try:
+        rid = int(report_id)
+    except (TypeError, ValueError):
+        return
+    names = (
+        "report_{}.pdf".format(rid),
+        "report_{}_a4.txt".format(rid),
+        "report_{}_thermal.txt".format(rid),
+    )
+    roots: List[pathlib.Path] = []
+    if _reports_dir is not None:
+        roots.append(_reports_dir)
+    try:
+        roots.extend(all_known_reports_dirs())
+    except Exception:
+        pass
+    seen = set()
+    for root in roots:
+        try:
+            key = str(root.resolve())
+        except OSError:
+            key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not root.is_dir():
+            continue
+        for name in names:
+            path = root / name
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                pass
+        try:
+            for extra in root.glob("report_{}.*".format(rid)):
+                try:
+                    if extra.is_file():
+                        extra.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+
+def run_due_report_export_purge() -> Optional[Dict[str, Any]]:
+    """If a confirmed report export purge is due, delete only those report ids."""
+    state = _load_report_export_schedule()
+    scheduled = state.get("scheduled") if isinstance(state.get("scheduled"), dict) else {}
+    purge_at = scheduled.get("purge_at_ms")
+    if purge_at is None:
+        return None
+    try:
+        purge_at_ms = int(purge_at)
+    except (TypeError, ValueError):
+        return None
+    now_ms = int(time.time() * 1000)
+    if now_ms < purge_at_ms:
+        return None
+    report_ids = list(scheduled.get("report_ids") or [])
+    removed = 0
+    for rid in report_ids:
+        try:
+            n = int(rid)
+        except (TypeError, ValueError):
+            continue
+        if delete_report(n):
+            removed += 1
+        purge_report_files(n)
+    state.pop("scheduled", None)
+    _save_report_export_schedule(state)
+    out = dict(scheduled)
+    out["purged_at_ms"] = now_ms
+    out["reports_removed"] = removed
+    return out

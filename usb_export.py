@@ -67,7 +67,13 @@ def _run(cmd: List[str], timeout: float = 10.0) -> Tuple[int, str, str]:
 def _lsblk_tree() -> List[Dict[str, Any]]:
     """Flat list of all block devices (lsblk -J flattened)."""
     rc, out, err = _run(
-        ["lsblk", "-J", "-b", "-o", "PATH,NAME,TYPE,RM,SIZE,MOUNTPOINT,FSTYPE,LABEL,UUID,PKNAME"]
+        [
+            "lsblk",
+            "-J",
+            "-b",
+            "-o",
+            "PATH,NAME,TYPE,RM,SIZE,MOUNTPOINT,FSTYPE,LABEL,UUID,PKNAME,PARTTYPENAME,PARTLABEL",
+        ]
     )
     if rc != 0 or not out.strip():
         logger.warning("usb_export: lsblk failed rc=%s err=%s", rc, err.strip()[:200])
@@ -153,11 +159,60 @@ def _internal_uuids(env: Optional[Dict[str, str]] = None) -> Set[str]:
     return uuids
 
 
-def _is_node_internal(node: Dict[str, Any], root_pk: Optional[str], internal_uuids: Set[str]) -> bool:
+def _internal_device_paths() -> Set[str]:
+    """Block devices that are the instrument internal USB (never an export target)."""
+    paths: Set[str] = set()
+    part = (os.environ.get("INTERNAL_USB_PARTITION") or "").strip()
+    if part:
+        paths.add(part)
+        try:
+            paths.add(os.path.realpath(part))
+        except OSError:
+            pass
+    internal_path = os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal")
+    rc, out, _ = _run(["findmnt", "-n", "-o", "SOURCE", "--target", internal_path])
+    src = (out or "").strip()
+    if rc == 0 and src:
+        paths.add(src)
+        try:
+            paths.add(os.path.realpath(src))
+        except OSError:
+            pass
+    return {p for p in paths if p}
+
+
+_EXPORT_FS = frozenset(
+    {"vfat", "fat", "fat12", "fat16", "fat32", "exfat", "ntfs", "msdos"}
+)
+_BOOT_FS = frozenset({"iso9660", "udf", "squashfs", "iso"})
+_BOOT_LABEL_EXACT = frozenset(
+    {
+        "rufus",
+        "rufus boot",
+        "uefi_ntfs",
+        "uefi:ntfs",
+        "esp",
+        "efi",
+        "boot",
+        "bootfs",
+        "biosboot",
+        "system",
+    }
+)
+
+
+def _is_node_internal(
+    node: Dict[str, Any],
+    root_pk: Optional[str],
+    internal_uuids: Set[str],
+    internal_paths: Optional[Set[str]] = None,
+) -> bool:
     path = node.get("path") or ""
     name = node.get("name") or ""
     pkname = (node.get("pkname") or "").strip()
     fs_uuid = (node.get("uuid") or "").strip()
+    mountpoint = (node.get("mountpoint") or "").strip()
+    internal_mp = os.environ.get("INTERNAL_USB_PATH", "/media/usb_internal").rstrip("/")
     # Always exclude eMMC / SD card hosting OS
     if "mmcblk" in path or "mmcblk" in name:
         return True
@@ -169,6 +224,43 @@ def _is_node_internal(node: Dict[str, Any], root_pk: Optional[str], internal_uui
             return True
     if fs_uuid and fs_uuid in internal_uuids:
         return True
+    if mountpoint and mountpoint.rstrip("/") == internal_mp:
+        return True
+    if mountpoint.startswith("/boot"):
+        return True
+    if internal_paths:
+        try:
+            real = os.path.realpath(path) if path else ""
+        except OSError:
+            real = path
+        if path in internal_paths or real in internal_paths:
+            return True
+    return False
+
+
+def _is_boot_or_installer_partition(node: Dict[str, Any], has_siblings: bool) -> bool:
+    """Hide Rufus/ESP/ISO boot slices; operators only pick a data pendrive."""
+    label = (node.get("label") or "").strip().lower()
+    partlabel = (node.get("partlabel") or "").strip().lower()
+    parttype = (node.get("parttypename") or "").strip().lower()
+    fstype = (node.get("fstype") or "").strip().lower()
+    try:
+        size_bytes = int(node.get("size") or 0)
+    except (TypeError, ValueError):
+        size_bytes = 0
+    combined = " ".join((label, partlabel))
+    if fstype in _BOOT_FS:
+        return True
+    if "rufus" in combined or "uefi_ntfs" in combined or "uefi:ntfs" in combined:
+        return True
+    if label in _BOOT_LABEL_EXACT or partlabel in _BOOT_LABEL_EXACT:
+        return True
+    if "efi" in parttype or "bios boot" in parttype or parttype == "microsoft reserved":
+        return True
+    # Small FAT sibling (typical Rufus UEFI:NTFS / ESP, often /dev/sdb2).
+    if has_siblings and fstype in ("vfat", "fat", "fat12", "fat16", "fat32", "msdos"):
+        if 0 < size_bytes <= 128 * 1024 * 1024:
+            return True
     return False
 
 
@@ -177,25 +269,27 @@ def list_external_pendrives() -> List[Dict[str, Any]]:
 
     Returns a list of dicts with: path, name, label, fs_type, fs_uuid, size_bytes,
     size_human, removable, mounted, mountpoint. Sorted by path name (sdb1 < sdc1).
+    Hides OS/internal USB and Rufus/ESP/ISO boot partitions (e.g. /dev/sdb2).
     """
     flat = _lsblk_tree()
     root_pk = _root_pkname()
     internal_uuids = _internal_uuids()
-    out: List[Dict[str, Any]] = []
+    internal_paths = _internal_device_paths()
+    candidates: List[Dict[str, Any]] = []
     for node in flat:
         node_type = (node.get("type") or "").lower()
         if node_type != "part":
             # We export to filesystem partitions, not whole disks.
-            # If a whole-disk USB has no partition table, we'd still skip it here
-            # to avoid confusion. Users format pendrives with partitions in practice.
             continue
         path = node.get("path") or ""
         if not _is_export_block_path(path):
             continue
-        if _is_node_internal(node, root_pk, internal_uuids):
+        if _is_node_internal(node, root_pk, internal_uuids, internal_paths):
             continue
         fs_type = (node.get("fstype") or "").strip().lower()
         if not fs_type or fs_type in ("swap", "linux_raid_member"):
+            continue
+        if fs_type not in _EXPORT_FS:
             continue
         size_bytes_raw = node.get("size") or 0
         try:
@@ -203,18 +297,45 @@ def list_external_pendrives() -> List[Dict[str, Any]]:
         except (TypeError, ValueError):
             size_bytes = 0
         mountpoint = (node.get("mountpoint") or "").strip()
-        out.append({
+        candidates.append({
             "path": path,
             "name": node.get("name") or pathlib.Path(path).name,
             "label": (node.get("label") or "").strip(),
+            "partlabel": (node.get("partlabel") or "").strip(),
+            "parttypename": (node.get("parttypename") or "").strip(),
             "fs_type": fs_type,
+            "fstype": fs_type,
             "fs_uuid": (node.get("uuid") or "").strip(),
+            "size": size_bytes,
             "size_bytes": size_bytes,
             "size_human": _human_bytes(size_bytes),
             "removable": bool(node.get("rm")),
             "mounted": bool(mountpoint),
             "mountpoint": mountpoint,
+            "pkname": (node.get("pkname") or "").strip(),
         })
+    by_disk: Dict[str, List[Dict[str, Any]]] = {}
+    for item in candidates:
+        disk = item.get("pkname") or item.get("name") or item.get("path") or ""
+        by_disk.setdefault(str(disk), []).append(item)
+    out: List[Dict[str, Any]] = []
+    for parts in by_disk.values():
+        has_siblings = len(parts) > 1
+        for item in parts:
+            if _is_boot_or_installer_partition(item, has_siblings):
+                continue
+            out.append({
+                "path": item.get("path"),
+                "name": item.get("name"),
+                "label": item.get("label") or "",
+                "fs_type": item.get("fs_type"),
+                "fs_uuid": item.get("fs_uuid") or "",
+                "size_bytes": item.get("size_bytes") or 0,
+                "size_human": item.get("size_human") or "0 B",
+                "removable": bool(item.get("removable")),
+                "mounted": bool(item.get("mounted")),
+                "mountpoint": item.get("mountpoint") or "",
+            })
     out.sort(key=lambda d: d.get("path") or "")
     return out
 

@@ -405,7 +405,7 @@
                                 <label>User ID</label>
                                 <input type="text" id="expired-reset-username" class="input-field" readonly>
                             </div>
-                            <div class="form-group">
+                            <div class="form-group" id="expired-reset-old-password-wrap">
                                 <label>Current Password</label>
                                 <input type="password" id="expired-reset-old-password" class="input-field"
                                     placeholder="Enter current password"
@@ -849,11 +849,6 @@
                             <label>Role</label>
                             <select id="audit-filter-role">
                                 <option value="">All</option>
-                                <option value="Admin">Admin</option>
-                                <option value="Supervisor">Reviewer</option>
-                                <option value="QA">QA</option>
-                                <option value="User">User</option>
-                                <option value="--">--</option>
                             </select>
                             <label>Action</label>
                             <select id="audit-filter-action">
@@ -1648,6 +1643,18 @@
                             </div>
                             <h3>Manage Recipe</h3>
                         </button>
+                        <button class="settings-card settings-user-groups" onclick="manageUserGroups(); if (typeof displayUserGroupsList === 'function') displayUserGroupsList();">
+                            <div class="settings-icon">
+                                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                                    <circle cx="9" cy="7" r="4"></circle>
+                                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                                    <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                                </svg>
+                            </div>
+                            <h3>Profile Powers</h3>
+                        </button>
                         <button class="settings-card settings-disable" onclick="goToPage('disable-recipes')">
                             <div class="settings-icon">
                                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1770,12 +1777,15 @@
                         <div class="role-modal">
                             <h3 id="role-modal-title">Change Role</h3>
                             <p id="role-modal-current">Current Role: User</p>
-                            <div class="role-modal-buttons">
-                                <button class="btn-role-select btn-role-admin" onclick="confirmRoleChange('Admin')">Admin</button>
-                                <button class="btn-role-select btn-role-supervisor" onclick="confirmRoleChange('Supervisor')">Reviewer</button>
-                                <button class="btn-role-select btn-role-qa" onclick="confirmRoleChange('QA')">QA</button>
-                                <button class="btn-role-select btn-role-user" onclick="confirmRoleChange('User')">User</button>
-                                <button class="btn-role-select btn-role-cancel" onclick="closeRoleModal()">Cancel</button>
+                            <div class="role-modal-buttons" style="flex-direction:column;align-items:stretch;gap:10px;">
+                                <label for="role-modal-user-group" style="text-align:left;">Profile Power</label>
+                                <select id="role-modal-user-group" class="input-field">
+                                    <option value="">— Select profile power —</option>
+                                </select>
+                                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;">
+                                    <button type="button" class="btn-role-select btn-role-cancel" onclick="closeRoleModal()">Cancel</button>
+                                    <button type="button" class="btn btn-primary" onclick="if (typeof confirmRoleChangeFromGroup === 'function') confirmRoleChangeFromGroup();">Save</button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1895,15 +1905,17 @@
                             </div>
                         </div>
 
-                        <div class="role-selection-container">
+                        <div class="role-selection-container" id="add-member-role-selection" style="display:none;">
                             <label>Role</label>
-                            <div class="role-options">
-                                <button type="button" class="role-btn active" data-role="User" onclick="selectRole('User')">User</button>
-                                <button type="button" class="role-btn" data-role="Supervisor" onclick="selectRole('Supervisor')">Reviewer</button>
-                                <button type="button" class="role-btn" data-role="QA" onclick="selectRole('QA')">QA</button>
-                                <button type="button" class="role-btn" data-role="Admin" onclick="selectRole('Admin')">Admin</button>
-                            </div>
-                            <input type="hidden" id="selected-role" value="User">
+                            <input type="hidden" id="selected-role" value="">
+                        </div>
+
+                        <div class="form-group full-width" id="add-member-user-group-wrap" style="margin: 12px 0;">
+                            <label for="add-member-user-group">Profile Power <span style="color:#b91c1c;">*</span></label>
+                            <select id="add-member-user-group" class="input-field" required
+                                onchange="if (typeof applySelectedUserGroupToMemberForm === 'function') applySelectedUserGroupToMemberForm()">
+                                <option value="">— Select profile power —</option>
+                            </select>
                         </div>
 
                         <div id="add-member-permissions-panel" class="permissions-panel is-hidden">
@@ -1917,6 +1929,79 @@
                         <div class="add-member-actions members-actions-row">
                             <button type="button" class="btn btn-primary" id="add-member-save-btn" onclick="saveMemberForm()">Save Profile</button>
                             <button type="button" class="btn btn-secondary" onclick="cancelAddMemberEdit()">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+
+                                <div class="page" id="page-manage-user-groups">
+                    <div class="manage-recipes-container">
+                        <div class="members-header-row" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
+                            <h2 class="section-title" style="margin:0;">Manage Profile Powers</h2>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button class="btn member-status-btn member-status-btn-current" disabled>Active Groups</button>
+                                <button class="btn member-status-btn member-status-btn-disabled" onclick="goToPage('disabled-user-groups'); if (typeof displayUserGroupsList === 'function') displayUserGroupsList({ status: 'disabled' });">Disabled Groups</button>
+                                <button class="btn btn-primary" onclick="startUserGroupCreation()">Create Profile Power</button>
+                            </div>
+                        </div>
+                        <div id="user-groups-empty-state" class="empty-state" style="display:none;">No active profile powers yet. Create one to use as a permission blueprint.</div>
+<table id="user-groups-table" class="members-table" style="width:100%;">
+                            <thead>
+                                <tr>
+                                    <th>Group Name</th>
+                                    <th>Permissions</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="user-groups-table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                
+                <div class="page" id="page-disabled-user-groups">
+                    <div class="manage-recipes-container">
+                        <div class="members-header-row" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
+                            <h2 class="section-title" style="margin:0;">Disabled Profile Powers</h2>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <button class="btn member-status-btn" onclick="goToPage('manage-user-groups'); if (typeof displayUserGroupsList === 'function') displayUserGroupsList({ status: 'active' });">Active Groups</button>
+                                <button class="btn member-status-btn member-status-btn-disabled member-status-btn-current" disabled>Disabled Groups</button>
+                            </div>
+                        </div>
+                        <div id="disabled-user-groups-empty-state" class="empty-state" style="display:none;">No disabled profile powers.</div>
+                        <table id="disabled-user-groups-table" class="members-table" style="width:100%;">
+                            <thead>
+                                <tr>
+                                    <th>Group Name</th>
+                                    <th>Permissions</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="disabled-user-groups-table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="page" id="page-edit-user-group">
+                    <div class="add-member-container">
+                        <h2 class="section-title" id="user-group-page-title">Create User Group</h2>
+                        <div class="add-member-form form-grid">
+                            <div class="form-group full-width">
+                                <label for="user-group-name">Group Name</label>
+                                <input type="text" id="user-group-name" class="input-field"
+                                    placeholder="e.g. Operator Pack"
+                                    onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                            </div>
+                        </div>
+                        <div class="permissions-panel" style="margin-top:16px;">
+                            <div class="permissions-panel-header">
+                                <label>Group functionalities</label>
+                                <span class="permissions-panel-subtitle">Select the permissions this group grants.</span>
+                            </div>
+                            <div id="user-group-permission-cards-grid" class="permission-cards-grid"></div>
+                        </div>
+                        <div class="add-member-actions members-actions-row">
+                            <button type="button" class="btn btn-primary" onclick="saveUserGroupForm()">Save Group</button>
+                            <button type="button" class="btn btn-secondary" onclick="goToPage('manage-user-groups'); if (typeof displayUserGroupsList === 'function') displayUserGroupsList();">Cancel</button>
                         </div>
                     </div>
                 </div>
@@ -2054,7 +2139,7 @@
                                     data-vacuum-input="true" data-max="750" inputmode="numeric"
                                     placeholder="750" value="750"
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
-                                <p class="section-subtitle" style="margin-top:6px;font-size:13px;">Maximum settable vacuum for Quick Test, recipes, validation, and calibration. Cannot exceed 750 mmHg.</p>
+                                <p class="section-subtitle" style="margin-top:6px;font-size:13px;">Maximum settable vacuum for validation. Cannot exceed 650 mmHg.</p>
                             </div>
                             <div class="form-group factory-preset-field">
                                 <label>Vacuum Preset 1 (mmHg)</label>
@@ -2180,11 +2265,11 @@
         </main>
     </div>
     <div id="keyboard-root"></div>
-    <script src="keyboard.js?v=4"></script>
+    <script src="keyboard.js?v=3"></script>
     <script src="rbac.js?v=10"></script>
-    <script src="script.js?v=115"></script>
+    <script src="script.js?v=113"></script>
     <script src="leaktest_patch.js?v=2"></script>
-    <script src="validation_vd.js?v=31"></script>
+    <script src="validation_vd.js?v=29"></script>
 </body>
 
 </html>

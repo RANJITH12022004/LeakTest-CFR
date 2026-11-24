@@ -2525,26 +2525,61 @@ def delete_member(member_id):
         member = data_service.get_member(member_id)
         if not member:
             return jsonify({"error": "Member not found"}), 404
-        target = (member.get("username") or member.get("name") or "").strip() or "--"
-        actor_info = _audit_actor()
-        actor = (actor_info.get("user") or "").strip() or "--"
-        actor_role = (actor_info.get("role") or "").strip() or "--"
+        verified, verify_err = _require_user_admin_verification()
+        if not verified:
+            _audit_event(
+                action="User disable",
+                outcome="denied",
+                entity_type="member",
+                entity_id=member_id,
+                entity_name=member.get("username") or member.get("name") or "",
+                details=verify_err or "Approval verification required",
+                target_user=member.get("username") or "",
+                before=member,
+            )
+            return jsonify({"error": verify_err}), 403
         before_member = dict(member)
-        # Soft-disable only; keep fingerprint on sensor. Disabled status blocks login.
+        cur = data_service.get_current_user() or {}
+        disabled_by = str(cur.get("username") or cur.get("name") or "--").strip() or "--"
+        disabled_user = str(member.get("username") or member.get("name") or "--").strip() or "--"
+        template_id = member.get("fingerprintTemplateId")
+        if template_id is not None:
+            deleted = biometric_service.delete_template(template_id)
+            if not deleted.get("ok"):
+                _audit_event(
+                    action="User disable",
+                    outcome="failed",
+                    entity_type="member",
+                    entity_id=member_id,
+                    entity_name=member.get("username") or member.get("name") or "",
+                    details=deleted.get("error") or "Failed to delete fingerprint template from sensor",
+                    target_user=member.get("username") or "",
+                    before=before_member,
+                    signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
+                    extra={"templateId": template_id},
+                )
+                return jsonify({
+                    "error": deleted.get("error") or "Failed to delete fingerprint template from sensor",
+                    "templateId": int(template_id)
+                }), 400
+            data_service.clear_member_biometric(member_id)
         member = data_service.disable_member(member_id)
         _audit_event(
-            action="User disabled",
+            action="User disable",
             outcome="success",
             entity_type="member",
             entity_id=member_id,
-            entity_name=target,
-            details="{} disabled {}".format(actor, target),
-            target_user=target,
+            entity_name=member.get("username") or member.get("name") or "",
+            details="{} disabled {}".format(disabled_by, disabled_user),
+            target_user=member.get("username") or "",
             before=before_member,
             after=member,
-            signature={"mode": "session", "username": actor, "role": actor_role},
-            actor_user=actor,
-            actor_role=actor_role,
+            signature={"mode": "password_reconfirm", "username": verified.get("username"), "role": verified.get("role")},
+            extra={
+                "templateIdFreed": template_id,
+                "disabledBy": disabled_by,
+                "disabledUser": disabled_user,
+            },
         )
         return jsonify({"success": True, "member": member}), 200
     except ValueError as e:
@@ -2623,6 +2658,149 @@ def enable_member_route(member_id):
     except Exception as e:
         app.logger.exception("Error enabling member")
         return jsonify({"error": str(e)}), 500
+
+
+# =================== DATA: USER GROUPS ==========================
+
+
+@app.route("/api/data/user-groups", methods=["GET"])
+def get_user_groups():
+    try:
+        err = _require_auth()
+        if err:
+            return err
+        status = (request.args.get("status") or "active").strip().lower()
+        groups = data_service.list_user_groups(status=status)
+        return jsonify({"groups": groups}), 200
+    except Exception as e:
+        app.logger.exception("Error listing user groups")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/user-groups", methods=["POST"])
+def create_user_group():
+    try:
+        gate = _require_session_internal("user-manage", "Forbidden. You do not have permission to manage user groups.")
+        if gate:
+            return gate
+        payload = request.get_json(force=True, silent=True) or {}
+        group_id = data_service.save_user_group(payload)
+        groups = data_service.list_user_groups(status="all")
+        created = next((g for g in groups if int(g.get("id") or 0) == int(group_id)), None)
+        cur = data_service.get_current_user() or {}
+        _audit_event(
+            action="User group created",
+            outcome="success",
+            entity_type="user_group",
+            entity_id=group_id,
+            entity_name=(created or {}).get("name") or "",
+            details="User group created: {}".format((created or {}).get("name") or group_id),
+            signature={
+                "mode": "session",
+                "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+                "role": (cur.get("role") or "").strip() or "--",
+            },
+        )
+        return jsonify({"id": group_id, "group": created}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error creating user group")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/user-groups/<int:group_id>", methods=["PUT"])
+def update_user_group(group_id):
+    try:
+        gate = _require_session_internal("user-manage", "Forbidden. You do not have permission to manage user groups.")
+        if gate:
+            return gate
+        payload = request.get_json(force=True, silent=True) or {}
+        payload["id"] = group_id
+        data_service.save_user_group(payload)
+        groups = data_service.list_user_groups(status="all")
+        updated = next((g for g in groups if int(g.get("id") or 0) == int(group_id)), None)
+        cur = data_service.get_current_user() or {}
+        _audit_event(
+            action="User group updated",
+            outcome="success",
+            entity_type="user_group",
+            entity_id=group_id,
+            entity_name=(updated or {}).get("name") or "",
+            details="User group updated: {}".format((updated or {}).get("name") or group_id),
+            signature={
+                "mode": "session",
+                "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+                "role": (cur.get("role") or "").strip() or "--",
+            },
+        )
+        return jsonify({"id": group_id, "group": updated}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error updating user group")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/user-groups/<int:group_id>", methods=["DELETE"])
+def delete_user_group(group_id):
+    try:
+        gate = _require_session_internal("user-manage", "Forbidden. You do not have permission to manage user groups.")
+        if gate:
+            return gate
+        disabled = data_service.disable_user_group(group_id)
+        cur = data_service.get_current_user() or {}
+        _audit_event(
+            action="User group disabled",
+            outcome="success",
+            entity_type="user_group",
+            entity_id=group_id,
+            entity_name=(disabled or {}).get("name") or "",
+            details="User group disabled: {}".format((disabled or {}).get("name") or group_id),
+            signature={
+                "mode": "session",
+                "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+                "role": (cur.get("role") or "").strip() or "--",
+            },
+        )
+        return jsonify({"success": True, "group": disabled}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error disabling user group")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/data/user-groups/<int:group_id>/enable", methods=["POST"])
+def enable_user_group_route(group_id):
+    try:
+        gate = _require_session_internal("user-manage", "Forbidden. You do not have permission to manage user groups.")
+        if gate:
+            return gate
+        enabled = data_service.enable_user_group(group_id)
+        cur = data_service.get_current_user() or {}
+        _audit_event(
+            action="User group enabled",
+            outcome="success",
+            entity_type="user_group",
+            entity_id=group_id,
+            entity_name=(enabled or {}).get("name") or "",
+            details="User group enabled: {}".format((enabled or {}).get("name") or group_id),
+            signature={
+                "mode": "session",
+                "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
+                "role": (cur.get("role") or "").strip() or "--",
+            },
+        )
+        return jsonify({"success": True, "group": enabled}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error enabling user group")
+        return jsonify({"error": str(e)}), 500
+
+
+
 
 
 # =================== DATA: FACTORY SETTINGS ==========================

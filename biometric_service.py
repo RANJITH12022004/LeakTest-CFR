@@ -38,6 +38,7 @@ _CMD_STORE = 0x06
 _CMD_DELETE = 0x0C
 _CMD_EMPTY = 0x0D
 _CMD_TEMPLATE_COUNT = 0x1D
+_CMD_READ_INDEX = 0x1F
 _CMD_VERIFY_PASSWORD = 0x13
 
 _CONFIRM_OK = 0x00
@@ -311,6 +312,27 @@ def get_template_count():
     return {"ok": True, "count": cnt}
 
 
+def list_occupied_template_ids(max_templates=1000):
+    """Return sensor template IDs that still hold a fingerprint (R307 index table)."""
+    if mock_mode():
+        return set(_mock_templates)
+    occupied = set()
+    if not sensor_available():
+        return occupied
+    pages = max(1, min(4, (int(max_templates) + 255) // 256))
+    for page in range(pages):
+        res = _exec(bytes([_CMD_READ_INDEX, page]), timeout_sec=2.0)
+        if not res.get("ok"):
+            continue
+        payload = res.get("payload") or b""
+        raw = payload[1:] if len(payload) > 1 else b""
+        for i, byte in enumerate(raw[:32]):
+            for bit in range(8):
+                if byte & (1 << bit):
+                    occupied.add(page * 256 + i * 8 + bit)
+    return occupied
+
+
 def clear_cancel():
     """Clear cancel before starting a new capture/identify."""
     _cancel_requested.clear()
@@ -474,9 +496,42 @@ def delete_template(template_id):
 
 
 def clear_templates():
+    """Erase all fingerprint templates from the sensor (factory reset).
+
+    Retries Empty, then deletes leftover IDs one-by-one, and verifies count is zero.
+    """
     global _mock_last_enrolled
     if mock_mode():
         _mock_templates.clear()
         _mock_last_enrolled = None
-        return _mock_ok(cleared=True)
-    return _exec(bytes([_CMD_EMPTY]), timeout_sec=3.0)
+        return _mock_ok(cleared=True, templatesRemaining=0)
+    if not sensor_available():
+        return dict(_hardware_unavailable_response())
+    last = {"ok": False, "error": "Biometric clear did not run"}
+    for attempt in range(3):
+        last = _exec(bytes([_CMD_EMPTY]), timeout_sec=5.0)
+        count = get_template_count()
+        remaining = int(count.get("count") or 0) if count.get("ok") else None
+        if last.get("ok") and remaining == 0:
+            return {"ok": True, "cleared": True, "templatesRemaining": 0, "attempts": attempt + 1}
+        leftover = list_occupied_template_ids()
+        for tid in sorted(leftover):
+            delete_template(tid)
+        count = get_template_count()
+        remaining = int(count.get("count") or 0) if count.get("ok") else remaining
+        if remaining == 0:
+            return {"ok": True, "cleared": True, "templatesRemaining": 0, "attempts": attempt + 1}
+        last = {
+            "ok": False,
+            "error": "Sensor still reports {} template(s) after empty".format(remaining),
+            "templatesRemaining": remaining,
+            "attempts": attempt + 1,
+        }
+        time.sleep(0.35)
+    try:
+        count = get_template_count()
+        if count.get("ok"):
+            last["templatesRemaining"] = count.get("count")
+    except Exception:
+        pass
+    return last

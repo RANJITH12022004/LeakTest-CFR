@@ -1601,26 +1601,71 @@ def print_thermal_report(
         return {"success": False, "error": str(e), "port": port}
 
 
+def _recipe_nonempty(*vals: Any, default: str = "N/A") -> str:
+    for v in vals:
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s and s.upper() not in ("N/A", "NA", "--", "NONE", "NULL"):
+            return s
+    return default
+
+
+def _recipe_time_display(recipe_data: Dict[str, Any]) -> str:
+    """Match on-screen recipe preview: durationDisplay, else mm:ss from durationSec."""
+    disp = _recipe_nonempty(
+        recipe_data.get("durationDisplay"),
+        recipe_data.get("setDurationDisplay"),
+        default="",
+    )
+    if disp:
+        return disp
+    for key in ("durationSec", "holdDurationSec", "setDurationSec"):
+        raw = recipe_data.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            sec = int(float(raw))
+        except (TypeError, ValueError):
+            continue
+        if sec >= 0:
+            minutes, seconds = divmod(sec, 60)
+            return "{:02d}:{:02d}".format(minutes, seconds)
+    return "N/A"
+
+
 def _format_recipe_text(recipe_data: Dict[str, Any], width: int = A4_TEXT_WIDTH) -> str:
+    """Print the same fields the recipe preview shows (product, type, batch size, vacuum, time)."""
     thermal = width < 70
     sep = _thermal_sep("=", width) if thermal else ("=" * width)
     sep_dash = _thermal_sep("-", width) if thermal else ("-" * width)
     fs = recipe_data.get("factorySettings") or {}
+    product = _recipe_nonempty(recipe_data.get("productName"), recipe_data.get("name"))
+    product_type = _recipe_nonempty(recipe_data.get("productType"), recipe_data.get("uspMode"))
+    batch_size = _recipe_nonempty(
+        recipe_data.get("batchSize"),
+        recipe_data.get("batchNumber"),
+        recipe_data.get("batch"),
+    )
+    vacuum = _recipe_nonempty(recipe_data.get("vacuumMmHg"), recipe_data.get("setVacuumMmHg"))
+    time_text = _recipe_time_display(recipe_data)
     lines = [
         sep,
         "LEAK TEST RECIPE" if thermal else "LEAK TEST RECIPE".center(width),
         sep_dash if thermal else sep,
-        f"Company: {fs.get('companyName', 'N/A')}",
-        f"Model No: {fs.get('modelNo', 'N/A')}",
-        f"Serial No: {fs.get('serialNo', 'N/A')}",
-        f"Location: {fs.get('companyLocation', fs.get('location', 'N/A'))}",
-        f"Instrument ID: {fs.get('instrumentId', 'N/A')}",
+        f"Company: {_recipe_nonempty(fs.get('companyName'))}",
+        f"Model No: {_recipe_nonempty(fs.get('modelNo'))}",
+        f"Serial No: {_recipe_nonempty(fs.get('serialNo'))}",
+        f"Location: {_recipe_nonempty(fs.get('companyLocation'), fs.get('location'))}",
+        f"Instrument ID: {_recipe_nonempty(fs.get('instrumentId'))}",
         f"Last Val: {_normalize_display_date_slash(fs.get('lastValidationDate', 'N/A'))}",
         f"Next Val Due: {_normalize_display_date_slash(fs.get('nextValidationDate', 'N/A'))}",
         sep_dash if thermal else "",
-        f"Product: {recipe_data.get('productName', recipe_data.get('name', 'N/A'))}",
-        f"Batch: {recipe_data.get('batchNumber', 'N/A')}",
-        f"Unit: {recipe_data.get('unit', 'N/A')}",
+        f"Product: {product}",
+        f"Product type: {product_type}",
+        f"Batch size: {batch_size}",
+        f"Vacuum (mmHg): {vacuum}",
+        f"Time: {time_text}",
         sep,
     ]
     if thermal:

@@ -40,72 +40,6 @@ var currentReportData = null;
 var currentRecipeForPrint = null;
 var currentReportRecipe = null;
 var _recipePrintPreviewReturnPage = 'view-recipes';
-var ABSOLUTE_MAX_VACUUM_MMHG = 750;
-window.ABSOLUTE_MAX_VACUUM_MMHG = ABSOLUTE_MAX_VACUUM_MMHG;
-var _liveFactoryMaxVacuumMmHg = null;
-
-function getFactoryMaxVacuumMmHg() {
-    var cap = ABSOLUTE_MAX_VACUUM_MMHG;
-    var live = parseInt(_liveFactoryMaxVacuumMmHg, 10);
-    if (!isNaN(live) && live >= 1 && live <= cap) return live;
-    try {
-        var stored = localStorage.getItem('factorySettings');
-        if (stored) {
-            var s = JSON.parse(stored);
-            var v = parseInt(s.maxVacuumMmHg, 10);
-            if (!isNaN(v) && v >= 1 && v <= cap) return v;
-        }
-    } catch (e) {}
-    return cap;
-}
-window.getFactoryMaxVacuumMmHg = getFactoryMaxVacuumMmHg;
-
-function setLiveFactoryMaxVacuumMmHg(value) {
-    var cap = ABSOLUTE_MAX_VACUUM_MMHG;
-    var v = parseInt(value, 10);
-    if (isNaN(v) || v < 1) v = cap;
-    v = Math.max(1, Math.min(cap, v));
-    _liveFactoryMaxVacuumMmHg = v;
-    try {
-        var stored = localStorage.getItem('factorySettings');
-        var s = stored ? JSON.parse(stored) : {};
-        if (!s || typeof s !== 'object') s = {};
-        s.maxVacuumMmHg = v;
-        localStorage.setItem('factorySettings', JSON.stringify(s));
-    } catch (e) {}
-    return v;
-}
-window.setLiveFactoryMaxVacuumMmHg = setLiveFactoryMaxVacuumMmHg;
-
-function applyFactoryMaxVacuumToInputs(maxVac) {
-    var cap = ABSOLUTE_MAX_VACUUM_MMHG;
-    var n = parseInt(maxVac, 10);
-    if (isNaN(n) || n < 1) n = getFactoryMaxVacuumMmHg();
-    n = Math.max(1, Math.min(cap, n));
-    setLiveFactoryMaxVacuumMmHg(n);
-    [
-        'quick-vacuum-mmhg',
-        'recipe-vacuum-mmhg',
-        'vd-val-vacuum-mmhg',
-        'factory-cal-target-vacuum',
-        'factory-recipe-vacuum-preset-1',
-        'factory-recipe-vacuum-preset-2',
-        'factory-recipe-vacuum-preset-3',
-        'cal-gauge-pressure-input',
-        'cal-page-gauge-input'
-    ].forEach(function (id) {
-        var el = document.getElementById(id);
-        if (!el) return;
-        el.setAttribute('max', String(n));
-        el.setAttribute('data-max', String(n));
-    });
-    var factoryMaxEl = document.getElementById('factory-max-vacuum-mmhg');
-    if (factoryMaxEl) {
-        factoryMaxEl.setAttribute('max', String(cap));
-        factoryMaxEl.setAttribute('data-max', String(cap));
-    }
-}
-window.applyFactoryMaxVacuumToInputs = applyFactoryMaxVacuumToInputs;
 var lastKnownDateTime = null;
 var dateTimeClockInterval = null;
 var _wallClockResyncInterval = null;
@@ -512,6 +446,97 @@ function cancelProfilePasswordChange() {
     var cancelBtn = document.getElementById('password-reset-cancel-btn');
     if (cancelBtn) cancelBtn.style.display = 'none';
     goToPage('user-profile');
+}
+
+function showAdminUnlockPasswordResetScreen(memberId, username) {
+    window._adminUnlockMemberId = memberId;
+    window._passwordResetScreenMode = 'admin-unlock';
+    window._mandatoryPasswordResetPending = false;
+    var titleEl = document.getElementById('password-reset-page-title');
+    var subEl = document.getElementById('password-reset-page-subtitle');
+    var oldWrap = document.getElementById('expired-reset-old-password-wrap');
+    var cancelBtn = document.getElementById('password-reset-cancel-btn');
+    if (titleEl) titleEl.textContent = 'Set New Password';
+    if (subEl) subEl.textContent = 'Account unlocked. Set a new password for this profile (current password not required).';
+    if (oldWrap) oldWrap.style.display = 'none';
+    if (cancelBtn) cancelBtn.style.display = '';
+    goToPage('password-expired-reset');
+    setTimeout(function () {
+        var userEl = document.getElementById('expired-reset-username');
+        var oldEl = document.getElementById('expired-reset-old-password');
+        var newEl = document.getElementById('expired-reset-new-password');
+        var confEl = document.getElementById('expired-reset-confirm-password');
+        if (userEl) userEl.value = username || '';
+        if (oldEl) oldEl.value = '';
+        if (newEl) newEl.value = '';
+        if (confEl) confEl.value = '';
+        if (newEl && typeof newEl.focus === 'function') newEl.focus();
+    }, 60);
+}
+
+function cancelAdminUnlockPasswordReset() {
+    var oldWrap = document.getElementById('expired-reset-old-password-wrap');
+    if (oldWrap) oldWrap.style.display = '';
+    var cancelBtn = document.getElementById('password-reset-cancel-btn');
+    if (cancelBtn) cancelBtn.style.display = 'none';
+    window._passwordResetScreenMode = '';
+    window._adminUnlockMemberId = null;
+    goToPage('manage-members');
+    if (typeof loadMembersAndRender === 'function') loadMembersAndRender();
+}
+
+function submitAdminUnlockPasswordReset() {
+    var newEl = document.getElementById('expired-reset-new-password');
+    var confEl = document.getElementById('expired-reset-confirm-password');
+    var newPassword = newEl ? String(newEl.value || '') : '';
+    var confirmPassword = confEl ? String(confEl.value || '') : '';
+    var memberId = window._adminUnlockMemberId;
+
+    if (!memberId) {
+        showAppModal('No unlocked member selected.', 'Set New Password');
+        return;
+    }
+    if (!newPassword || !confirmPassword) {
+        showAppModal('Please fill all fields.', 'Set New Password');
+        return;
+    }
+    if (newPassword !== confirmPassword) {
+        showAppModal('New Password and Confirm Password do not match.', 'Set New Password');
+        return;
+    }
+    var passwordError = getStrongPasswordError(newPassword);
+    if (passwordError) {
+        showAppModal(passwordError, 'Set New Password');
+        return;
+    }
+
+    var headers = { 'Content-Type': 'application/json' };
+    if (window.currentUser && window.currentUser.role) headers['X-User-Role'] = window.currentUser.role;
+    if (window.currentUser && window.currentUser.name) headers['X-User-Name'] = window.currentUser.name;
+    if (window.currentUser && window.currentUser.username) headers['X-User-Username'] = window.currentUser.username;
+
+    fetch((API_BASE || '') + '/api/data/members/' + memberId + '/reset-password', {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({ password: newPassword, confirmPassword: confirmPassword })
+    }).then(function (r) { return r.json().catch(function () { return {}; }).then(function (b) { return { ok: r.ok, body: b }; }); })
+      .then(function (res) {
+        if (res.ok) {
+            var oldWrap = document.getElementById('expired-reset-old-password-wrap');
+            if (oldWrap) oldWrap.style.display = '';
+            var cancelBtn = document.getElementById('password-reset-cancel-btn');
+            if (cancelBtn) cancelBtn.style.display = 'none';
+            window._passwordResetScreenMode = '';
+            window._adminUnlockMemberId = null;
+            showAppModal('Password set. The user can log in with the new password.', 'Set New Password');
+            if (typeof loadMembersAndRender === 'function') loadMembersAndRender();
+            goToPage('manage-members');
+        } else {
+            showAppModal((res.body && (res.body.error || res.body.message)) || 'Password reset failed.', 'Set New Password');
+        }
+    }).catch(function (err) {
+        showAppModal('Password reset failed: ' + (err && err.message ? err.message : 'Network error'), 'Set New Password');
+    });
 }
 
 function _setPasswordResetCancelVisible(visible) {
@@ -1504,6 +1529,9 @@ var PAGE_TITLES = {
     'create-recipe-step1': 'Create Recipe',
     'manage-recipes': null,
     'manage-members': 'Manage Profiles',
+    'manage-user-groups': 'Manage Profile Powers',
+    'disabled-user-groups': 'Disabled Profile Powers',
+    'edit-user-group': 'User Group',
     'load-validation': 'Pressure Decay',
     'distance-validation': 'Vacuum Decay',
     'add-member': 'Add New Member',
@@ -1542,6 +1570,9 @@ var PAGE_AUDIT_LABELS = {
     'manage-members': 'Manage Profiles',
     'locked-members': 'Locked Members',
     'disabled-members': 'Disabled Members',
+    'manage-user-groups': 'Manage Profile Powers',
+    'disabled-user-groups': 'Disabled Profile Powers',
+    'edit-user-group': 'User Group',
     'load-validation': 'Pressure Decay Validation',
     'distance-validation': 'Vacuum Decay Validation',
     'add-member': 'Add New Member',
@@ -1996,6 +2027,7 @@ function updateSettingsVisibility() {
         el.style.display = ok ? '' : 'none';
     }
     showIf('.settings-datetime', 'edit-datetime');
+    showIf('.settings-user-groups', 'user-manage');
     var ipCard = document.querySelector('.settings-ip-configure');
     if (ipCard) ipCard.style.display = '';
     showIf('.settings-recipes', 'recipe-manage');
@@ -2033,6 +2065,8 @@ function refreshShellAccessVisibility() {
             ok = true;
         } else if (page === 'reports') {
             ok = !!(u && typeof canAccess === 'function' && (canAccess(u, 'reports-view') || canAccess(u, 'audit-view')));
+        } else if (page === 'validate' && u && typeof canAccessValidationOrCalibration === 'function') {
+            ok = canAccessValidationOrCalibration(u);
         } else if (u && typeof canAccess === 'function') {
             ok = canAccess(u, feat);
         } else if (!u) {
@@ -2052,6 +2086,7 @@ function refreshShellAccessVisibility() {
     if (typeof refreshReportsActionButtons === 'function') refreshReportsActionButtons();
     if (typeof initAuditReportsVisibility === 'function') initAuditReportsVisibility();
     if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
+    if (typeof refreshValidatePageAccess === 'function') refreshValidatePageAccess();
 }
 
 function goToPage(pageName) {
@@ -2365,11 +2400,31 @@ function goBack() {
         goToPage('settings');
     } else if (pageId === 'page-locked-members' || pageId === 'page-disabled-members') {
         goToPage('manage-members');
+    } else if (pageId === 'page-disabled-user-groups') {
+        goToPage('manage-user-groups');
+        if (typeof displayUserGroupsList === 'function') displayUserGroupsList({ status: 'active' });
+    } else if (pageId === 'page-manage-user-groups') {
+        goToPage('settings');
+    } else if (pageId === 'page-edit-user-group') {
+        goToPage('manage-user-groups');
+        if (typeof displayUserGroupsList === 'function') displayUserGroupsList();
+    } else if (pageId === 'page-member-biometric') {
+        if (typeof backToMemberAfterBiometric === 'function') { backToMemberAfterBiometric(); return; }
+        if (typeof discardPendingNewMemberDraft === 'function') discardPendingNewMemberDraft();
+        goToPage('user-profile');
+    } else if (pageId === 'page-add-member') {
+        if (typeof cancelAddMemberEdit === 'function') { cancelAddMemberEdit(); return; }
+        if (typeof discardPendingNewMemberDraft === 'function') discardPendingNewMemberDraft();
+        goToPage((typeof canEditMembers === 'function' && canEditMembers()) ? 'manage-members' : 'user-profile');
     } else if (pageId === 'page-settings' || pageId === 'page-reports' || pageId === 'page-user-profile' || pageId === 'page-manage-recipes') {
         goToPage('home');
     } else if (pageId === 'page-password-expired-reset') {
         if (window._passwordResetScreenMode === 'profile') {
             cancelProfilePasswordChange();
+            return;
+        }
+        if (window._passwordResetScreenMode === 'admin-unlock') {
+            cancelAdminUnlockPasswordReset();
             return;
         }
         window._mandatoryPasswordResetPending = false;
@@ -2521,6 +2576,8 @@ function submitPasswordResetFromLoginPage() {
         submitMandatoryPasswordReset();
     } else if (window._passwordResetScreenMode === 'profile') {
         submitProfilePasswordChange();
+    } else if (window._passwordResetScreenMode === 'admin-unlock') {
+        submitAdminUnlockPasswordReset();
     } else {
         submitExpiredPasswordReset();
     }
@@ -3242,10 +3299,43 @@ function _delayMs(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
 }
 
-function _biometricEnrollCaptureStep(username, step) {
+function _biometricEnrollCaptureStep(username, step, opts) {
+    opts = opts || {};
+    var body = { username: username, step: step };
+    if (opts.draftEnroll) body.draftEnroll = true;
     return apiRequest(API_BASE + '/api/biometric/enroll/capture', {
         method: 'POST',
-        body: { username: username, step: step }
+        body: body
+    });
+}
+
+
+function skipMemberBiometricEnrollment() {
+    var returnPage = window._biometricEnrollReturnPage || window._biometricReturnPage || 'user-profile';
+    var isEdit = !!(!((typeof _pendingNewMemberDraft !== 'undefined' && _pendingNewMemberDraft) || window._pendingNewMemberDraft)
+        && ((typeof _pendingEditMemberDraft !== 'undefined' && _pendingEditMemberDraft) || window._pendingEditMemberDraft));
+    var isEnable = !!(window._pendingEnableMemberDraft);
+    var show = (typeof showAppModal === 'function') ? showAppModal : (typeof showModalCompat === 'function' ? showModalCompat : function () {});
+    var commit = Promise.resolve(null);
+    if (isEnable && typeof commitPendingEnableMemberDraft === 'function') {
+        commit = commitPendingEnableMemberDraft();
+    } else if (typeof commitAllPendingMemberDrafts === 'function') {
+        commit = commitAllPendingMemberDrafts(null);
+    } else if (typeof commitPendingNewMemberDraft === 'function') {
+        commit = commitPendingNewMemberDraft();
+    }
+    commit.then(function () {
+        if (typeof _addMemberLastSavedId !== 'undefined') _addMemberLastSavedId = null;
+        window._addMemberLastSavedId = null;
+        window._biometricEnrollReturnPage = null;
+        window._biometricReturnPage = null;
+        if (typeof loadMembersAndRender === 'function') loadMembersAndRender();
+        var title = isEnable ? 'Enable' : (isEdit ? 'Edit Profile' : 'Add Member');
+        var msg = isEnable ? 'Account enabled.' : (isEdit ? 'Profile updated successfully.' : 'Member saved successfully.');
+        show(msg, title);
+        goToPage(returnPage);
+    }).catch(function (err) {
+        show('Failed to save member: ' + (err && err.message ? err.message : 'Network error'), 'Add Member');
     });
 }
 
@@ -3256,6 +3346,11 @@ function enrollMemberBiometric() {
     }
     var username = _getBiometricEnrollUsername();
     if (!username) {
+        var draft = (typeof window !== 'undefined' && window._pendingNewMemberDraft) ? window._pendingNewMemberDraft : null;
+        if (!draft && window._pendingEnableMemberDraft) draft = window._pendingEnableMemberDraft;
+        if (draft && draft.username) username = String(draft.username).trim();
+    }
+    if (!username) {
         showAppModal('No member selected for fingerprint enrollment. Save the member first.', 'Register Fingerprint');
         return;
     }
@@ -3264,6 +3359,11 @@ function enrollMemberBiometric() {
     var returnPage = window._biometricEnrollReturnPage || 'user-profile';
     var successTitle = window._biometricEnrollSuccessTitle || 'Register Fingerprint';
     var successMsg = window._biometricEnrollSuccessMessage || 'Fingerprint enrolled successfully.';
+
+    var hasCreateDraft = !!(window._pendingNewMemberDraft || (typeof _pendingNewMemberDraft !== 'undefined' && _pendingNewMemberDraft));
+    var useDraftEnroll = hasCreateDraft;
+    // Do NOT persist the profile until Skip or successful enroll completes.
+    var ensureMember = Promise.resolve(null);
 
     showBiometricEnrollUi({
         enrollMode: true,
@@ -3275,7 +3375,9 @@ function enrollMemberBiometric() {
         scanning: true
     });
 
-    _biometricEnrollCaptureStep(username, 1).then(function (data) {
+    ensureMember.then(function () {
+        return _biometricEnrollCaptureStep(username, 1, { draftEnroll: useDraftEnroll });
+    }).then(function (data) {
         if (_biometricEnrollCancelled) return;
         if (!data || !data.ok) {
             hideBiometricProgressOverlay();
@@ -3303,7 +3405,7 @@ function enrollMemberBiometric() {
             fingerState: 'scan',
             scanning: true
         });
-        return _biometricEnrollCaptureStep(username, 2);
+        return _biometricEnrollCaptureStep(username, 2, { draftEnroll: useDraftEnroll });
     }).then(function (data) {
         if (_biometricEnrollCancelled) return;
         if (!data) return;
@@ -3323,7 +3425,7 @@ function enrollMemberBiometric() {
         });
         return _delayMs(400).then(function () { return data; });
     }).then(function (data) {
-        if (_biometricEnrollCancelled || !data || !data.ok) return;
+        if (_biometricEnrollCancelled || !data || !data.ok) return null;
         showBiometricEnrollUi({
             enrollMode: true,
             title: 'Fingerprint registered',
@@ -3337,16 +3439,30 @@ function enrollMemberBiometric() {
             el.classList.add('done');
             el.classList.remove('active');
         });
-        return _delayMs(900);
-    }).then(function () {
-        if (_biometricEnrollCancelled) return;
-        hideBiometricProgressOverlay();
-        _addMemberLastSavedId = null;
-        window._biometricEnrollReturnPage = null;
-        window._biometricEnrollSuccessTitle = null;
-        window._biometricEnrollSuccessMessage = null;
-        showAppModal(successMsg, successTitle);
-        goToPage(returnPage);
+        return _delayMs(900).then(function () { return data; });
+    }).then(function (data) {
+        if (_biometricEnrollCancelled) return null;
+        if (!data || !data.ok) return null;
+        var bioMeta = { templateId: data.templateId, pendingLink: !!data.pendingLink };
+        // Persist create/edit only after successful enroll.
+        var commitP = (typeof commitAllPendingMemberDrafts === 'function')
+            ? commitAllPendingMemberDrafts(bioMeta)
+            : Promise.resolve(null);
+        return commitP.then(function () {
+            if (window._pendingEnableMemberDraft && typeof commitPendingEnableMemberDraft === 'function') {
+                return commitPendingEnableMemberDraft();
+            }
+            return null;
+        }).then(function () {
+            hideBiometricProgressOverlay();
+            _addMemberLastSavedId = null;
+            window._biometricEnrollReturnPage = null;
+            window._biometricEnrollSuccessTitle = null;
+            window._biometricEnrollSuccessMessage = null;
+            if (typeof loadMembersAndRender === 'function') loadMembersAndRender();
+            showAppModal(successMsg, successTitle);
+            goToPage(returnPage);
+        });
     }).catch(function (err) {
         if (_biometricEnrollCancelled) return;
         hideBiometricProgressOverlay();
@@ -3710,6 +3826,26 @@ function cancelLoadingOverlay() {
     }
 }
 
+function _isOperatorExportPendrive(device) {
+    if (!device || typeof device !== 'object') return false;
+    var label = String(device.label || '').trim().toLowerCase();
+    var fs = String(device.fs_type || device.fstype || '').trim().toLowerCase();
+    if (label.indexOf('rufus') !== -1 || label.indexOf('uefi_ntfs') !== -1 || label.indexOf('uefi:ntfs') !== -1) {
+        return false;
+    }
+    if (label === 'esp' || label === 'efi' || label === 'boot' || label === 'bootfs') {
+        return false;
+    }
+    if (fs === 'iso9660' || fs === 'udf' || fs === 'squashfs') {
+        return false;
+    }
+    return true;
+}
+
+function _filterOperatorPendrives(devices) {
+    return (devices || []).filter(_isOperatorExportPendrive);
+}
+
 // ===== USB Pendrive Picker =====
 var _usbPickerResolve = null;
 
@@ -4046,7 +4182,7 @@ function _exportReportsWithFlow(reportIds, opts) {
         // Phase 1: detect USB (spinner, no percentage yet — quick).
         showLoadingOverlay(titleText, 'Detecting external pendrive...', { cancellable: false });
         return apiRequest(API_BASE + '/api/usb/list').then(function (data) {
-            var devices = (data && data.devices) ? data.devices : [];
+            var devices = _filterOperatorPendrives((data && data.devices) ? data.devices : []);
             if (!devices.length) {
                 hideLoadingOverlay();
                 showAppModal('No external pendrive detected. Please connect a USB pendrive and try again.', titleText);
@@ -4262,8 +4398,22 @@ function _saveReportPdfSilent(reportId) {
     }).catch(function () { return false; });
 }
 
+function refreshQuickTestForm() {
+    var pn = document.getElementById('quick-product-name');
+    var vac = document.getElementById('quick-vacuum-mmhg');
+    var dur = document.getElementById('quick-duration');
+    if (pn) pn.value = '';
+    if (vac) vac.value = '';
+    if (dur) dur.value = '';
+    var errEl = document.getElementById('quick-test-input-error');
+    if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+    if (typeof syncQuickVacuumPreset === 'function') syncQuickVacuumPreset();
+    if (typeof syncQuickTimePreset === 'function') syncQuickTimePreset();
+}
+
 function startQuickTest() {
     logAuditEvent('Opened Quick Test', 'Quick Test screen opened', { eventType: 'navigation' });
+    if (typeof refreshQuickTestForm === 'function') refreshQuickTestForm();
     goToPage('quick-test');
 }
 
@@ -4629,6 +4779,17 @@ function startRecipeCreation() {
     setTimeout(resetCreateRecipeStep1Form, 0);
 }
 
+
+function refreshValidatePageAccess() {
+    var validateBtn = document.querySelector('#page-validate .settings-validate');
+    var calibrateBtn = document.querySelector('#page-validate .settings-calibrate');
+    var u = window.currentUser;
+    var canVal = u && typeof canAccess === 'function' && (canAccess(u, 'validation-test') || canAccess(u, 'validate-menu'));
+    var canCal = u && typeof canAccess === 'function' && canAccess(u, 'calibration-menu');
+    if (validateBtn) validateBtn.style.display = canVal ? '' : 'none';
+    if (calibrateBtn) calibrateBtn.style.display = canCal ? '' : 'none';
+}
+
 function selectOperation(type) {
     if (type === 'validate') {
         if (!userCanRunValidation()) {
@@ -4957,7 +5118,19 @@ function unlockMember(id) {
             .then(function (res) {
                 if (!res.ok) throw new Error((res.body && res.body.error) ? res.body.error : ('HTTP ' + res.status));
                 loadMembersAndRender();
-                showAppModal('Account unlocked.', 'Unlock');
+                var member = (res.body && res.body.member) ? res.body.member : null;
+                var username = member && member.username
+                    ? member.username
+                    : (function () {
+                        var rows = Array.isArray(membersCache) ? membersCache : [];
+                        var found = rows.find(function (m) { return Number(m.id) === Number(id); });
+                        return found ? found.username : '';
+                    })();
+                if (typeof showAdminUnlockPasswordResetScreen === 'function') {
+                    showAdminUnlockPasswordResetScreen(id, username);
+                } else {
+                    showAppModal('Account unlocked.', 'Unlock');
+                }
             })
             .catch(function (err) {
                 showAppModal('Failed to unlock: ' + (err && err.message ? err.message : 'Unknown error'), 'Unlock');
@@ -4965,55 +5138,73 @@ function unlockMember(id) {
     });
 }
 
+
+var _pendingEnableMemberDraft = null;
+
+function discardPendingEnableMemberDraft() {
+    _pendingEnableMemberDraft = null;
+    window._pendingEnableMemberDraft = null;
+}
+
+function commitPendingEnableMemberDraft() {
+    var draft = _pendingEnableMemberDraft || window._pendingEnableMemberDraft;
+    if (!draft || draft.memberId == null) return Promise.resolve(null);
+    var id = draft.memberId;
+    return apiRequest(API_BASE + '/api/data/members/' + id + '/enable', { method: 'POST' }).then(function (data) {
+        discardPendingEnableMemberDraft();
+        return data;
+    });
+}
+
 function enableMember(id) {
     if (!id) return;
-    if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
-        var role = getCurrentRole();
-        if (!canPerformAction(role, 'user-enable', 'change')) {
-            showAppModal('You do not have permission to enable accounts.', 'Permission');
+    var show = (typeof showAppModal === 'function') ? showAppModal : (typeof showModalCompat === 'function' ? showModalCompat : function () {});
+    var confirmFn = (typeof showConfirmModal === 'function') ? showConfirmModal : (typeof showConfirmModalCompat === 'function' ? showConfirmModalCompat : null);
+    if (typeof canPerformAction === 'function') {
+        var who = (typeof getCurrentRole === 'function' ? getCurrentRole() : null) || window.currentUser;
+        if (!canPerformAction(who, 'user-enable', 'change')) {
+            show('You do not have permission to enable accounts.', 'Permission');
             return;
         }
     }
-    showConfirmModal('Enable this account?', 'Enable Account').then(function (ok) {
+    function proceed(ok) {
         if (!ok) return;
-        var headers = { 'Content-Type': 'application/json' };
-        if (window.currentUser && window.currentUser.role) headers['X-User-Role'] = window.currentUser.role;
-        fetch((API_BASE || '') + '/api/data/members/' + id + '/enable', { method: 'POST', headers: headers })
-            .then(function (r) { return r.json().catch(function () { return {}; }).then(function (b) { return { ok: r.ok, status: r.status, body: b }; }); })
-            .then(function (res) {
-                if (!res.ok) throw new Error((res.body && res.body.error) ? res.body.error : ('HTTP ' + res.status));
-                loadMembersAndRender();
-                var member = (res.body && res.body.member) ? res.body.member : null;
-                var username = member
-                    ? String(member.username || member.name || '').trim()
-                    : '';
-                showAppModal('Account enabled.', 'Enable');
-                if (biometricEnabledSetting && member && typeof canEditMembers === 'function' && canEditMembers()) {
-                    _addMemberLastSavedId = id;
-                    var enrollSummary = {
-                        id: id,
-                        username: username,
-                        name: member.name || username,
-                        role: member.role
-                    };
-                    offerOptionalBiometricReset({
-                        username: username,
-                        memberId: id,
-                        name: member.name || username,
-                        returnPage: 'manage-members',
-                        onSkip: function () {
-                            window._biometricEnrollReturnPage = 'manage-members';
-                            _populateMemberBiometricSummary(enrollSummary);
-                            goToPage('member-biometric');
-                        }
-                    });
-                }
-            })
-            .catch(function (err) {
-                showAppModal('Failed to enable: ' + (err && err.message ? err.message : 'Unknown error'), 'Enable');
+        var member = null;
+        var rows = Array.isArray(membersCache) ? membersCache : [];
+        for (var i = 0; i < rows.length; i++) {
+            if (rows[i] && Number(rows[i].id) === Number(id)) { member = rows[i]; break; }
+        }
+        var username = member ? String(member.username || member.name || '').trim() : '';
+        var name = member ? (member.name || username) : username;
+        var role = member ? (member.role || '') : '';
+        var bioOn = (typeof biometricEnabledSetting === 'undefined') ? true : !!biometricEnabledSetting;
+        if (!bioOn) {
+            return apiRequest(API_BASE + '/api/data/members/' + id + '/enable', { method: 'POST' }).then(function () {
+                if (typeof loadMembersAndRender === 'function') loadMembersAndRender();
+                show('Account enabled.', 'Enable');
+            }).catch(function (err) {
+                show('Failed to enable: ' + (err && err.message ? err.message : 'Unknown error'), 'Enable');
             });
-    });
+        }
+        _pendingEnableMemberDraft = { memberId: id, username: username, name: name, role: role };
+        window._pendingEnableMemberDraft = _pendingEnableMemberDraft;
+        window._biometricEnrollReturnPage = 'manage-members';
+        window._biometricEnrollSuccessTitle = 'Enable';
+        window._biometricEnrollSuccessMessage = 'Account enabled.';
+        if (typeof _addMemberLastSavedId !== 'undefined') _addMemberLastSavedId = id;
+        window._addMemberLastSavedId = id;
+        if (typeof _populateMemberBiometricSummary === 'function') {
+            _populateMemberBiometricSummary({ id: id, username: username, name: name, role: role });
+        }
+        goToPage('member-biometric');
+    }
+    if (confirmFn) {
+        confirmFn('Enable this account? You will Add or Skip biometric before the account becomes active.', 'Enable Account').then(proceed);
+    } else {
+        proceed(true);
+    }
 }
+
 
 // ----- Reports and audit from API -----
 function loadReports(filterType) {
@@ -5258,6 +5449,7 @@ function closeReportPreviewToReports() {
 }
 
 function applyAuditFiltersAndRefresh() {
+    if (typeof populateAuditRoleFilterFromGroups === 'function') populateAuditRoleFilterFromGroups();
     loadReports('audit');
 }
 
@@ -5314,7 +5506,7 @@ function exportAuditTrails() {
         showLoadingOverlay(titleText, 'Detecting external pendrive...', { cancellable: false, progress: true });
         setLoadingProgress(5, 'Detecting external pendrive...', '');
         apiRequest(API_BASE + '/api/usb/list').then(function (data) {
-            var devices = (data && data.devices) ? data.devices : [];
+            var devices = _filterOperatorPendrives((data && data.devices) ? data.devices : []);
             if (!devices.length) {
                 hideLoadingOverlay();
                 showAppModal('No external pendrive detected. Please connect a USB pendrive and try again.', titleText);
@@ -8458,12 +8650,6 @@ function syncCreateRecipeConsolePresets() {
 
 function applyCreateRecipeFactoryPresets(settings) {
     var s = settings || {};
-    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : ABSOLUTE_MAX_VACUUM_MMHG;
-    var settingsMax = parseInt(s.maxVacuumMmHg, 10);
-    if (!isNaN(settingsMax) && settingsMax >= 1 && settingsMax <= ABSOLUTE_MAX_VACUUM_MMHG) {
-        maxVac = settingsMax;
-    }
-    if (typeof applyFactoryMaxVacuumToInputs === 'function') applyFactoryMaxVacuumToInputs(maxVac);
     var vacuumPresets = Array.isArray(s.recipeVacuumPresets) && s.recipeVacuumPresets.length === 3
         ? s.recipeVacuumPresets
         : [200, 400, 600];
@@ -8474,7 +8660,7 @@ function applyCreateRecipeFactoryPresets(settings) {
     var vacuumButtons = document.querySelectorAll('.qt-preset-btn[data-recipe-vacuum]');
     vacuumButtons.forEach(function (btn, index) {
         var value = parseInt(vacuumPresets[index], 10);
-        if (isNaN(value) || value < 1 || value > maxVac) value = Math.min(maxVac, [200, 400, 600][index]);
+        if (isNaN(value) || value < 1 || value > 650) value = [200, 400, 600][index];
         btn.setAttribute('data-recipe-vacuum', String(value));
         btn.textContent = String(value);
     });
@@ -8482,7 +8668,7 @@ function applyCreateRecipeFactoryPresets(settings) {
     var quickVacuumButtons = document.querySelectorAll('.qt-preset-btn[data-vacuum]');
     quickVacuumButtons.forEach(function (btn, index) {
         var value = parseInt(vacuumPresets[index], 10);
-        if (isNaN(value) || value < 1 || value > maxVac) value = Math.min(maxVac, [200, 400, 600][index]);
+        if (isNaN(value) || value < 1 || value > 650) value = [200, 400, 600][index];
         btn.setAttribute('data-vacuum', String(value));
         btn.textContent = String(value);
     });
@@ -8558,7 +8744,7 @@ function startQuickTestRun() {
         else { errEl.textContent = ''; errEl.style.display = 'none'; }
     }
 
-    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : ABSOLUTE_MAX_VACUUM_MMHG;
+    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
     var vacuumMmHg = parseFloat(vacEl && vacEl.value ? vacEl.value : '');
     var durationSec = (typeof parseMmSs === 'function') ? parseMmSs(timeEl && timeEl.value ? timeEl.value : '') : null;
 
@@ -8594,16 +8780,7 @@ function startQuickTestRun() {
 function resetQuickTestFormAfterRunIfPending() {
     if (!_quickTestRunPendingFormReset) return;
     _quickTestRunPendingFormReset = false;
-    var pn = document.getElementById('quick-product-name');
-    var vac = document.getElementById('quick-vacuum-mmhg');
-    var dur = document.getElementById('quick-duration');
-    if (pn) pn.value = '';
-    if (vac) vac.value = '';
-    if (dur) dur.value = '';
-    var errEl = document.getElementById('quick-test-input-error');
-    if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
-    if (typeof syncQuickVacuumPreset === 'function') syncQuickVacuumPreset();
-    if (typeof syncQuickTimePreset === 'function') syncQuickTimePreset();
+    refreshQuickTestForm();
 }
 
 function getTestRunSteps() {
@@ -9742,7 +9919,7 @@ function updateCreateRecipeContinueButton() {
         ? getResolvedRecipeProductType()
         : '';
     var batchSize = parseInt(batchSizeEl && batchSizeEl.value ? batchSizeEl.value : '', 10);
-    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : ABSOLUTE_MAX_VACUUM_MMHG;
+    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
     var vacuum = parseFloat(vacEl && vacEl.value ? vacEl.value : '');
     var durationSec = (typeof parseMmSs === 'function') ? parseMmSs(timeEl && timeEl.value ? timeEl.value : '') : null;
 
@@ -10051,7 +10228,7 @@ function completeRecipeFromStep2() {
         : '';
     var batchSizeRaw = batchSizeEl ? String(batchSizeEl.value || '').trim() : '';
     var batchSize = batchSizeRaw === '' ? null : parseInt(batchSizeRaw, 10);
-    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : ABSOLUTE_MAX_VACUUM_MMHG;
+    var maxVac = (typeof getFactoryMaxVacuumMmHg === 'function') ? getFactoryMaxVacuumMmHg() : 650;
     var vacuumMmHg = parseFloat(vacEl && vacEl.value ? vacEl.value : '');
     var durationSec = (typeof parseMmSs === 'function') ? parseMmSs(timeEl && timeEl.value ? timeEl.value : '') : null;
 
@@ -10742,15 +10919,16 @@ function _setAddMemberPageMode(isEdit, isSelfEdit) {
     }
     if (pwdLabel) pwdLabel.textContent = isEdit ? 'New Password (optional)' : 'Password';
     if (confirmPwdLabel) confirmPwdLabel.textContent = isEdit ? 'Confirm New Password (optional)' : 'Confirm Password';
-    if (roleContainer) roleContainer.style.display = isSelfEdit ? 'none' : '';
-    if (isSelfEdit) {
+    if (roleContainer) roleContainer.style.display = 'none';
+    // Self-edit may change permission cards; keep the panel visible when assignable.
+    if (typeof _refreshAddMemberPermissionsPanelVisibility === 'function') {
+        _refreshAddMemberPermissionsPanelVisibility();
+    } else {
         var panel = document.getElementById('add-member-permissions-panel');
         if (panel) {
-            panel.classList.add('is-hidden');
-            panel.setAttribute('aria-hidden', 'true');
+            panel.classList.remove('is-hidden');
+            panel.setAttribute('aria-hidden', 'false');
         }
-    } else if (typeof _refreshAddMemberPermissionsPanelVisibility === 'function') {
-        _refreshAddMemberPermissionsPanelVisibility();
     }
 }
 
@@ -10789,11 +10967,33 @@ function openEditMember(id) {
             var userIdEl = document.getElementById('add-userid');
             if (fullNameEl) fullNameEl.value = member.name || '';
             if (userIdEl) userIdEl.value = member.username || '';
-            if (!isSelf && typeof selectRole === 'function') {
-                selectRole(member.role || 'User');
+            if (typeof selectRole === 'function' && member.role) {
+                selectRole(member.role);
+            } else {
+                var roleHidden = document.getElementById('selected-role');
+                if (roleHidden) roleHidden.value = member.role || '';
             }
-            if (!isSelf) _loadMemberOverridesIntoPanel(member.featureOverrides);
+            _loadMemberOverridesIntoPanel(member.featureOverrides);
             _setAddMemberPageMode(true, isSelf);
+            if (typeof _loadUserGroupsIntoMemberForm === 'function') {
+                var pref = member.userGroupId != null ? member.userGroupId : null;
+                if (pref == null && member.role) {
+                    // resolved after load via name match inside then below
+                }
+                _loadUserGroupsIntoMemberForm(pref).then(function () {
+                    var gsel = document.getElementById('add-member-user-group');
+                    if (!gsel) return;
+                    if (pref != null) {
+                        gsel.value = String(pref);
+                    } else if (member.role) {
+                        var match = (_userGroupsCache || []).find(function (g) {
+                            return String(g.name || '') === String(member.role || '');
+                        });
+                        if (match) gsel.value = String(match.id);
+                    }
+                    if (typeof applySelectedUserGroupToMemberForm === 'function') applySelectedUserGroupToMemberForm();
+                });
+            }
             goToPage('add-member');
             setTimeout(function () {
                 if (typeof ensureAddMemberPageScroll === 'function') ensureAddMemberPageScroll();
@@ -10856,24 +11056,50 @@ function saveEditedMember() {
             if (!member) throw new Error('Member not found');
             member.name = fullName;
             member.username = username;
+            var groupMeta = (typeof _selectedUserGroupMeta === 'function') ? _selectedUserGroupMeta() : null;
             if (!isSelf) {
-                member.role = role;
+                if (!groupMeta) {
+                    showAppModal('Select a profile power for this member.', modalTitle);
+                    return Promise.reject(new Error('permissions'));
+                }
+                member.role = groupMeta.name;
+                member.userGroupId = groupMeta.id;
+                member.userGroupName = groupMeta.name;
+            } else if (groupMeta) {
+                member.role = groupMeta.name;
+                member.userGroupId = groupMeta.id;
+                member.userGroupName = groupMeta.name;
             }
             if (password) {
                 member.password = password;
             }
-            if (!isSelf && typeof _addMemberPermissionsPanelShouldShow === 'function' && _addMemberPermissionsPanelShouldShow()) {
-                var overrides = _addMemberFeatureOverrides || { allow: [], deny: [] };
-                var allowList = (overrides.allow || []).slice();
-                if (allowList.length < 1) {
-                    showAppModal('Select at least one user functionality to continue.', modalTitle);
-                    return Promise.reject(new Error('permissions'));
-                }
-                if (!sessionCanAssignFeatureOverrides()) {
-                    showAppModal('You do not have permission to change permission cards.', modalTitle);
-                    return Promise.reject(new Error('permissions'));
-                }
-                member.featureOverrides = { allow: allowList, deny: [] };
+            var overrides = _addMemberFeatureOverrides || { allow: [], deny: [] };
+            var allowList = (overrides.allow || []).slice();
+            if (allowList.length < 1) {
+                showAppModal('Select at least one user functionality to continue.', modalTitle);
+                return Promise.reject(new Error('permissions'));
+            }
+            if (!isSelf && typeof sessionCanAssignFeatureOverrides === 'function' && !sessionCanAssignFeatureOverrides()) {
+                showAppModal('You do not have permission to change permission cards.', modalTitle);
+                return Promise.reject(new Error('permissions'));
+            }
+            member.featureOverrides = { allow: allowList, deny: [] };
+            var canManage = typeof canEditMembers === 'function' && canEditMembers();
+            var deferBio = !!(biometricEnabledSetting && canManage && !isSelf);
+            if (deferBio) {
+                _pendingEditMemberDraft = { memberId: memberId, member: member, isSelf: false };
+                window._pendingEditMemberDraft = _pendingEditMemberDraft;
+                editingMemberId = null;
+                _clearAddMemberForm();
+                window._biometricEnrollReturnPage = 'manage-members';
+                _populateMemberBiometricSummary({
+                    id: memberId,
+                    username: username,
+                    name: fullName,
+                    role: role
+                });
+                goToPage('member-biometric');
+                return Promise.reject(new Error('deferred-biometric'));
             }
             return apiRequest(API_BASE + '/api/data/members/' + memberId, {
                 method: 'PUT',
@@ -10892,26 +11118,360 @@ function saveEditedMember() {
             editingMemberId = null;
             _clearAddMemberForm();
             loadMembersAndRender();
-            var canManage = typeof canEditMembers === 'function' && canEditMembers();
-            if (info && biometricEnabledSetting && canManage && !info.isSelf) {
-                _addMemberLastSavedId = info.memberId;
-                window._biometricEnrollReturnPage = 'manage-members';
-                _populateMemberBiometricSummary({
-                    id: info.memberId,
-                    username: info.username,
-                    name: info.name,
-                    role: info.role
-                });
-                goToPage('member-biometric');
-                return;
+            var afterSave = Promise.resolve();
+            if (info && info.isSelf) {
+                afterSave = apiRequest(API_BASE + '/api/data/auth/current-user', { method: 'GET' })
+                    .then(function (cu) {
+                        if (cu && cu.user) {
+                            window.currentUser = cu.user;
+                            if (typeof refreshShellAccessVisibility === 'function') refreshShellAccessVisibility();
+                            if (typeof updateSettingsVisibility === 'function') updateSettingsVisibility();
+                        }
+                    })
+                    .catch(function () { /* non-fatal */ });
             }
-            showAppModal('Profile updated successfully.', modalTitle);
-            goToPage(info && info.isSelf ? 'user-profile' : 'manage-members');
+            afterSave.finally(function () {
+                showAppModal('Profile updated successfully.', modalTitle);
+                goToPage(info && info.isSelf ? 'user-profile' : 'manage-members');
+            });
         })
         .catch(function (err) {
             if (err && err.message === 'permissions') return;
+            if (err && err.message === 'deferred-biometric') return;
             showAppModal('Failed to update profile: ' + (err && err.message ? err.message : 'Unknown error'), modalTitle);
         });
+}
+
+// ----- User power groups (Settings blueprints) -----
+var _userGroupsCache = _userGroupsCache || [];
+var _editingUserGroupId = null;
+var _userGroupFeatureOverrides = { allow: [], deny: [] };
+
+function manageUserGroups() {
+    if (typeof canEditMembers === 'function' && !canEditMembers()) {
+        var show = (typeof showAppModal === 'function') ? showAppModal : (typeof showModalCompat === 'function' ? showModalCompat : null);
+        if (show) show('You do not have permission to manage profile powers.', 'Permission');
+        return;
+    }
+    goToPage('manage-user-groups');
+    displayUserGroupsList({ status: 'active' });
+}
+
+function displayUserGroupsList(opts) {
+    opts = opts || {};
+    var status = String(opts.status || 'active').toLowerCase();
+    if (status !== 'disabled') status = 'active';
+    var isDisabledView = status === 'disabled';
+    var show = (typeof showAppModal === 'function') ? showAppModal : (typeof showModalCompat === 'function' ? showModalCompat : function () {});
+    apiRequest(API_BASE + '/api/data/user-groups?status=' + encodeURIComponent(status), { method: 'GET' })
+        .then(function (data) {
+            var groups = (data && data.groups && Array.isArray(data.groups)) ? data.groups : [];
+            if (!isDisabledView) _userGroupsCache = groups;
+            var tbody = document.getElementById(isDisabledView ? 'disabled-user-groups-table-body' : 'user-groups-table-body');
+            var table = document.getElementById(isDisabledView ? 'disabled-user-groups-table' : 'user-groups-table');
+            var emptyEl = document.getElementById(isDisabledView ? 'disabled-user-groups-empty-state' : 'user-groups-empty-state');
+            if (!tbody) return;
+            tbody.innerHTML = '';
+            if (!groups.length) {
+                if (table) table.style.display = 'none';
+                if (emptyEl) emptyEl.style.display = '';
+                return;
+            }
+            if (table) table.style.display = '';
+            if (emptyEl) emptyEl.style.display = 'none';
+            var catalog = (typeof getPermissionCardCatalog === 'function') ? getPermissionCardCatalog() : [];
+            var labelMap = {};
+            catalog.forEach(function (c) { labelMap[c.key] = c.label; });
+            groups.forEach(function (g) {
+                var tr = document.createElement('tr');
+                var allow = (g.allow || []).map(function (k) { return labelMap[k] || k; }).join(', ');
+                var actions = isDisabledView
+                    ? ('<button class="btn-member-action btn-enable" onclick="enableUserGroup(' + (g.id || 0) + ')">Enable</button>')
+                    : ('<button class="btn-member-action btn-edit" onclick="openEditUserGroup(' + (g.id || 0) + ')">Edit</button>' +
+                       '<button class="btn-member-action btn-disable" onclick="disableUserGroup(' + (g.id || 0) + ')">Disable</button>');
+                tr.innerHTML =
+                    '<td>' + (g.name || '') + '</td>' +
+                    '<td>' + (allow || '—') + '</td>' +
+                    '<td class="member-actions-cell">' + actions + '</td>';
+                tbody.appendChild(tr);
+            });
+        })
+        .catch(function (err) {
+            show('Failed to load user groups: ' + (err && err.message ? err.message : 'Unknown error'), 'User Groups');
+        });
+}
+
+function enableUserGroup(id) {
+    if (!id) return;
+    var show = (typeof showAppModal === 'function') ? showAppModal : (typeof showModalCompat === 'function' ? showModalCompat : function () {});
+    showConfirmModal('Enable this profile power group?', 'Enable Group').then(function (ok) {
+        if (!ok) return;
+        return apiRequest(API_BASE + '/api/data/user-groups/' + id + '/enable', { method: 'POST' }).then(function () {
+            show('Profile power enabled.', 'User Groups');
+            displayUserGroupsList({ status: 'disabled' });
+        });
+    }).catch(function (err) {
+        show('Failed to enable group: ' + (err && err.message ? err.message : 'Unknown error'), 'User Groups');
+    });
+}
+
+function startUserGroupCreation() {
+    _editingUserGroupId = null;
+    _userGroupFeatureOverrides = { allow: [], deny: [] };
+    var nameEl = document.getElementById('user-group-name');
+    var titleEl = document.getElementById('user-group-page-title');
+    if (nameEl) nameEl.value = '';
+    if (titleEl) titleEl.textContent = 'Create Profile Power';
+    if (typeof renderUserGroupPermissionCards === 'function') renderUserGroupPermissionCards();
+    goToPage('edit-user-group');
+}
+
+function openEditUserGroup(id) {
+    if (!id) return;
+    var show = (typeof showAppModal === 'function') ? showAppModal : (typeof showModalCompat === 'function' ? showModalCompat : function () {});
+    apiRequest(API_BASE + '/api/data/user-groups?status=all', { method: 'GET' })
+        .then(function (data) {
+            var groups = (data && data.groups && Array.isArray(data.groups)) ? data.groups : [];
+            var g = groups.find(function (x) { return Number(x.id) === Number(id); });
+            if (!g) throw new Error('Group not found');
+            _editingUserGroupId = g.id;
+            _userGroupFeatureOverrides = { allow: (g.allow || []).slice(), deny: [] };
+            var nameEl = document.getElementById('user-group-name');
+            var titleEl = document.getElementById('user-group-page-title');
+            if (nameEl) nameEl.value = g.name || '';
+            if (titleEl) titleEl.textContent = 'Edit Profile Power';
+            if (typeof renderUserGroupPermissionCards === 'function') renderUserGroupPermissionCards();
+            goToPage('edit-user-group');
+        })
+        .catch(function (err) {
+            show('Failed to load group: ' + (err && err.message ? err.message : 'Unknown error'), 'User Groups');
+        });
+}
+
+function renderUserGroupPermissionCards() {
+    var grid = document.getElementById('user-group-permission-cards-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    var catalog = (typeof getPermissionCardCatalog === 'function')
+        ? getPermissionCardCatalog()
+        : ((typeof getFeatureCatalog === 'function') ? getFeatureCatalog() : []);
+    if (!_userGroupFeatureOverrides) _userGroupFeatureOverrides = { allow: [], deny: [] };
+    _userGroupFeatureOverrides.deny = [];
+    catalog.forEach(function (feature) {
+        var key = feature.key;
+        if (key === 'dashboard' || key === 'factory-settings' || key === 'factory-reset') return;
+        var selected = _userGroupFeatureOverrides.allow.indexOf(key) !== -1;
+        var accent = feature.accent != null ? feature.accent : 0;
+        var card = document.createElement('div');
+        card.className = 'permission-card' + (selected ? ' is-selected permission-card--accent-' + accent : '');
+        card.setAttribute('data-feature-key', key);
+        card.innerHTML =
+            '<div class="permission-card-title">' + feature.label + '</div>' +
+            '<div class="permission-card-desc">' + (feature.description || '') + '</div>';
+        card.addEventListener('click', function () {
+            var i = _userGroupFeatureOverrides.allow.indexOf(key);
+            if (i === -1) _userGroupFeatureOverrides.allow.push(key);
+            else _userGroupFeatureOverrides.allow.splice(i, 1);
+            renderUserGroupPermissionCards();
+        });
+        grid.appendChild(card);
+    });
+}
+
+function saveUserGroupForm() {
+    var show = (typeof showAppModal === 'function') ? showAppModal : (typeof showModalCompat === 'function' ? showModalCompat : function () {});
+    var nameEl = document.getElementById('user-group-name');
+    var name = nameEl && nameEl.value ? nameEl.value.trim() : '';
+    var allow = (_userGroupFeatureOverrides && _userGroupFeatureOverrides.allow) ? _userGroupFeatureOverrides.allow.slice() : [];
+    if (!name) {
+        show('Group name is required.', 'User Groups');
+        return;
+    }
+    if (!allow.length) {
+        show('Select at least one permission for the group.', 'User Groups');
+        return;
+    }
+    if (_editingUserGroupId == null) {
+        var activeCount = (_userGroupsCache || []).filter(function (g) {
+            return g && String(g.status || 'active').toLowerCase() !== 'disabled';
+        }).length;
+        if (activeCount >= 10) {
+            show('Maximum of 10 profile power groups allowed.', 'User Groups');
+            return;
+        }
+    }
+    var payload = { name: name, allow: allow };
+    var req;
+    if (_editingUserGroupId != null) {
+        payload.id = _editingUserGroupId;
+        req = apiRequest(API_BASE + '/api/data/user-groups/' + _editingUserGroupId, { method: 'PUT', body: payload });
+    } else {
+        req = apiRequest(API_BASE + '/api/data/user-groups', { method: 'POST', body: payload });
+    }
+    req.then(function () {
+        _editingUserGroupId = null;
+        show('User group saved.', 'User Groups');
+        goToPage('manage-user-groups');
+        displayUserGroupsList({ status: 'active' });
+    }).catch(function (err) {
+        show('Failed to save group: ' + (err && err.message ? err.message : 'Unknown error'), 'User Groups');
+    });
+}
+
+function disableUserGroup(id) {
+    if (!id) return;
+    var show = (typeof showAppModal === 'function') ? showAppModal : (typeof showModalCompat === 'function' ? showModalCompat : function () {});
+    showConfirmModal('Disable this user group?', 'Disable Group').then(function (ok) {
+        if (!ok) return;
+        return apiRequest(API_BASE + '/api/data/user-groups/' + id, { method: 'DELETE' }).then(function () {
+            show('User group disabled.', 'User Groups');
+            displayUserGroupsList({ status: 'active' });
+        });
+    }).catch(function (err) {
+        show('Failed to disable group: ' + (err && err.message ? err.message : 'Unknown error'), 'User Groups');
+    });
+}
+
+
+function _loadUserGroupsIntoMemberForm(preferredId) {
+    var sel = document.getElementById('add-member-user-group');
+    if (!sel) return Promise.resolve();
+    return apiRequest(API_BASE + '/api/data/user-groups?status=active', { method: 'GET' })
+        .then(function (data) {
+            _userGroupsCache = (data && data.groups && Array.isArray(data.groups)) ? data.groups : [];
+            sel.innerHTML = '<option value="">— Select profile power —</option>';
+            _userGroupsCache.forEach(function (g) {
+                var opt = document.createElement('option');
+                opt.value = String(g.id);
+                opt.textContent = g.name || ('Group ' + g.id);
+                sel.appendChild(opt);
+            });
+            if (preferredId != null && preferredId !== '') {
+                sel.value = String(preferredId);
+            } else if (typeof editingMemberId !== 'undefined' && editingMemberId != null) {
+                // leave blank until caller sets; do not restore stale create selection
+                sel.value = '';
+            } else {
+                sel.value = '';
+            }
+            if (typeof applySelectedUserGroupToMemberForm === 'function') {
+                applySelectedUserGroupToMemberForm();
+            }
+        })
+        .catch(function () { /* non-fatal */ });
+}
+
+
+function openAddMember() {
+    var show = (typeof showAppModal === 'function') ? showAppModal : (typeof showModalCompat === 'function' ? showModalCompat : function () {});
+    if (typeof canPerformAction === 'function') {
+        var who = (typeof window !== 'undefined' && window.currentUser) ? window.currentUser : (typeof getCurrentRole === 'function' ? getCurrentRole() : null);
+        if (who && !canPerformAction(who, 'user-add', 'create') &&
+            !(typeof isFactoryLikeRole === 'function' && isFactoryLikeRole(who.role || who, who))) {
+            show('You do not have permission to add new members.', 'Permission');
+            return;
+        }
+    }
+    if (typeof _editingMemberPermissionsActive !== 'undefined') _editingMemberPermissionsActive = true;
+    editingMemberId = null;
+    if (typeof discardPendingMemberDrafts === 'function') discardPendingMemberDrafts();
+    else if (typeof discardPendingNewMemberDraft === 'function') discardPendingNewMemberDraft();
+    if (typeof _clearAddMemberForm === 'function') _clearAddMemberForm();
+    if (typeof _refreshAddMemberPermissionsPanelVisibility === 'function') _refreshAddMemberPermissionsPanelVisibility();
+    if (typeof _loadUserGroupsIntoMemberForm === 'function') _loadUserGroupsIntoMemberForm();
+    goToPage('add-member');
+    setTimeout(function () {
+        if (typeof ensureAddMemberPageScroll === 'function') ensureAddMemberPageScroll();
+        var f = document.getElementById('add-fullname');
+        if (f) f.focus();
+    }, 60);
+}
+
+function cancelAddMemberEdit() {
+    var returnToManage = (typeof editingMemberId !== 'undefined' && editingMemberId != null)
+        || !!(window._pendingNewMemberDraft)
+        || !!(typeof _pendingNewMemberDraft !== 'undefined' && _pendingNewMemberDraft);
+    if (typeof discardPendingMemberDrafts === 'function') discardPendingMemberDrafts();
+    else if (typeof discardPendingNewMemberDraft === 'function') discardPendingNewMemberDraft();
+    if (typeof _clearAddMemberForm === 'function') _clearAddMemberForm();
+    goToPage(returnToManage ? 'manage-members' : 'user-profile');
+}
+
+function _populateMemberBiometricSummary(member) {
+    if (!member) return;
+    var nameEl = document.getElementById('member-biometric-name');
+    var userEl = document.getElementById('member-biometric-username');
+    var roleEl = document.getElementById('member-biometric-role');
+    if (nameEl) nameEl.textContent = member.name || '--';
+    if (userEl) userEl.textContent = member.username || '--';
+    if (roleEl) {
+        var roleLabel = (typeof displayRoleLabel === 'function')
+            ? displayRoleLabel(member.role)
+            : (member.role || '--');
+        roleEl.textContent = roleLabel;
+    }
+}
+
+function backToMemberAfterBiometric() {
+    var returnPage = window._biometricEnrollReturnPage || window._biometricReturnPage || 'user-profile';
+    var wasEnable = !!(window._pendingEnableMemberDraft);
+    var uname = '';
+    if (typeof _getBiometricEnrollUsername === 'function') {
+        try { uname = _getBiometricEnrollUsername() || ''; } catch (e) {}
+    }
+    if (!uname) {
+        var d = window._pendingNewMemberDraft || window._pendingEnableMemberDraft
+            || (typeof _pendingNewMemberDraft !== 'undefined' ? _pendingNewMemberDraft : null);
+        if (d && d.username) uname = String(d.username).trim();
+    }
+    if (uname) {
+        apiRequest(API_BASE + '/api/biometric/enroll/cancel', {
+            method: 'POST',
+            body: { username: uname }
+        }).catch(function () {});
+    }
+    if (typeof discardPendingEnableMemberDraft === 'function') discardPendingEnableMemberDraft();
+    if (typeof discardPendingMemberDrafts === 'function') discardPendingMemberDrafts();
+    else if (typeof discardPendingNewMemberDraft === 'function') discardPendingNewMemberDraft();
+    if (typeof _pendingEditMemberDraft !== 'undefined') _pendingEditMemberDraft = null;
+    window._pendingEditMemberDraft = null;
+    if (typeof _addMemberLastSavedId !== 'undefined') _addMemberLastSavedId = null;
+    window._addMemberLastSavedId = null;
+    window._biometricEnrollReturnPage = null;
+    window._biometricReturnPage = null;
+    // Enable path: Back leaves account disabled; return to disabled list.
+    goToPage(wasEnable ? 'disabled-members' : returnPage);
+}
+
+
+function applySelectedUserGroupToMemberForm() {
+    var sel = document.getElementById('add-member-user-group');
+    var panel = document.getElementById('add-member-permissions-panel');
+    if (!sel || !sel.value) {
+        if (typeof _addMemberFeatureOverrides !== 'undefined') {
+            _addMemberFeatureOverrides = { allow: [], deny: [] };
+        }
+        if (panel) {
+            panel.classList.add('is-hidden');
+            panel.setAttribute('aria-hidden', 'true');
+        }
+        if (typeof renderAddMemberPermissionCards === 'function') renderAddMemberPermissionCards({ locked: true });
+        var roleHidden = document.getElementById('selected-role');
+        if (roleHidden) roleHidden.value = '';
+        return;
+    }
+    var g = (_userGroupsCache || []).find(function (x) { return String(x.id) === String(sel.value); });
+    if (!g) return;
+    var roleHidden = document.getElementById('selected-role');
+    if (roleHidden) roleHidden.value = g.name || '';
+    if (typeof _addMemberFeatureOverrides !== 'undefined') {
+        _addMemberFeatureOverrides = { allow: (g.allow || []).slice(), deny: [] };
+    }
+    if (typeof renderAddMemberPermissionCards === 'function') renderAddMemberPermissionCards({ locked: true });
+    if (panel) {
+        panel.classList.remove('is-hidden');
+        panel.setAttribute('aria-hidden', 'false');
+    }
 }
 
 function saveNewMember() {
@@ -10959,37 +11519,45 @@ function saveNewMember() {
         }
     }
 
+    var groupMeta = (typeof _selectedUserGroupMeta === 'function') ? _selectedUserGroupMeta() : null;
+    if (!groupMeta) {
+        showAppModal('Select a profile power for this member.', 'Add Member');
+        return;
+    }
+    role = groupMeta.name;
+    var roleHiddenEl = document.getElementById('selected-role');
+    if (roleHiddenEl) roleHiddenEl.value = role;
     var payload = {
         name: fullName,
         username: username,
         password: password,
         role: role,
+        userGroupId: groupMeta.id,
+        userGroupName: groupMeta.name,
         featureOverrides: {
             allow: (overrides.allow || []).slice(),
             deny: []
         }
     };
 
-    apiRequest(API_BASE + '/api/data/members', {
-        method: 'POST',
-        body: payload
-    }).then(function (data) {
-        if (data && data.id) {
-            _addMemberLastSavedId = data.id;
-            var savedMember = (data && data.member) ? data.member : {
-                id: data.id, name: fullName, username: username, role: role
-            };
-            _clearAddMemberForm();
-            if (biometricEnabledSetting) {
-                _populateMemberBiometricSummary(savedMember);
-                goToPage('member-biometric');
-            } else {
-                showAppModal('Member saved successfully.', 'Add Member');
-                goToPage('user-profile');
-            }
-        } else {
-            showAppModal((data && data.error) || 'Failed to save member.', 'Add Member');
-        }
+    // Defer persist until Skip / biometric success so Back does not create the member.
+    _pendingNewMemberDraft = payload;
+    window._pendingNewMemberDraft = payload;
+    _clearAddMemberForm();
+
+    if (biometricEnabledSetting) {
+        _populateMemberBiometricSummary({
+            name: fullName,
+            username: username,
+            role: role
+        });
+        goToPage('member-biometric');
+        return;
+    }
+
+    commitPendingNewMemberDraft().then(function () {
+        showAppModal('Member saved successfully.', 'Add Member');
+        goToPage('user-profile');
     }).catch(function (err) {
         showAppModal('Failed to save member: ' + (err && err.message ? err.message : 'Network error'), 'Add Member');
     });
@@ -11008,8 +11576,36 @@ function openRoleModal(id) {
     currentMemberIdForRoleEdit = id;
     var titleEl = document.getElementById('role-modal-title');
     var currentEl = document.getElementById('role-modal-current');
-    if (titleEl) titleEl.textContent = 'Change Role for ' + (member.name || member.username || '');
-    if (currentEl) currentEl.textContent = 'Current Role: ' + displayRoleLabel(member.role);
+    if (titleEl) titleEl.textContent = 'Change Profile Power for ' + (member.name || member.username || '');
+    if (currentEl) currentEl.textContent = 'Current: ' + displayRoleLabel(member.role);
+    var sel = document.getElementById('role-modal-user-group');
+    function fillRoleModalGroups(groups) {
+        if (!sel) return;
+        var curId = member.userGroupId != null ? String(member.userGroupId) : '';
+        sel.innerHTML = '<option value="">— Select profile power —</option>';
+        (groups || []).forEach(function (g) {
+            if (!g || String(g.status || 'active').toLowerCase() === 'disabled') return;
+            var opt = document.createElement('option');
+            opt.value = String(g.id);
+            opt.textContent = g.name || ('Group ' + g.id);
+            sel.appendChild(opt);
+        });
+        if (curId) sel.value = curId;
+        else if (member.role) {
+            var match = (groups || []).find(function (g) { return String(g.name || '') === String(member.role || ''); });
+            if (match) sel.value = String(match.id);
+        }
+    }
+    if (_userGroupsCache && _userGroupsCache.length) {
+        fillRoleModalGroups(_userGroupsCache);
+    } else {
+        apiRequest(API_BASE + '/api/data/user-groups?status=active', { method: 'GET' })
+            .then(function (data) {
+                _userGroupsCache = (data && data.groups && Array.isArray(data.groups)) ? data.groups : [];
+                fillRoleModalGroups(_userGroupsCache);
+            })
+            .catch(function () { fillRoleModalGroups([]); });
+    }
     var overlay = document.getElementById('role-modal-overlay');
     if (overlay) overlay.style.display = 'flex';
 }
@@ -11082,14 +11678,114 @@ function disableMember(id) {
 var _addMemberFeatureOverrides = { allow: [], deny: [] };
 var _addMemberLastSavedId = null;
 var editingMemberId = null;
+var _pendingNewMemberDraft = null;
+
+var _pendingEditMemberDraft = null;
+
+function discardPendingMemberDrafts() {
+    if (typeof discardPendingEnableMemberDraft === 'function') discardPendingEnableMemberDraft();
+    if (typeof discardPendingNewMemberDraft === 'function') discardPendingNewMemberDraft();
+    _pendingEditMemberDraft = null;
+    window._pendingEditMemberDraft = null;
+}
+
+function commitPendingEditMemberDraft() {
+    var draft = _pendingEditMemberDraft || window._pendingEditMemberDraft;
+    if (!draft || draft.memberId == null || !draft.member) return Promise.resolve(null);
+    return apiRequest(API_BASE + '/api/data/members/' + draft.memberId, {
+        method: 'PUT',
+        body: draft.member
+    }).then(function (data) {
+        _pendingEditMemberDraft = null;
+        window._pendingEditMemberDraft = null;
+        return data;
+    });
+}
+
+function commitAllPendingMemberDrafts(bioMeta) {
+    bioMeta = bioMeta || null;
+    var createDraft = (typeof _pendingNewMemberDraft !== 'undefined' && _pendingNewMemberDraft)
+        || (typeof window !== 'undefined' && window._pendingNewMemberDraft)
+        || null;
+    if (createDraft && bioMeta && bioMeta.templateId != null) {
+        createDraft.fingerprintTemplateId = bioMeta.templateId;
+        createDraft.biometricEnrollmentStatus = 'enrolled';
+        createDraft.biometricEnrolledAt = Math.floor(Date.now() / 1000);
+        createDraft.biometricEnabled = true;
+        _pendingNewMemberDraft = createDraft;
+        window._pendingNewMemberDraft = createDraft;
+    }
+    var editDraft = (typeof _pendingEditMemberDraft !== 'undefined' && _pendingEditMemberDraft)
+        || (typeof window !== 'undefined' && window._pendingEditMemberDraft)
+        || null;
+    if (editDraft && editDraft.member && bioMeta && bioMeta.templateId != null) {
+        // Preserve fingerprint linkage from the enroll that just succeeded.
+        editDraft.member.fingerprintTemplateId = bioMeta.templateId;
+        editDraft.member.biometricEnrollmentStatus = 'enrolled';
+        editDraft.member.biometricEnrolledAt = Math.floor(Date.now() / 1000);
+        editDraft.member.biometricEnabled = true;
+        _pendingEditMemberDraft = editDraft;
+        window._pendingEditMemberDraft = editDraft;
+    }
+    if (createDraft && typeof commitPendingNewMemberDraft === 'function') {
+        return commitPendingNewMemberDraft();
+    }
+    if (editDraft && typeof commitPendingEditMemberDraft === 'function') {
+        return commitPendingEditMemberDraft();
+    }
+    return Promise.resolve(null);
+}
+
+
+function discardPendingNewMemberDraft() {
+    if (typeof discardPendingEnableMemberDraft === 'function') discardPendingEnableMemberDraft();
+    _pendingNewMemberDraft = null;
+    window._pendingNewMemberDraft = null;
+    _pendingEditMemberDraft = null;
+    window._pendingEditMemberDraft = null;
+    _addMemberLastSavedId = null;
+}
+
+function commitPendingNewMemberDraft() {
+    var draft = _pendingNewMemberDraft || window._pendingNewMemberDraft;
+    if (!draft) return Promise.resolve(null);
+    return apiRequest(API_BASE + '/api/data/members', {
+        method: 'POST',
+        body: draft
+    }).then(function (data) {
+        if (!data || !data.id) {
+            throw new Error((data && data.error) || 'Failed to save member.');
+        }
+        _addMemberLastSavedId = data.id;
+        var savedMember = (data && data.member) ? data.member : {
+            id: data.id,
+            name: draft.name,
+            username: draft.username,
+            role: draft.role
+        };
+        discardPendingNewMemberDraft();
+        // Keep last saved id for biometric enroll association after commit.
+        _addMemberLastSavedId = data.id;
+        return { data: data, member: savedMember };
+    });
+}
 
 function _isProtectedFeatureKey(key) {
     return key === 'dashboard' || key === 'factory-settings' || key === 'factory-reset';
 }
 
 function _addMemberPermissionsPanelShouldShow() {
+    if (typeof editingMemberId !== 'undefined' && editingMemberId != null
+        && typeof _isEditingOwnMemberProfile === 'function'
+        && _isEditingOwnMemberProfile(editingMemberId)) {
+        return true;
+    }
+    if (typeof _editingMemberPermissionsActive !== 'undefined' && _editingMemberPermissionsActive) {
+        return true;
+    }
     return typeof sessionCanAssignFeatureOverrides === 'function' && sessionCanAssignFeatureOverrides();
 }
+
 
 function _refreshAddMemberPermissionsPanelVisibility() {
     var panel = document.getElementById('add-member-permissions-panel');
@@ -11097,13 +11793,19 @@ function _refreshAddMemberPermissionsPanelVisibility() {
     var show = _addMemberPermissionsPanelShouldShow();
     panel.classList.toggle('is-hidden', !show);
     panel.setAttribute('aria-hidden', show ? 'false' : 'true');
-    if (show) renderAddMemberPermissionCards();
+    if (show) {
+        var gsel = document.getElementById('add-member-user-group');
+        var lock = !!(gsel && gsel.value);
+        renderAddMemberPermissionCards({ locked: lock });
+    }
     if (show && typeof ensureAddMemberPageScroll === 'function') {
         setTimeout(ensureAddMemberPageScroll, 0);
     }
 }
 
-function renderAddMemberPermissionCards() {
+function renderAddMemberPermissionCards(opts) {
+    opts = opts || {};
+    var locked = !!opts.locked;
     var grid = document.getElementById('permission-cards-grid');
     if (!grid) return;
     grid.innerHTML = '';
@@ -11124,7 +11826,14 @@ function renderAddMemberPermissionCards() {
         card.innerHTML =
             '<div class="permission-card-title">' + feature.label + '</div>' +
             '<div class="permission-card-desc">' + (feature.description || '') + '</div>';
-        card.addEventListener('click', function () { togglePermissionCardAllow(key); });
+        if (locked) {
+            card.classList.add('is-locked');
+            card.style.pointerEvents = 'none';
+            card.style.opacity = selected ? '1' : '0.45';
+            card.setAttribute('title', selected ? 'Granted by profile power' : 'Not in selected profile power');
+        } else {
+            card.addEventListener('click', function () { togglePermissionCardAllow(key); });
+        }
         grid.appendChild(card);
     });
 }
@@ -11167,766 +11876,7 @@ function _clearAddMemberForm() {
     if (typeof selectRole === 'function') selectRole('User');
     _addMemberFeatureOverrides = { allow: [], deny: [] };
     _setAddMemberPageMode(false, false);
+    var gsel = document.getElementById('add-member-user-group');
+    if (gsel) gsel.value = '';
+    _addMemberFeatureOverrides = { allow: [], deny: [] };
 }
-
-function openAddMember() {
-    if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
-        var role = getCurrentRole();
-        var who = (typeof window !== 'undefined' && window.currentUser) ? window.currentUser : role;
-        if (!canPerformAction(who, 'user-add', 'create')) {
-            showAppModal('You do not have permission to add new members.', 'Permission');
-            return;
-        }
-    }
-    editingMemberId = null;
-    _clearAddMemberForm();
-    _refreshAddMemberPermissionsPanelVisibility();
-    goToPage('add-member');
-    setTimeout(function () {
-        if (typeof ensureAddMemberPageScroll === 'function') ensureAddMemberPageScroll();
-        var f = document.getElementById('add-fullname');
-        if (f) f.focus();
-    }, 60);
-}
-
-function cancelAddMemberEdit() {
-    var returnToManage = editingMemberId != null;
-    _clearAddMemberForm();
-    goToPage(returnToManage ? 'manage-members' : 'user-profile');
-}
-
-function _populateMemberBiometricSummary(member) {
-    if (!member) return;
-    var nameEl = document.getElementById('member-biometric-name');
-    var userEl = document.getElementById('member-biometric-username');
-    var roleEl = document.getElementById('member-biometric-role');
-    if (nameEl) nameEl.textContent = member.name || '--';
-    if (userEl) userEl.textContent = member.username || '--';
-    if (roleEl) {
-        var roleLabel = (typeof displayRoleLabel === 'function')
-            ? displayRoleLabel(member.role)
-            : (member.role || '--');
-        roleEl.textContent = roleLabel;
-    }
-}
-
-function skipMemberBiometricEnrollment() {
-    var returnPage = window._biometricEnrollReturnPage || 'user-profile';
-    _addMemberLastSavedId = null;
-    window._biometricEnrollReturnPage = null;
-    goToPage(returnPage);
-}
-
-function backToMemberAfterBiometric() {
-    var returnPage = window._biometricEnrollReturnPage || 'user-profile';
-    _addMemberLastSavedId = null;
-    window._biometricEnrollReturnPage = null;
-    goToPage(returnPage);
-}
-
-function initializeDatetime() {
-    var dateInput = document.getElementById('edit-date');
-    var timeInput = document.getElementById('edit-time');
-    if (!dateInput || !timeInput) return;
-    function applyToInputs(now) {
-        if (!dateInput.value) {
-            var day = String(now.getDate()).padStart(2, '0');
-            var month = String(now.getMonth() + 1).padStart(2, '0');
-            var year = now.getFullYear();
-            dateInput.value = day + '-' + month + '-' + year;
-        }
-        if (!timeInput.value) {
-            var hours = String(now.getHours()).padStart(2, '0');
-            var minutes = String(now.getMinutes()).padStart(2, '0');
-            timeInput.value = hours + ':' + minutes;
-        }
-    }
-    fetchDateTimeFromBackend().then(function (data) {
-        var now = null;
-        if (data && data.datetime) {
-            var wall = parseWallDatetimeIso(data.datetime);
-            if (wall) {
-                now = new Date(wall.y, wall.mo - 1, wall.d, wall.h, wall.mi, wall.sec);
-            }
-        }
-        if (!now || isNaN(now.getTime())) {
-            if (data && data.date && data.time) {
-                var parts = (data.date || '').split('-');
-                var tparts = (data.time || '').split(':');
-                if (parts.length >= 3 && tparts.length >= 2) {
-                    var d = parseInt(parts[0], 10);
-                    var m = parseInt(parts[1], 10) - 1;
-                    var y = parseInt(parts[2], 10);
-                    var h = parseInt(tparts[0], 10) || 0;
-                    var min = parseInt(tparts[1], 10) || 0;
-                    now = new Date(y, m, d, h, min, 0);
-                }
-            }
-        }
-        if (!now || isNaN(now.getTime())) now = new Date();
-        applyToInputs(now);
-    }).catch(function () {
-        applyToInputs(new Date());
-    });
-}
-
-function openDatePickerForEditDate() {
-    var textInput = document.getElementById('edit-date');
-    var hiddenInput = document.getElementById('edit-date-picker-hidden');
-    if (!textInput || !hiddenInput) return;
-    var val = (textInput.value || '').trim();
-    if (val) {
-        var parts = val.split('-');
-        if (parts.length === 3) {
-            var d = parseInt(parts[0], 10);
-            var m = parseInt(parts[1], 10);
-            var y = parseInt(parts[2], 10);
-            if (!isNaN(d) && !isNaN(m) && !isNaN(y) && d >= 1 && d <= 31 && m >= 1 && m <= 12 && y >= 2000 && y <= 2100) {
-                hiddenInput.value = y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
-            }
-        }
-    }
-    if (!hiddenInput.value) {
-        var now = new Date();
-        hiddenInput.value = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
-    }
-    function onDateChange() {
-        var v = hiddenInput.value;
-        if (!v) return;
-        var ymd = v.split('-');
-        if (ymd.length >= 3) {
-            textInput.value = String(parseInt(ymd[2], 10)).padStart(2, '0') + '-' + String(parseInt(ymd[1], 10)).padStart(2, '0') + '-' + ymd[0];
-        }
-        hiddenInput.removeEventListener('change', onDateChange);
-    }
-    hiddenInput.addEventListener('change', onDateChange);
-    hiddenInput.focus();
-    if (typeof hiddenInput.showPicker === 'function') {
-        try { hiddenInput.showPicker(); } catch (e) { hiddenInput.click(); }
-    } else {
-        hiddenInput.click();
-    }
-}
-
-function applyDateTime() {
-    var dateVal = (document.getElementById('edit-date').value || '').trim();
-    var timeVal = (document.getElementById('edit-time').value || '').trim();
-    if (!dateVal || !timeVal) {
-        showAppModal('Please enter both date and time.', 'Error');
-        return;
-    }
-    var dateParts = dateVal.split('-').map(Number);
-    if (dateParts.length !== 3) {
-        showAppModal('Enter date as DD-MM-YYYY.', 'Error');
-        return;
-    }
-    var day = dateParts[0];
-    var month = dateParts[1];
-    var year = dateParts[2];
-    var timeParts = timeVal.split(':');
-    var hours = parseInt(timeParts[0], 10);
-    var minutes = timeParts.length >= 2 ? parseInt(timeParts[1], 10) : 0;
-    if (isNaN(hours)) hours = 0;
-    if (isNaN(minutes)) minutes = 0;
-    hours = Math.max(0, Math.min(23, hours));
-    minutes = Math.max(0, Math.min(59, minutes));
-    var pad = function (n) { return String(n).padStart(2, '0'); };
-    var dtStr = year + '-' + pad(month) + '-' + pad(day) + 'T' + pad(hours) + ':' + pad(minutes) + ':00';
-    apiRequest((API_BASE || '') + '/api/set_datetime', {
-        method: 'POST',
-        body: { datetime: dtStr }
-    }).then(function (data) {
-        if (data && data.datetime) {
-            var parts = parseWallDatetimeIso(data.datetime);
-            if (parts) {
-                _wallClockAnchor = { parts: parts, at: Date.now() };
-                applyWallClockToTopBar(parts);
-            }
-        }
-        updateDateTime();
-        // Compare to WiFi/network clock (diagnostic only — does not change RTC).
-        fetchDateTimeFromBackendCompare().then(function (cmp) {
-            var msg = 'Date and time updated. Top bar and RTC now match what you set.';
-            if (cmp && cmp.networkOffsetSec != null && !isNaN(cmp.networkOffsetSec)) {
-                var off = parseInt(cmp.networkOffsetSec, 10);
-                if (Math.abs(off) > 5) {
-                    msg += ' WiFi/network clock differs by about ' + Math.abs(off) + 's'
-                        + (off > 0 ? ' (network ahead).' : ' (device ahead).')
-                        + ' Device keeps your set time (NTP stays off).';
-                } else {
-                    msg += ' Matches WiFi/network clock.';
-                }
-            }
-            showAppModal(msg, 'Success', function () {
-            goBack();
-            });
-        }).catch(function () {
-            showAppModal('Date and time updated. Top bar and RTC now match what you set.', 'Success', function () {
-                goBack();
-            });
-        });
-    }).catch(function (err) {
-        var msg = (err && err.message) ? err.message : 'Network error';
-        showAppModal('Failed to update date and time: ' + msg, 'Error');
-    });
-}
-
-function openDatePicker(inputId) {
-    var el = document.getElementById(inputId);
-    if (el) {
-        el.focus();
-        try { el.showPicker && el.showPicker(); } catch (e) {}
-    }
-}
-
-function updateLoginFactorySettingsDisplay(settings) {
-    var s = settings || {};
-    var model = s.modelNo && String(s.modelNo).trim() ? String(s.modelNo).trim() : '';
-    var serial = s.serialNo && String(s.serialNo).trim() ? String(s.serialNo).trim() : '';
-    var company = s.companyName && String(s.companyName).trim() ? String(s.companyName).trim() : '';
-
-    var modelEl = document.getElementById('login-footer-model-no');
-    var serialEl = document.getElementById('login-footer-serial-no');
-    var footerInfo = document.getElementById('login-footer-info');
-    if (modelEl) modelEl.textContent = model || '—';
-    if (serialEl) serialEl.textContent = serial || '—';
-
-    var show = !!(model || serial || company);
-    if (footerInfo) footerInfo.style.display = show ? 'block' : 'none';
-}
-
-function _escapeIpConfigureText(value) {
-    return String(value == null ? '' : value)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
-}
-
-function _renderIpConfigureList(payload) {
-    var listEl = document.getElementById('ip-configure-list');
-    if (!listEl) return;
-    if (!payload || payload.ok === false) {
-        var errMsg = (payload && (payload.error || payload.message)) ? (payload.error || payload.message) : 'Could not load network information.';
-        listEl.innerHTML = '<div class="ip-configure-error">' + _escapeIpConfigureText(errMsg) + '</div>';
-        return;
-    }
-    var wlan = payload.wlan != null && payload.wlan !== '' ? String(payload.wlan) : null;
-    var lan = payload.lan != null && payload.lan !== '' ? String(payload.lan) : null;
-    if (!wlan && !lan) {
-        listEl.innerHTML = '<div class="ip-configure-empty">No IP address found. Check that this device is connected to the LAN or WLAN.</div>';
-        return;
-    }
-    var rows = [
-        { label: 'WLAN', address: wlan || '—' },
-        { label: 'LAN', address: lan || '—' }
-    ];
-    var html = '';
-    rows.forEach(function (row) {
-        html += '<div class="ip-configure-row">' +
-            '<span class="ip-configure-iface">' + _escapeIpConfigureText(row.label) + '</span>' +
-            '<span class="ip-configure-address">' + _escapeIpConfigureText(row.address) + '</span>' +
-            '</div>';
-    });
-    listEl.innerHTML = html;
-}
-
-function refreshIpConfigureAddresses() {
-    var listEl = document.getElementById('ip-configure-list');
-    var refreshBtn = document.querySelector('.btn-refresh-ip-configure');
-    if (listEl) {
-        listEl.innerHTML = '<div class="ip-configure-loading">Loading addresses…</div>';
-    }
-    if (refreshBtn) refreshBtn.disabled = true;
-    var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
-    var headers = { 'Accept': 'application/json' };
-    if (typeof window !== 'undefined' && window.currentUser) {
-        if (window.currentUser.role) headers['X-User-Role'] = window.currentUser.role;
-        if (window.currentUser.name) headers['X-User-Name'] = window.currentUser.name;
-        if (window.currentUser.username) headers['X-User-Username'] = window.currentUser.username;
-    }
-    fetch(base + '/api/system/network-addresses', { method: 'GET', headers: headers })
-        .then(function (res) {
-            return res.text().then(function (text) {
-                var data = null;
-                if (text) {
-                    try {
-                        data = JSON.parse(text);
-                    } catch (parseErr) {
-                        data = {
-                            ok: false,
-                            error: res.ok
-                                ? 'Invalid response from server.'
-                                : ('Request failed (' + res.status + ').')
-                        };
-                    }
-                } else {
-                    data = { ok: false, error: 'Empty response from server.' };
-                }
-                if (!res.ok && data && !data.error) {
-                    data.ok = false;
-                    data.error = data.error || ('Request failed (' + res.status + ').');
-                }
-                return data;
-            });
-        })
-        .then(function (data) {
-            if (typeof data !== 'object' || data === null) {
-                _renderIpConfigureList({ ok: false, error: 'Invalid response from server.' });
-                return;
-            }
-            _renderIpConfigureList(data);
-        })
-        .catch(function () {
-            _renderIpConfigureList({ ok: false, error: 'Could not reach the device network service.' });
-        })
-        .finally(function () {
-            if (refreshBtn) refreshBtn.disabled = false;
-        });
-}
-
-function loadLoginFactorySettingsDisplay() {
-    apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
-        var settings = (result && result.settings) ? result.settings : (result || {});
-        updateLoginFactorySettingsDisplay(settings);
-    }).catch(function () {
-        try {
-            var stored = localStorage.getItem('factorySettings');
-            var settings = stored ? JSON.parse(stored) : {};
-            updateLoginFactorySettingsDisplay(settings);
-        } catch (e) {
-            updateLoginFactorySettingsDisplay({});
-        }
-    });
-}
-
-function initFactorySettings() {
-    var screen = document.getElementById('page-factory-settings');
-    if (!screen) return;
-    apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
-        var settings = (result && result.settings) ? result.settings : (result || {});
-        setFactorySettingsForm(settings);
-        applyFactoryAutoLogoutSetting(settings);
-        try { localStorage.setItem('factorySettings', JSON.stringify(settings)); } catch (e) {}
-    }).catch(function () {
-        var stored = null;
-        try { stored = localStorage.getItem('factorySettings'); } catch (e) {}
-        var settings = stored ? JSON.parse(stored) : {};
-        setFactorySettingsForm(settings);
-        applyFactoryAutoLogoutSetting(settings);
-    });
-}
-
-function setFactorySettingsForm(settings) {
-    var idMap = [
-        ['factory-company-name', 'companyName'],
-        ['factory-company-location', 'companyLocation'],
-        ['factory-serial-no', 'serialNo'],
-        ['factory-model-no', 'modelNo'],
-        ['factory-instrument-id', 'instrumentId'],
-        ['factory-installation-date', 'installationDate'],
-        ['factory-firmware', null],
-        ['factory-installed-by', 'installedBy'],
-        ['factory-max-recipes', 'maxRecipes'],
-        ['factory-max-users', 'maxUsers'],
-        ['factory-max-admins', 'maxAdmins'],
-        ['factory-max-qa', 'maxQa'],
-        ['factory-max-supervisors', 'maxSupervisors'],
-        ['factory-password-reset-days', 'passwordResetPeriodDays'],
-        ['factory-auto-logout-minutes', 'autoLogoutMinutes'],
-        ['factory-max-vacuum-mmhg', 'maxVacuumMmHg'],
-        ['factory-cal-target-vacuum', 'calibrationTargetVacuumMmHg'],
-        ['factory-cal-release-time', 'calibrationReleaseTimeSec']
-    ];
-    idMap.forEach(function (pair) {
-        var el = document.getElementById(pair[0]);
-        if (!el) return;
-        if (pair[1] === null) {
-            if (pair[0] === 'factory-firmware') el.value = 'RDA -LT v1.0.0';
-            return;
-        }
-        var val = settings[pair[1]];
-        if (pair[1] === 'maxRecipes') el.value = String(val || 150);
-        else if (pair[1] === 'maxUsers') el.value = String(val || 10);
-        else if (pair[1] === 'maxAdmins') el.value = String(val || 2);
-        else if (pair[1] === 'maxQa') el.value = String(val || 3);
-        else if (pair[1] === 'maxSupervisors') el.value = String(val || 3);
-        else if (pair[1] === 'passwordResetPeriodDays') el.value = String(val != null ? val : 30);
-        else if (pair[1] === 'autoLogoutMinutes') el.value = String(val != null ? val : 0);
-        else if (pair[1] === 'maxVacuumMmHg') el.value = String(val != null ? val : ABSOLUTE_MAX_VACUUM_MMHG);
-        else if (pair[1] === 'calibrationTargetVacuumMmHg') el.value = String(val != null ? val : 400);
-        else if (pair[1] === 'calibrationReleaseTimeSec') el.value = String(val != null ? val : 80);
-        else el.value = val || '';
-    });
-    var biometricEl = document.getElementById('factory-biometric-enabled');
-    var biometricEnabled = normalizeBiometricEnabled(settings.biometricEnabled);
-    if (biometricEl) biometricEl.value = biometricEnabled ? 'enabled' : 'disabled';
-    var vacuumPresets = Array.isArray(settings.recipeVacuumPresets) && settings.recipeVacuumPresets.length === 3
-        ? settings.recipeVacuumPresets
-        : [200, 400, 600];
-    var timePresetsSec = Array.isArray(settings.recipeTimePresetsSec) && settings.recipeTimePresetsSec.length === 3
-        ? settings.recipeTimePresetsSec
-        : [30, 60, 90];
-    for (var presetIndex = 0; presetIndex < 3; presetIndex++) {
-        var vacuumPresetEl = document.getElementById('factory-recipe-vacuum-preset-' + (presetIndex + 1));
-        if (vacuumPresetEl) vacuumPresetEl.value = String(parseInt(vacuumPresets[presetIndex], 10) || [200, 400, 600][presetIndex]);
-        var timePresetEl = document.getElementById('factory-recipe-time-preset-' + (presetIndex + 1));
-        if (timePresetEl) {
-            var presetSeconds = parseInt(timePresetsSec[presetIndex], 10) || [30, 60, 90][presetIndex];
-            timePresetEl.value = (typeof formatMmSs === 'function')
-                ? formatMmSs(presetSeconds)
-                : String(Math.floor(presetSeconds / 60)).padStart(2, '0') + ':' + String(presetSeconds % 60).padStart(2, '0');
-        }
-    }
-    applyBiometricSetting(biometricEnabled);
-    updateLoginFactorySettingsDisplay(settings);
-    if (typeof applyFactoryMaxVacuumToInputs === 'function') {
-        applyFactoryMaxVacuumToInputs(settings.maxVacuumMmHg);
-    }
-}
-
-function saveFactorySettings() {
-    if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
-        var role = getCurrentRole();
-        if (!canPerformAction(role, 'factory-settings', 'save')) {
-            showAppModal('You do not have permission to save factory settings.', 'Permission');
-            return;
-        }
-    }
-    var companyNameEl = document.getElementById('factory-company-name');
-    var companyLocationEl = document.getElementById('factory-company-location');
-    var serialNoEl = document.getElementById('factory-serial-no');
-    var modelNoEl = document.getElementById('factory-model-no');
-    var instrumentIdEl = document.getElementById('factory-instrument-id');
-    var installationDateEl = document.getElementById('factory-installation-date');
-    var installedByEl = document.getElementById('factory-installed-by');
-    var maxRecipesEl = document.getElementById('factory-max-recipes');
-    var maxUsersEl = document.getElementById('factory-max-users');
-    var maxAdminsEl = document.getElementById('factory-max-admins');
-    var maxQaEl = document.getElementById('factory-max-qa');
-    var maxSupervisorsEl = document.getElementById('factory-max-supervisors');
-    var passwordResetDaysEl = document.getElementById('factory-password-reset-days');
-    var autoLogoutEl = document.getElementById('factory-auto-logout-minutes');
-    var biometricEnabledEl = document.getElementById('factory-biometric-enabled');
-    var maxVacuumEl = document.getElementById('factory-max-vacuum-mmhg');
-    var calTargetEl = document.getElementById('factory-cal-target-vacuum');
-    var calReleaseEl = document.getElementById('factory-cal-release-time');
-
-    var companyName = companyNameEl && companyNameEl.value ? companyNameEl.value.trim() : '';
-    var companyLocation = companyLocationEl && companyLocationEl.value ? companyLocationEl.value.trim() : '';
-    if (!companyName || !companyLocation) {
-        showAppModal('Company Name and Company Location are required.', 'Factory Settings');
-        return;
-    }
-    var maxRecipes = Math.max(1, Math.min(999, parseInt(maxRecipesEl && maxRecipesEl.value ? maxRecipesEl.value : 150, 10)));
-    var maxUsers = Math.max(1, Math.min(999, parseInt(maxUsersEl && maxUsersEl.value ? maxUsersEl.value : 10, 10)));
-    var maxAdmins = Math.max(1, Math.min(99, parseInt(maxAdminsEl && maxAdminsEl.value ? maxAdminsEl.value : 2, 10)));
-    var maxQa = Math.max(1, Math.min(99, parseInt(maxQaEl && maxQaEl.value ? maxQaEl.value : 3, 10)));
-    var maxSupervisors = Math.max(1, Math.min(99, parseInt(maxSupervisorsEl && maxSupervisorsEl.value ? maxSupervisorsEl.value : 3, 10)));
-    var passwordResetPeriodDays = Math.max(1, Math.min(3650, parseInt(passwordResetDaysEl && passwordResetDaysEl.value ? passwordResetDaysEl.value : 30, 10)));
-    var autoLogoutMinutes = Math.max(0, Math.min(10080, parseInt(autoLogoutEl && autoLogoutEl.value !== '' ? autoLogoutEl.value : '0', 10)));
-    if (isNaN(autoLogoutMinutes)) autoLogoutMinutes = 0;
-    var maxVacuumRaw = parseInt(maxVacuumEl && maxVacuumEl.value ? maxVacuumEl.value : ABSOLUTE_MAX_VACUUM_MMHG, 10);
-    if (!isNaN(maxVacuumRaw) && maxVacuumRaw > ABSOLUTE_MAX_VACUUM_MMHG) {
-        showAppModal('Maximum vacuum cannot exceed ' + ABSOLUTE_MAX_VACUUM_MMHG + ' mmHg.', 'Factory Settings');
-        return;
-    }
-    var maxVacuumMmHg = Math.max(1, Math.min(ABSOLUTE_MAX_VACUUM_MMHG, isNaN(maxVacuumRaw) ? ABSOLUTE_MAX_VACUUM_MMHG : maxVacuumRaw));
-    var calTargetRaw = parseInt(calTargetEl && calTargetEl.value ? calTargetEl.value : 400, 10);
-    if (!Number.isInteger(calTargetRaw) || calTargetRaw < 1 || calTargetRaw > maxVacuumMmHg) {
-        showAppModal(
-            'Calibration target vacuum must be a whole number from 1 to ' + maxVacuumMmHg + ' mmHg.',
-            'Factory Settings'
-        );
-        return;
-    }
-    var calReleaseRaw = parseInt(calReleaseEl && calReleaseEl.value ? calReleaseEl.value : 80, 10);
-    if (!Number.isInteger(calReleaseRaw) || calReleaseRaw < 1 || calReleaseRaw > 5999) {
-        showAppModal('Calibration release time (RL_TM) must be a whole number from 1 to 5999 seconds.', 'Factory Settings');
-        return;
-    }
-    var recipeVacuumPresets = [];
-    var recipeTimePresetsSec = [];
-    for (var presetIndex = 1; presetIndex <= 3; presetIndex++) {
-        var vacuumPresetEl = document.getElementById('factory-recipe-vacuum-preset-' + presetIndex);
-        var vacuumPreset = Number(vacuumPresetEl && vacuumPresetEl.value ? vacuumPresetEl.value : '');
-        if (!Number.isInteger(vacuumPreset) || vacuumPreset < 1 || vacuumPreset > maxVacuumMmHg) {
-            showAppModal(
-                'Vacuum preset ' + presetIndex + ' must be a whole number from 1 to ' + maxVacuumMmHg + ' mmHg.',
-                'Factory Settings'
-            );
-            return;
-        }
-        recipeVacuumPresets.push(vacuumPreset);
-
-        var timePresetEl = document.getElementById('factory-recipe-time-preset-' + presetIndex);
-        var timePresetValue = timePresetEl && timePresetEl.value ? timePresetEl.value.trim() : '';
-        var timePresetSeconds = (typeof parseMmSs === 'function') ? parseMmSs(timePresetValue) : null;
-        if (!timePresetSeconds || timePresetSeconds > 5999) {
-            showAppModal(
-                'Time preset ' + presetIndex + ' must use mm:ss format and be between 00:01 and 99:59.',
-                'Factory Settings'
-            );
-            return;
-        }
-        recipeTimePresetsSec.push(timePresetSeconds);
-    }
-
-    var data = {
-        companyName: companyName,
-        companyLocation: companyLocation,
-        serialNo: serialNoEl && serialNoEl.value ? serialNoEl.value.trim() : '',
-        modelNo: modelNoEl && modelNoEl.value ? modelNoEl.value.trim() : '',
-        instrumentId: instrumentIdEl && instrumentIdEl.value ? instrumentIdEl.value.trim() : '',
-        installationDate: installationDateEl && installationDateEl.value ? installationDateEl.value : '',
-        firmware: 'RDA -LT v1.0.0',
-        installedBy: installedByEl && installedByEl.value ? installedByEl.value.trim() : '',
-        maxRecipes: maxRecipes,
-        maxUsers: maxUsers,
-        maxAdmins: maxAdmins,
-        maxQa: maxQa,
-        maxSupervisors: maxSupervisors,
-        passwordResetPeriodDays: passwordResetPeriodDays,
-        autoLogoutMinutes: autoLogoutMinutes,
-        maxVacuumMmHg: maxVacuumMmHg,
-        calibrationTargetVacuumMmHg: calTargetRaw,
-        calibrationReleaseTimeSec: calReleaseRaw,
-        recipeVacuumPresets: recipeVacuumPresets,
-        recipeTimePresetsSec: recipeTimePresetsSec,
-        biometricEnabled: normalizeBiometricEnabled(biometricEnabledEl ? biometricEnabledEl.value : true)
-    };
-    showConfirmModal('Save factory settings?', 'Factory Settings').then(function (ok) {
-        if (!ok) return;
-        apiRequest(API_BASE + '/api/data/factory-settings', { method: 'POST', body: data }).then(function () {
-            try { localStorage.setItem('factorySettings', JSON.stringify(data)); } catch (e) {}
-            applyBiometricSetting(data.biometricEnabled);
-            applyFactoryAutoLogoutSetting(data);
-            if (typeof applyFactoryMaxVacuumToInputs === 'function') applyFactoryMaxVacuumToInputs(data.maxVacuumMmHg);
-            if (typeof applyCreateRecipeFactoryPresets === 'function') applyCreateRecipeFactoryPresets(data);
-            updateLoginFactorySettingsDisplay(data);
-            showAppModal('Factory settings saved successfully.', 'Factory Settings');
-        }).catch(function (err) {
-            try { localStorage.setItem('factorySettings', JSON.stringify(data)); } catch (e) {}
-            applyBiometricSetting(data.biometricEnabled);
-            applyFactoryAutoLogoutSetting(data);
-            if (typeof applyFactoryMaxVacuumToInputs === 'function') applyFactoryMaxVacuumToInputs(data.maxVacuumMmHg);
-            if (typeof applyCreateRecipeFactoryPresets === 'function') applyCreateRecipeFactoryPresets(data);
-            updateLoginFactorySettingsDisplay(data);
-            showAppModal('Factory settings saved locally.', 'Factory Settings');
-        });
-    });
-}
-
-function clearClientStateAfterFactoryReset() {
-    window.currentUser = null;
-    if (typeof currentUser !== 'undefined') currentUser = null;
-    try {
-        localStorage.removeItem('currentUser');
-        localStorage.removeItem('disabledRecipes');
-    } catch (e) {}
-    validationCompletion = { distance: false, load: false };
-    validationSessionResults = { distance: null, load: null };
-    if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
-}
-
-function showFactoryResetConfirm() {
-    showConfirmModal(
-        'Are you sure you want to factory reset? This will permanently delete all reports, recipes, users, audit trails, and fingerprint enrollments. Factory settings (company/model/serial) are kept. This cannot be undone.',
-        'Factory Reset'
-    ).then(function (ok) {
-        if (!ok) return;
-        apiRequest((API_BASE || '') + '/api/data/factory-reset', { method: 'POST', body: {} })
-            .then(function (result) {
-                clearClientStateAfterFactoryReset();
-                var kept = (result && result.settings) ? result.settings : null;
-                if (kept && typeof kept === 'object') {
-                    try { localStorage.setItem('factorySettings', JSON.stringify(kept)); } catch (e) {}
-                    if (typeof updateLoginFactorySettingsDisplay === 'function') {
-                        updateLoginFactorySettingsDisplay(kept);
-                    }
-                }
-                showAppModal(
-                    'Factory reset completed. All reports, recipes, users, and audit trails have been erased. Company name, serial, and other factory details were kept.',
-                    'Factory Reset'
-                );
-                if (typeof showLoginScreen === 'function') showLoginScreen();
-            })
-            .catch(function (err) {
-                var msg = (err && err.message) ? err.message : 'Factory reset failed.';
-                showAppModal(msg, 'Factory Reset');
-            });
-    });
-}
-
-function loadBiometricSetting() {
-    apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
-        var settings = (result && result.settings) ? result.settings : (result || {});
-        applyBiometricSetting(settings.biometricEnabled);
-        applyFactoryAutoLogoutSetting(settings);
-    }).catch(function () {
-        try {
-            var stored = localStorage.getItem('factorySettings');
-            var settings = stored ? JSON.parse(stored) : {};
-            applyBiometricSetting(settings.biometricEnabled);
-            applyFactoryAutoLogoutSetting(settings);
-        } catch (e) {
-        applyBiometricSetting(true);
-        applyFactoryAutoLogoutSetting({});
-        }
-    });
-}
-
-// ----- On-Screen Keyboard: attach to text-like inputs on focus / click -----
-function attachKeyboardToInputs() {
-    if (typeof window.openOSKForInput !== 'function') return;
-    var selectors = [
-        'input[type="text"]',
-        'input[type="number"]',
-        'input[type="password"]',
-        'input[type="email"]',
-        'input[type="tel"]',
-        'input[type="search"]',
-        'input[type="url"]',
-        'textarea'
-    ].join(', ');
-    document.querySelectorAll(selectors).forEach(function (input) {
-        if (!input || input.closest('#keyboard-root')) return;
-        if (input.readOnly || input.disabled) return;
-        if (input.type === 'hidden' || input.type === 'checkbox' || input.type === 'radio' || input.type === 'file' || input.type === 'range' || input.type === 'color') return;
-
-        if (input._keyboardFocusHandler) {
-            input.removeEventListener('focus', input._keyboardFocusHandler);
-        }
-        input._keyboardFocusHandler = function () {
-            if (typeof window.openOSKForInput === 'function') {
-                window.openOSKForInput(input);
-            }
-        };
-        input.addEventListener('focus', input._keyboardFocusHandler);
-
-        if (input._keyboardClickHandler) {
-            input.removeEventListener('click', input._keyboardClickHandler);
-        }
-        input._keyboardClickHandler = function () {
-            if (typeof window.openOSKForInput === 'function') {
-                window.openOSKForInput(input);
-            }
-        };
-        input.addEventListener('click', input._keyboardClickHandler);
-    });
-}
-
-function refreshFactoryVacuumCapFromServer() {
-    if (typeof apiRequest !== 'function') {
-        if (typeof applyFactoryMaxVacuumToInputs === 'function') {
-            applyFactoryMaxVacuumToInputs(getFactoryMaxVacuumMmHg());
-        }
-        return;
-    }
-    apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
-        var settings = (result && result.settings) ? result.settings : (result || {});
-        var maxVac = parseInt(settings && settings.maxVacuumMmHg, 10);
-        if (isNaN(maxVac) || maxVac < 1) maxVac = ABSOLUTE_MAX_VACUUM_MMHG;
-        if (typeof applyFactoryMaxVacuumToInputs === 'function') applyFactoryMaxVacuumToInputs(maxVac);
-        try {
-            var stored = localStorage.getItem('factorySettings');
-            var merged = stored ? JSON.parse(stored) : {};
-            if (!merged || typeof merged !== 'object') merged = {};
-            Object.keys(settings || {}).forEach(function (k) {
-                merged[k] = settings[k];
-            });
-            merged.maxVacuumMmHg = maxVac;
-            localStorage.setItem('factorySettings', JSON.stringify(merged));
-        } catch (e) {}
-    }).catch(function () {
-        if (typeof applyFactoryMaxVacuumToInputs === 'function') {
-            applyFactoryMaxVacuumToInputs(getFactoryMaxVacuumMmHg());
-        }
-    });
-}
-
-document.addEventListener('DOMContentLoaded', function () {
-    bindTestRunDecimalInputs();
-    attachKeyboardToInputs();
-    loadBiometricSetting();
-    loadLoginFactorySettingsDisplay();
-    refreshFactoryVacuumCapFromServer();
-
-    document.querySelectorAll('.nav-item[data-page]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            var page = btn.getAttribute('data-page');
-            if (page) goToPage(page);
-        });
-    });
-
-    var originalGoToPage = goToPage;
-    goToPage = function (pageName) {
-        if (typeof markAutoLogoutActivity === 'function') markAutoLogoutActivity();
-        if (originalGoToPage) originalGoToPage(pageName);
-        setTimeout(function () {
-            attachKeyboardToInputs();
-        }, 200);
-    };
-
-    // Wire up Create Recipe Step 1 inputs to enable Continue button
-    var recipeNameEl = document.getElementById('recipe-product-name');
-    if (recipeNameEl) {
-        recipeNameEl.addEventListener('input', updateCreateRecipeContinueButton);
-    }
-    ['recipe-vacuum-mmhg', 'recipe-duration'].forEach(function (id) {
-        var el = document.getElementById(id);
-        if (el) el.addEventListener('input', updateCreateRecipeContinueButton);
-    });
-    var recipeBatchSizeEl = document.getElementById('recipe-batch-size');
-    if (recipeBatchSizeEl) {
-        recipeBatchSizeEl.addEventListener('input', updateCreateRecipeContinueButton);
-    }
-    document.querySelectorAll('input[name="recipe-product-type"]').forEach(function (el) {
-        el.addEventListener('change', function () {
-            if (typeof onRecipeProductTypeChange === 'function') onRecipeProductTypeChange();
-            else updateCreateRecipeContinueButton();
-        });
-    });
-    var otherTypeEl = document.getElementById('recipe-product-type-other');
-    if (otherTypeEl) {
-        otherTypeEl.addEventListener('input', updateCreateRecipeContinueButton);
-    }
-    document.querySelectorAll('input[name="create-speed"]').forEach(function (el) {
-        el.addEventListener('change', updateCreateRecipeContinueButton);
-    });
-    document.querySelectorAll('input[name="create-height"]').forEach(function (el) {
-        el.addEventListener('change', updateCreateRecipeContinueButton);
-    });
-    document.querySelectorAll('input[name="create-cylinder"]').forEach(function (el) {
-        el.addEventListener('change', updateCreateRecipeContinueButton);
-    });
-    document.querySelectorAll('input[name="create-usp-mode"]').forEach(function (el) {
-        el.addEventListener('change', function () {
-            if (typeof applyCreateUspModeToSpeedHeight === 'function') applyCreateUspModeToSpeedHeight();
-        });
-    });
-    document.querySelectorAll('input[name="quick-usp-mode"]').forEach(function (el) {
-        el.addEventListener('change', function () {
-            if (typeof applyQuickUspModeToSpeedHeight === 'function') applyQuickUspModeToSpeedHeight();
-        });
-    });
-    if (typeof applyCreateUspModeToSpeedHeight === 'function') applyCreateUspModeToSpeedHeight();
-    if (typeof applyQuickUspModeToSpeedHeight === 'function') applyQuickUspModeToSpeedHeight();
-
-    function resetKioskSessionAndShowLogin() {
-    try { localStorage.removeItem('currentUser'); } catch (e) {}
-    window.currentUser = null;
-    if (typeof currentUser !== 'undefined') currentUser = null;
-    if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
-    window._lastReportPreview = null;
-    var app = document.querySelector('.app-container');
-    if (app) app.classList.remove('report-approval-locked');
-    var resetUrl = (API_BASE || '') + '/api/data/auth/session-ui-reset';
-    fetch(resetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-        .catch(function () {})
-        .finally(function () {
-            showLoginScreen();
-        });
-}
-    resetKioskSessionAndShowLogin();
-});             
