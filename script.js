@@ -11881,6 +11881,30 @@ function _clearAddMemberForm() {
     _addMemberFeatureOverrides = { allow: [], deny: [] };
 }
 
+
+function loadBiometricSetting() {
+    if (typeof apiRequest !== 'function') {
+        if (typeof applyBiometricSetting === 'function') applyBiometricSetting(true);
+        if (typeof applyFactoryAutoLogoutSetting === 'function') applyFactoryAutoLogoutSetting({});
+        return;
+    }
+    apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
+        var settings = (result && result.settings) ? result.settings : (result || {});
+        if (typeof applyBiometricSetting === 'function') applyBiometricSetting(settings.biometricEnabled);
+        if (typeof applyFactoryAutoLogoutSetting === 'function') applyFactoryAutoLogoutSetting(settings);
+    }).catch(function () {
+        try {
+            var stored = localStorage.getItem('factorySettings');
+            var settings = stored ? JSON.parse(stored) : {};
+            if (typeof applyBiometricSetting === 'function') applyBiometricSetting(settings.biometricEnabled);
+            if (typeof applyFactoryAutoLogoutSetting === 'function') applyFactoryAutoLogoutSetting(settings);
+        } catch (e) {
+            if (typeof applyBiometricSetting === 'function') applyBiometricSetting(true);
+            if (typeof applyFactoryAutoLogoutSetting === 'function') applyFactoryAutoLogoutSetting({});
+        }
+    });
+}
+
 function attachKeyboardToInputs() {
     if (typeof window.openOSKForInput !== 'function') return;
     var selectors = [
@@ -11921,29 +11945,40 @@ function attachKeyboardToInputs() {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
-    bindTestRunDecimalInputs();
-    attachKeyboardToInputs();
-    loadBiometricSetting();
-    loadLoginFactorySettingsDisplay();
-    refreshFactoryVacuumCapFromServer();
-
+    // CRITICAL: bind sidebar nav before any other init. Optional loaders must never
+    // throw before Home/Validate/Reports/Settings get click handlers.
+    // Profile/Logout keep working via inline onclick; these buttons do not.
     document.querySelectorAll('.nav-item[data-page]').forEach(function (btn) {
+        if (btn._sidebarNavBound) return;
+        btn._sidebarNavBound = true;
         btn.addEventListener('click', function () {
             var page = btn.getAttribute('data-page');
-            if (page) goToPage(page);
+            if (page && typeof goToPage === 'function') goToPage(page);
         });
     });
 
-    var originalGoToPage = goToPage;
-    goToPage = function (pageName) {
-        if (typeof markAutoLogoutActivity === 'function') markAutoLogoutActivity();
-        if (originalGoToPage) originalGoToPage(pageName);
-        setTimeout(function () {
-            attachKeyboardToInputs();
-        }, 200);
-    };
+    try {
+        if (typeof bindTestRunDecimalInputs === 'function') bindTestRunDecimalInputs();
+        if (typeof attachKeyboardToInputs === 'function') attachKeyboardToInputs();
+        if (typeof loadBiometricSetting === 'function') loadBiometricSetting();
+        if (typeof loadLoginFactorySettingsDisplay === 'function') loadLoginFactorySettingsDisplay();
+        if (typeof refreshFactoryVacuumCapFromServer === 'function') refreshFactoryVacuumCapFromServer();
+    } catch (e) {
+        console.error('Kiosk shell init (partial):', e);
+    }
 
-    // Wire up Create Recipe Step 1 inputs to enable Continue button
+    if (!window._goToPageWrapped) {
+        window._goToPageWrapped = true;
+        var originalGoToPage = goToPage;
+        goToPage = function (pageName) {
+            if (typeof markAutoLogoutActivity === 'function') markAutoLogoutActivity();
+            if (originalGoToPage) originalGoToPage(pageName);
+            setTimeout(function () {
+                if (typeof attachKeyboardToInputs === 'function') attachKeyboardToInputs();
+            }, 200);
+        };
+    }
+
     var recipeNameEl = document.getElementById('recipe-product-name');
     if (recipeNameEl) {
         recipeNameEl.addEventListener('input', updateCreateRecipeContinueButton);
@@ -11959,49 +11994,27 @@ document.addEventListener('DOMContentLoaded', function () {
     document.querySelectorAll('input[name="recipe-product-type"]').forEach(function (el) {
         el.addEventListener('change', function () {
             if (typeof onRecipeProductTypeChange === 'function') onRecipeProductTypeChange();
-            else updateCreateRecipeContinueButton();
+            else if (typeof updateCreateRecipeContinueButton === 'function') updateCreateRecipeContinueButton();
         });
     });
     var otherTypeEl = document.getElementById('recipe-product-type-other');
-    if (otherTypeEl) {
+    if (otherTypeEl && typeof updateCreateRecipeContinueButton === 'function') {
         otherTypeEl.addEventListener('input', updateCreateRecipeContinueButton);
     }
-    document.querySelectorAll('input[name="create-speed"]').forEach(function (el) {
-        el.addEventListener('change', updateCreateRecipeContinueButton);
-    });
-    document.querySelectorAll('input[name="create-height"]').forEach(function (el) {
-        el.addEventListener('change', updateCreateRecipeContinueButton);
-    });
-    document.querySelectorAll('input[name="create-cylinder"]').forEach(function (el) {
-        el.addEventListener('change', updateCreateRecipeContinueButton);
-    });
-    document.querySelectorAll('input[name="create-usp-mode"]').forEach(function (el) {
-        el.addEventListener('change', function () {
-            if (typeof applyCreateUspModeToSpeedHeight === 'function') applyCreateUspModeToSpeedHeight();
-        });
-    });
-    document.querySelectorAll('input[name="quick-usp-mode"]').forEach(function (el) {
-        el.addEventListener('change', function () {
-            if (typeof applyQuickUspModeToSpeedHeight === 'function') applyQuickUspModeToSpeedHeight();
-        });
-    });
-    if (typeof applyCreateUspModeToSpeedHeight === 'function') applyCreateUspModeToSpeedHeight();
-    if (typeof applyQuickUspModeToSpeedHeight === 'function') applyQuickUspModeToSpeedHeight();
+    if (typeof updateCreateRecipeContinueButton === 'function') updateCreateRecipeContinueButton();
 
     function resetKioskSessionAndShowLogin() {
-    try { localStorage.removeItem('currentUser'); } catch (e) {}
-    window.currentUser = null;
-    if (typeof currentUser !== 'undefined') currentUser = null;
-    if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
-    window._lastReportPreview = null;
-    var app = document.querySelector('.app-container');
-    if (app) app.classList.remove('report-approval-locked');
-    var resetUrl = (API_BASE || '') + '/api/data/auth/session-ui-reset';
-    fetch(resetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-        .catch(function () {})
-        .finally(function () {
-            showLoginScreen();
-        });
-}
+        try { localStorage.removeItem('currentUser'); } catch (e) {}
+        window.currentUser = null;
+        if (typeof currentUser !== 'undefined') currentUser = null;
+        if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+        window._lastReportPreview = null;
+        var resetUrl = (API_BASE || '') + '/api/data/auth/session-ui-reset';
+        fetch(resetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+            .catch(function () {})
+            .finally(function () {
+                if (typeof showLoginScreen === 'function') showLoginScreen();
+            });
+    }
     resetKioskSessionAndShowLogin();
 });
