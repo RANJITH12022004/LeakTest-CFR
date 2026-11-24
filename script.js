@@ -11880,3 +11880,128 @@ function _clearAddMemberForm() {
     if (gsel) gsel.value = '';
     _addMemberFeatureOverrides = { allow: [], deny: [] };
 }
+
+function attachKeyboardToInputs() {
+    if (typeof window.openOSKForInput !== 'function') return;
+    var selectors = [
+        'input[type="text"]',
+        'input[type="number"]',
+        'input[type="password"]',
+        'input[type="email"]',
+        'input[type="tel"]',
+        'input[type="search"]',
+        'input[type="url"]',
+        'textarea'
+    ].join(', ');
+    document.querySelectorAll(selectors).forEach(function (input) {
+        if (!input || input.closest('#keyboard-root')) return;
+        if (input.readOnly || input.disabled) return;
+        if (input.type === 'hidden' || input.type === 'checkbox' || input.type === 'radio' || input.type === 'file' || input.type === 'range' || input.type === 'color') return;
+
+        if (input._keyboardFocusHandler) {
+            input.removeEventListener('focus', input._keyboardFocusHandler);
+        }
+        input._keyboardFocusHandler = function () {
+            if (typeof window.openOSKForInput === 'function') {
+                window.openOSKForInput(input);
+            }
+        };
+        input.addEventListener('focus', input._keyboardFocusHandler);
+
+        if (input._keyboardClickHandler) {
+            input.removeEventListener('click', input._keyboardClickHandler);
+        }
+        input._keyboardClickHandler = function () {
+            if (typeof window.openOSKForInput === 'function') {
+                window.openOSKForInput(input);
+            }
+        };
+        input.addEventListener('click', input._keyboardClickHandler);
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    bindTestRunDecimalInputs();
+    attachKeyboardToInputs();
+    loadBiometricSetting();
+    loadLoginFactorySettingsDisplay();
+    refreshFactoryVacuumCapFromServer();
+
+    document.querySelectorAll('.nav-item[data-page]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var page = btn.getAttribute('data-page');
+            if (page) goToPage(page);
+        });
+    });
+
+    var originalGoToPage = goToPage;
+    goToPage = function (pageName) {
+        if (typeof markAutoLogoutActivity === 'function') markAutoLogoutActivity();
+        if (originalGoToPage) originalGoToPage(pageName);
+        setTimeout(function () {
+            attachKeyboardToInputs();
+        }, 200);
+    };
+
+    // Wire up Create Recipe Step 1 inputs to enable Continue button
+    var recipeNameEl = document.getElementById('recipe-product-name');
+    if (recipeNameEl) {
+        recipeNameEl.addEventListener('input', updateCreateRecipeContinueButton);
+    }
+    ['recipe-vacuum-mmhg', 'recipe-duration'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('input', updateCreateRecipeContinueButton);
+    });
+    var recipeBatchSizeEl = document.getElementById('recipe-batch-size');
+    if (recipeBatchSizeEl) {
+        recipeBatchSizeEl.addEventListener('input', updateCreateRecipeContinueButton);
+    }
+    document.querySelectorAll('input[name="recipe-product-type"]').forEach(function (el) {
+        el.addEventListener('change', function () {
+            if (typeof onRecipeProductTypeChange === 'function') onRecipeProductTypeChange();
+            else updateCreateRecipeContinueButton();
+        });
+    });
+    var otherTypeEl = document.getElementById('recipe-product-type-other');
+    if (otherTypeEl) {
+        otherTypeEl.addEventListener('input', updateCreateRecipeContinueButton);
+    }
+    document.querySelectorAll('input[name="create-speed"]').forEach(function (el) {
+        el.addEventListener('change', updateCreateRecipeContinueButton);
+    });
+    document.querySelectorAll('input[name="create-height"]').forEach(function (el) {
+        el.addEventListener('change', updateCreateRecipeContinueButton);
+    });
+    document.querySelectorAll('input[name="create-cylinder"]').forEach(function (el) {
+        el.addEventListener('change', updateCreateRecipeContinueButton);
+    });
+    document.querySelectorAll('input[name="create-usp-mode"]').forEach(function (el) {
+        el.addEventListener('change', function () {
+            if (typeof applyCreateUspModeToSpeedHeight === 'function') applyCreateUspModeToSpeedHeight();
+        });
+    });
+    document.querySelectorAll('input[name="quick-usp-mode"]').forEach(function (el) {
+        el.addEventListener('change', function () {
+            if (typeof applyQuickUspModeToSpeedHeight === 'function') applyQuickUspModeToSpeedHeight();
+        });
+    });
+    if (typeof applyCreateUspModeToSpeedHeight === 'function') applyCreateUspModeToSpeedHeight();
+    if (typeof applyQuickUspModeToSpeedHeight === 'function') applyQuickUspModeToSpeedHeight();
+
+    function resetKioskSessionAndShowLogin() {
+    try { localStorage.removeItem('currentUser'); } catch (e) {}
+    window.currentUser = null;
+    if (typeof currentUser !== 'undefined') currentUser = null;
+    if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+    window._lastReportPreview = null;
+    var app = document.querySelector('.app-container');
+    if (app) app.classList.remove('report-approval-locked');
+    var resetUrl = (API_BASE || '') + '/api/data/auth/session-ui-reset';
+    fetch(resetUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .catch(function () {})
+        .finally(function () {
+            showLoginScreen();
+        });
+}
+    resetKioskSessionAndShowLogin();
+});

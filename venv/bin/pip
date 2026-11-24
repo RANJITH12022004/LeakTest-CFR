@@ -1,4 +1,4 @@
-#!/opt/kiosk/venv/bin/python3
+#!/opt/leaktest/venv/bin/python3
 # -*- coding: utf-8 -*-
 import re
 import sys
