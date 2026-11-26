@@ -583,6 +583,9 @@ def get_report_preview_data(report: Dict[str, Any]) -> Dict[str, Any]:
         "reportApprovalStatus": report.get("reportApprovalStatus"),
         "approvalPassFail": report.get("approvalPassFail"),
         "approvalRemarks": report.get("approvalRemarks"),
+        "approvalDeferred": report.get("approvalDeferred"),
+        "approvalDeferredAt": report.get("approvalDeferredAt"),
+        "approvalDeferredBy": report.get("approvalDeferredBy"),
         "operatedByUsername": report.get("operatedByUsername")
         or (td.get("operatedByUsername") if isinstance(td, dict) else None)
         or (td.get("employeeId") if isinstance(td, dict) else None),

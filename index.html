@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en-GB">
 
 <head>
     <meta charset="UTF-8">
@@ -7,7 +7,7 @@
     <meta name="viewport"
         content="width=1024, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Leak Test Apparatus</title>
-    <link rel="stylesheet" href="styles.css?v=51">
+    <link rel="stylesheet" href="styles.css?v=54">
 </head>
 
 <body>
@@ -88,8 +88,7 @@
                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
             </div>
             <div class="role-modal-buttons">
-                <button type="button" class="btn-role-select btn-role-user" id="cal-gauge-cancel-btn">Cancel</button>
-                <button type="button" class="btn-role-select btn-validation-pass" id="cal-gauge-submit-btn">Calibrate</button>
+                <button type="button" class="btn-role-select btn-validation-pass" id="cal-gauge-submit-btn">Complete</button>
             </div>
         </div>
     </div>
@@ -812,6 +811,16 @@
                                 </svg>
                                 <span>Calibration Reports</span>
                             </button>
+                            <button class="reports-filter-btn reports-filter-unapproved"
+                                onclick="filterReports('unapproved')">
+                                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                                </svg>
+                                <span>Unapproved Reports</span>
+                            </button>
                             <button class="reports-filter-btn reports-filter-audit" onclick="filterReports('audit')">
                                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                     stroke-width="2">
@@ -918,7 +927,7 @@
                 <!-- Report Preview Page -->
                 <div class="page" id="page-report-preview">
                     <div class="reports-container" style="overflow-y: auto;">
-                        <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> A user with Test report approval permission must complete Pass/Fail and sign below. You cannot leave, log out, or open Profile until the report is approved.</div>
+                        <div id="report-pending-lock-banner" class="report-pending-lock-banner" style="display: none;"><strong>Awaiting approval.</strong> Complete Pass/Fail and sign on this screen to approve the report, or tap <strong>Approve later</strong> to leave it under Unapproved Reports for later approval. Print and USB export stay disabled until approval.</div>
                         <div class="report-preview-container report-print-template" id="report-content">
                             <pre id="report-a4-text-preview" class="report-a4-text-preview" style="display: none;" aria-label="Thermal report preview"></pre>
                             <div id="report-legacy-preview">
@@ -1120,6 +1129,7 @@
                                 <button class="btn-export" onclick="handleExportReport()">Export to USB</button>
                                 <button class="btn-action" id="btn-preview-recipe" onclick="handlePreviewRecipe()">Preview Recipe</button>
                             </div>
+                            <button type="button" id="btn-report-approve-later" class="btn report-approve-later-btn" style="display: none;" onclick="deferReportApprovalLater()">Approve later</button>
                             <button class="btn-close" onclick="closeReportPreviewToReports()">Close</button>
                         </div>
                     </div>
@@ -1168,7 +1178,6 @@
                                     <td id="recipe-print-next-validation"></td>
                                 </tr>
                             </table>
-                            <h3 id="recipe-print-product">Product Name</h3>
                             <table class="recipe-print-tolerance-table">
                                 <thead>
                                     <tr>
@@ -1485,7 +1494,7 @@
                         <div class="cal-screen-stack">
                             <header class="cal-screen-header">
                                 <h2 class="section-title">Vacuum Pressure Calibration</h2>
-                                <p class="section-subtitle">Connect and switch ON the external gauge, then start. After target hold, enter actual pressure and Calibrate.</p>
+                                <p class="section-subtitle">Connect and switch ON the external gauge, then start. After a 60s hold at target, enter the external gauge reading and tap Complete.</p>
                             </header>
                             <div class="val-run-panel-inner val-run-vacuum-metrics cal-metrics-row">
                                 <div class="val-run-metric-card">
@@ -1521,7 +1530,7 @@
                                 <div class="validation-card-label">Status</div>
                                 <span class="validation-card-value" id="cal-run-status">Ready to start</span>
                             </div>
-                            <div id="cal-gauge-entry-panel" class="validation-card calibration-gauge-entry-card cal-gauge-slot">
+                            <div id="cal-gauge-entry-panel" class="validation-card calibration-gauge-entry-card cal-gauge-slot" hidden>
                                 <div class="validation-card-label">Actual pressure (external gauge)</div>
                                 <div class="calibration-gauge-entry-row">
                                     <input type="text" id="cal-page-gauge-input" class="input-field cal-actual-vacuum-input"
@@ -1533,7 +1542,7 @@
                             </div>
                             <div class="quick-test-actions calibration-actions">
                                 <button type="button" class="btn btn-primary" id="btn-calibration-start" onclick="confirmVacuumCalibration()">Start Calibration</button>
-                                <button type="button" class="btn btn-secondary" id="btn-calibration-back" onclick="abortVacuumCalibration()">Back</button>
+                                <button type="button" class="btn btn-secondary" id="btn-calibration-back" onclick="goToPage('validate')">Back</button>
                             </div>
                         </div>
                     </div>
@@ -1912,10 +1921,8 @@
 
                         <div class="form-group full-width" id="add-member-user-group-wrap" style="margin: 12px 0;">
                             <label for="add-member-user-group">Profile Power <span style="color:#b91c1c;">*</span></label>
-                            <select id="add-member-user-group" class="input-field" required
-                                onchange="if (typeof applySelectedUserGroupToMemberForm === 'function') applySelectedUserGroupToMemberForm()">
-                                <option value="">— Select profile power —</option>
-                            </select>
+                            <input type="hidden" id="add-member-user-group" value="" required>
+                            <div id="add-member-user-group-buttons" class="profile-power-btn-grid" role="group" aria-label="Profile powers"></div>
                         </div>
 
                         <div id="add-member-permissions-panel" class="permissions-panel is-hidden">
@@ -1963,7 +1970,7 @@
                         <div class="members-header-row" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
                             <h2 class="section-title" style="margin:0;">Disabled Profile Powers</h2>
                             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                                <button class="btn member-status-btn" onclick="goToPage('manage-user-groups'); if (typeof displayUserGroupsList === 'function') displayUserGroupsList({ status: 'active' });">Active Groups</button>
+                                <button class="btn member-status-btn member-status-btn-active" onclick="goToPage('manage-user-groups'); if (typeof displayUserGroupsList === 'function') displayUserGroupsList({ status: 'active' });">Active Groups</button>
                                 <button class="btn member-status-btn member-status-btn-disabled member-status-btn-current" disabled>Disabled Groups</button>
                             </div>
                         </div>
@@ -2191,9 +2198,17 @@
                                     onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
                             </div>
                             <div class="form-group">
-                                <label>Installation Date</label>
-                                <div class="date-input-wrapper">
-                                    <input type="date" id="factory-installation-date" class="input-field">
+                                <label for="factory-installation-date-display">Installation Date <span class="field-format-hint">(dd/mm/yyyy)</span></label>
+                                <div class="date-input-wrapper factory-installation-date-wrap">
+                                    <input type="text" id="factory-installation-date-display" class="input-field"
+                                        placeholder="dd/mm/yyyy" inputmode="numeric" autocomplete="off"
+                                        aria-describedby="factory-installation-date-hint"
+                                        oninput="if(typeof onFactoryInstallationDateDisplayInput==='function') onFactoryInstallationDateDisplayInput()"
+                                        onblur="if(typeof syncFactoryInstallationDateFromDisplay==='function') syncFactoryInstallationDateFromDisplay()"
+                                        onfocus="if(typeof openOSKForInput === 'function') openOSKForInput(this)">
+                                    <input type="date" id="factory-installation-date" class="factory-installation-date-iso"
+                                        tabindex="-1" aria-hidden="true"
+                                        onchange="if(typeof syncFactoryInstallationDateFromIso==='function') syncFactoryInstallationDateFromIso()">
                                     <button type="button" class="date-picker-icon-btn" onclick="openDatePicker('factory-installation-date')" title="Open calendar" aria-label="Open calendar">
                                         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                             <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
@@ -2203,6 +2218,7 @@
                                         </svg>
                                     </button>
                                 </div>
+                                <p id="factory-installation-date-hint" class="section-subtitle" style="margin-top:6px;font-size:13px;">Stored as ISO (yyyy-mm-dd); shown as dd/mm/yyyy.</p>
                             </div>
                             <div class="form-group">
                                 <label>Firmware Version</label>
@@ -2267,9 +2283,9 @@
     <div id="keyboard-root"></div>
     <script src="keyboard.js?v=3"></script>
     <script src="rbac.js?v=10"></script>
-    <script src="script.js?v=115"></script>
+    <script src="script.js?v=124"></script>
     <script src="leaktest_patch.js?v=2"></script>
-    <script src="validation_vd.js?v=29"></script>
+    <script src="validation_vd.js?v=30"></script>
 </body>
 
 </html>

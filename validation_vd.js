@@ -764,9 +764,63 @@
         });
     }
 
-    /** Hold after TARGET_REACHED before enabling external gauge entry (ms). */
-    var CALIB_HOLD_AFTER_TARGET_MS = 1200;
+    /** Hold after TARGET_REACHED before external-gauge popup (fixed 60 s). */
+    var CALIB_HOLD_AFTER_TARGET_MS = 60000;
     window._vacuumCalRun = null;
+
+    function _setCalPrimaryControlRunning(running) {
+        var startBtn = document.getElementById('btn-calibration-start');
+        var backBtn = document.getElementById('btn-calibration-back');
+        if (startBtn) {
+            startBtn.disabled = false;
+            if (running) {
+                startBtn.textContent = 'Abort';
+                startBtn.classList.add('is-abort-state', 'btn-cal-abort');
+                startBtn.classList.remove('btn-primary');
+                startBtn.onclick = function () {
+                    if (typeof abortVacuumCalibration === 'function') abortVacuumCalibration();
+                };
+            } else {
+                startBtn.textContent = 'Start Calibration';
+                startBtn.classList.remove('is-abort-state', 'btn-cal-abort');
+                startBtn.classList.add('btn-primary');
+                startBtn.onclick = function () {
+                    if (typeof confirmVacuumCalibration === 'function') confirmVacuumCalibration();
+                };
+            }
+        }
+        if (backBtn) {
+            backBtn.style.display = running ? 'none' : '';
+            backBtn.textContent = 'Back';
+            if (!running) {
+                backBtn.onclick = function () { goToPage('validate'); };
+            }
+        }
+    }
+
+    function _openCalibrationGaugeModal(run) {
+        var modal = document.getElementById('calibration-gauge-modal');
+        var input = document.getElementById('cal-gauge-pressure-input');
+        var submitBtn = document.getElementById('cal-gauge-submit-btn');
+        if (!modal || !input || !submitBtn) {
+            _setCalRunEl('cal-run-status', 'Enter actual pressure (modal unavailable)');
+            return;
+        }
+        input.value = '';
+        input.disabled = false;
+        submitBtn.textContent = 'Complete';
+        submitBtn.onclick = function () {
+            var val = _readAndValidateCalGaugeInput(input);
+            if (val == null) return;
+            _closeCalibrationGaugeModal();
+            finishVacuumCalibration(val);
+        };
+        modal.style.display = 'flex';
+        setTimeout(function () {
+            try { input.focus(); } catch (e) { /* ignore */ }
+        }, 80);
+        _setCalRunEl('cal-run-status', 'Enter external gauge reading, then Complete');
+    }
 
     function getFactoryCalibrationSettings() {
         var target = 400;
@@ -811,31 +865,28 @@
     }
 
     function _setCalGaugeEntryEnabled(enabled) {
+        // Inline gauge entry is unused; external-gauge modal is the only Complete path.
         var panel = document.getElementById('cal-gauge-entry-panel');
         var input = document.getElementById('cal-page-gauge-input');
         var applyBtn = document.getElementById('btn-calibration-apply');
         if (panel) {
-            panel.classList.toggle('is-enabled', !!enabled);
-            panel.removeAttribute('hidden');
+            panel.classList.remove('is-enabled');
+            panel.setAttribute('hidden', '');
+            panel.style.display = 'none';
         }
         if (input) {
-            input.disabled = !enabled;
-            if (!enabled) input.value = '';
+            input.disabled = true;
+            input.value = '';
         }
-        if (applyBtn) applyBtn.disabled = !enabled;
-        if (enabled && input) {
-            setTimeout(function () {
-                try { input.focus(); } catch (e) { /* ignore */ }
-            }, 80);
-        }
+        if (applyBtn) applyBtn.disabled = true;
     }
 
     function _closeCalibrationGaugeModal() {
         var modal = document.getElementById('calibration-gauge-modal');
         if (modal) modal.style.display = 'none';
         var submitBtn = document.getElementById('cal-gauge-submit-btn');
-        var cancelBtn = document.getElementById('cal-gauge-cancel-btn');
         if (submitBtn) submitBtn.onclick = null;
+        var cancelBtn = document.getElementById('cal-gauge-cancel-btn');
         if (cancelBtn) cancelBtn.onclick = null;
     }
 
@@ -847,13 +898,14 @@
     function _startCalibrationHoldAfterTarget(run) {
         if (!run || run.phase !== 'evacuating') return;
         if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
-        // Holding starts at TARGET_REACHED; after 1.20 s enable actual-pressure entry.
+        // Holding starts at TARGET_REACHED; after fixed 60 s open external-gauge popup.
         run.phase = 'holding';
         _clearVacuumCalTimers();
         run.holdSec = 0;
         run.holdStartedAtMs = Date.now();
         _setCalGaugeEntryEnabled(false);
-        _setCalRunEl('cal-run-status', 'Target reached — holding…');
+        _setCalPrimaryControlRunning(true);
+        _setCalRunEl('cal-run-status', 'Target reached — holding 60 s…');
         _setCalRunEl('cal-hold-elapsed', '00:00');
         var holdMs = parseInt(run.holdAfterTargetMs, 10);
         if (isNaN(holdMs) || holdMs < 1) holdMs = CALIB_HOLD_AFTER_TARGET_MS;
@@ -861,7 +913,7 @@
             if (!window._vacuumCalRun || window._vacuumCalRun !== run) return;
             if (run.phase !== 'holding') return;
             var elapsedMs = Date.now() - (run.holdStartedAtMs || Date.now());
-            run.holdSec = Math.floor(elapsedMs / 1000);
+            run.holdSec = Math.min(60, Math.floor(elapsedMs / 1000));
             _setCalRunEl(
                 'cal-hold-elapsed',
                 (typeof formatMmSs === 'function') ? formatMmSs(run.holdSec) : String(run.holdSec)
@@ -875,9 +927,11 @@
             }
             if (!window._vacuumCalRun || window._vacuumCalRun !== run) return;
             if (run.phase !== 'holding') return;
+            run.holdSec = 60;
+            _setCalRunEl('cal-hold-elapsed', (typeof formatMmSs === 'function') ? formatMmSs(60) : '60');
             run.phase = 'prompt';
-            _setCalRunEl('cal-run-status', 'Enter actual pressure, then Calibrate');
-            _setCalGaugeEntryEnabled(true);
+            _setCalPrimaryControlRunning(true);
+            _openCalibrationGaugeModal(run);
         }, holdMs);
     }
 
@@ -1023,13 +1077,10 @@
 
     function abortVacuumCalibration() {
         var run = window._vacuumCalRun;
-        var startBtn = document.getElementById('btn-calibration-start');
-        var backBtn = document.getElementById('btn-calibration-back');
         if (!_isVacuumCalRunActive(run)) {
             _stopVacuumCalibrationHardware();
             window._vacuumCalRun = null;
-            if (startBtn) startBtn.disabled = false;
-            if (backBtn) backBtn.textContent = 'Back';
+            _setCalPrimaryControlRunning(false);
             goToPage('validate');
             return Promise.resolve();
         }
@@ -1038,6 +1089,7 @@
         }
         run._abortSaveInFlight = true;
         var phaseAtAbort = run.phase;
+        _closeCalibrationGaugeModal();
         _setCalRunEl('cal-run-status', 'Aborting…');
         return _stopVacuumCalibrationHardware().then(function () {
             if (typeof logAuditEvent === 'function') {
@@ -1061,8 +1113,7 @@
                 remarks: 'Calibration aborted by user'
             });
             window._vacuumCalRun = null;
-            if (startBtn) startBtn.disabled = false;
-            if (backBtn) backBtn.textContent = 'Back';
+            _setCalPrimaryControlRunning(false);
             return saveCalibrationReport(payload);
         });
     }
@@ -1140,11 +1191,11 @@
         var run = window._vacuumCalRun;
         if (!run) return;
         var setVac = run.targetVacuumMmHg;
-        var startBtn = document.getElementById('btn-calibration-start');
         var applyBtn = document.getElementById('btn-calibration-apply');
-        var backBtn = document.getElementById('btn-calibration-back');
         run.phase = 'applying';
+        _closeCalibrationGaugeModal();
         _setCalGaugeEntryEnabled(false);
+        _setCalPrimaryControlRunning(true);
         if (applyBtn) applyBtn.disabled = true;
         _setCalRunEl('cal-run-status', 'Sending CALIBVALUE ' + actualPressure + '…');
         apiRequest(API_BASE + '/api/hardware/calibration/apply', {
@@ -1203,9 +1254,9 @@
             .catch(function (err) {
                 run.phase = 'idle';
                 _clearVacuumCalTimers();
+                _closeCalibrationGaugeModal();
                 _setCalGaugeEntryEnabled(false);
-                if (startBtn) startBtn.disabled = false;
-                if (backBtn) backBtn.textContent = 'Back';
+                _setCalPrimaryControlRunning(false);
                 _setCalRunEl('cal-run-status', 'Calibration failed');
                 showAppModal('Failed to apply calibration: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
                 if (!run._stopSent) {
@@ -1219,12 +1270,10 @@
             return;
         }
         var settings = getFactoryCalibrationSettings();
-        var startBtn = document.getElementById('btn-calibration-start');
-        var backBtn = document.getElementById('btn-calibration-back');
         window._vacuumCalRun = {
             targetVacuumMmHg: settings.targetVacuumMmHg,
             releaseTimeSec: settings.releaseTimeSec,
-            holdAfterTargetMs: settings.holdAfterTargetMs,
+            holdAfterTargetMs: CALIB_HOLD_AFTER_TARGET_MS,
             liveVacuumMmHg: null,
             holdSec: 0,
             phase: 'starting'
@@ -1235,8 +1284,7 @@
         _setCalRunEl('cal-hold-elapsed', '00:00');
         _setCalRunEl('cal-run-status', 'Starting calibration…');
         _setCalGaugeEntryEnabled(false);
-        if (startBtn) startBtn.disabled = true;
-        if (backBtn) backBtn.textContent = 'Abort';
+        _setCalPrimaryControlRunning(true);
         _clearVacuumCalTimers();
         _closeVacuumCalEs();
         apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
@@ -1246,7 +1294,7 @@
             if (window._vacuumCalRun) {
                 window._vacuumCalRun.targetVacuumMmHg = settings.targetVacuumMmHg;
                 window._vacuumCalRun.releaseTimeSec = settings.releaseTimeSec;
-                window._vacuumCalRun.holdAfterTargetMs = settings.holdAfterTargetMs;
+                window._vacuumCalRun.holdAfterTargetMs = CALIB_HOLD_AFTER_TARGET_MS;
                 _setCalRunEl('cal-set-vacuum', String(settings.targetVacuumMmHg));
                 _setCalRunEl('cal-release-time', String(settings.releaseTimeSec));
             }
@@ -1286,8 +1334,6 @@
                             return !!(r && r.phase === 'evacuating');
                         },
                         onFail: function () {
-                            var startBtnFail = document.getElementById('btn-calibration-start');
-                            var backBtnFail = document.getElementById('btn-calibration-back');
                             if (window._calibrationLeakAbortInFlight) {
                                 Promise.resolve(_stopVacuumCalibrationHardware()).catch(function () {});
                                 return;
@@ -1300,8 +1346,8 @@
                                 window._vacuumCalRun.phase = 'idle';
                             }
                             _stopCalPressurePoll();
-                            if (startBtnFail) startBtnFail.disabled = false;
-                            if (backBtnFail) backBtnFail.textContent = 'Back';
+                            _closeCalibrationGaugeModal();
+                            _setCalPrimaryControlRunning(false);
                             _setCalRunEl('cal-run-status', 'Pressure not building');
                             try {
                                 if (typeof auditCalibrationAbortedLeaksFound === 'function') {
@@ -1370,9 +1416,8 @@
             if (typeof apiRequest === 'function') {
                 apiRequest(API_BASE + '/api/hardware/calibration/stop', { method: 'POST' }).catch(function () {});
             }
-            if (startBtn) startBtn.disabled = false;
-            if (backBtn) backBtn.textContent = 'Back';
             if (window._vacuumCalRun) window._vacuumCalRun.phase = 'idle';
+            _setCalPrimaryControlRunning(false);
             _setCalRunEl('cal-run-status', 'Start failed');
             showAppModal('Failed to start calibration: ' + (err && err.message ? err.message : 'Unknown error'), 'Calibration');
         });
@@ -1380,8 +1425,6 @@
 
     function initVacuumCalibrationPage() {
         var settings = getFactoryCalibrationSettings();
-        var startBtn = document.getElementById('btn-calibration-start');
-        var backBtn = document.getElementById('btn-calibration-back');
         window._vacuumCalRun = null;
         _clearVacuumCalTimers();
         _closeVacuumCalEs();
@@ -1392,8 +1435,7 @@
         _setCalRunEl('cal-release-time', String(settings.releaseTimeSec));
         _setCalRunEl('cal-hold-elapsed', '00:00');
         _setCalRunEl('cal-run-status', 'Ready to start');
-        if (startBtn) startBtn.disabled = false;
-        if (backBtn) backBtn.textContent = 'Back';
+        _setCalPrimaryControlRunning(false);
     }
 
     window.confirmVacuumCalibration = function () {

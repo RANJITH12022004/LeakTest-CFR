@@ -1,3 +1,4 @@
+/* _retryExportAfterVerifyFailedMarker */
 // Leak Test - navigation + API
 document.addEventListener('wheel', function (e) { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
 document.addEventListener('keydown', function (e) {
@@ -64,8 +65,19 @@ var _mandatoryPasswordResetPending = false;
 /** Display label: Supervisor role shown as Reviewer (stored value unchanged). */
 function displayRoleLabel(role) {
     var r = String(role || '').trim();
-    if (String(r).toLowerCase() === 'supervisor') return 'Reviewer';
-    return r || '--';
+    if (!r) return '--';
+    var key = r.toLowerCase();
+    if (key === 'supervisor' || key === 'reviewer') return 'Reviewer';
+    if (key === 'admin') return 'Admin';
+    if (key === 'qa') return 'QA';
+    if (key === 'factory') return 'Factory';
+    if (key === 'user') return 'User';
+    if (key === 'operator') return 'Operator';
+    // Normalize ALL-CAPS custom profile-power names (e.g. ADMIN → Admin, REV → Rev)
+    if (r === r.toUpperCase() && /[A-Z]/.test(r) && r.length > 1) {
+        return r.charAt(0).toUpperCase() + r.slice(1).toLowerCase();
+    }
+    return r;
 }
 
 /** Approved-by line may contain "(supervisor)" from stored reports — show as Reviewer. */
@@ -1111,13 +1123,98 @@ function isCurrentUserReportOperator(preview) {
     return verifierIsReportOperator(preview, cur);
 }
 
-function isReportPreviewLockedForCurrentUser(preview) {
+var REPORT_APPROVAL_DEFER_SS_KEY = 'kioskReportApprovalDeferredIds';
+
+function loadDeferredReportApprovalIds() {
+    try {
+        var raw = sessionStorage.getItem(REPORT_APPROVAL_DEFER_SS_KEY);
+        if (!raw) return [];
+        var arr = JSON.parse(raw);
+        if (!Array.isArray(arr)) return [];
+        return arr.map(function (id) { return String(id); });
+    } catch (e) {
+        return [];
+    }
+}
+
+function saveDeferredReportApprovalIds(ids) {
+    try {
+        sessionStorage.setItem(REPORT_APPROVAL_DEFER_SS_KEY, JSON.stringify(ids || []));
+    } catch (e) { /* ignore */ }
+}
+
+function isReportApprovalDeferred(reportId, preview) {
+    var p = preview || window._lastReportPreview || {};
+    if (p && (p.approvalDeferred === true || p.approvalDeferred === 1 || String(p.approvalDeferred || '').toLowerCase() === 'true')) {
+        return true;
+    }
+    if (reportId == null) return false;
+    return loadDeferredReportApprovalIds().indexOf(String(reportId)) >= 0;
+}
+
+function markReportApprovalDeferred(reportId) {
+    if (reportId == null) return;
+    var sid = String(reportId);
+    var ids = loadDeferredReportApprovalIds();
+    if (ids.indexOf(sid) < 0) ids.push(sid);
+    saveDeferredReportApprovalIds(ids);
+}
+
+function clearReportApprovalDeferred(reportId) {
+    if (reportId == null) return;
+    var sid = String(reportId);
+    saveDeferredReportApprovalIds(loadDeferredReportApprovalIds().filter(function (id) {
+        return id !== sid;
+    }));
+}
+
+function clearAllDeferredReportApprovals() {
+    try {
+        sessionStorage.removeItem(REPORT_APPROVAL_DEFER_SS_KEY);
+    } catch (e) { /* ignore */ }
+}
+
+function hasActiveReportApprovalGate() {
+    return !!(window._reportApprovalGate && window._reportApprovalGate.reportId != null);
+}
+
+function isReportPreviewNavigationLocked(preview) {
+    // Hard lock only while a post-test approval gate is active (setGate after save).
+    // Opening a pending report from Unapproved Reports must not trap the next user.
     if (typeof isFactorySessionUser === 'function' && isFactorySessionUser()) return false;
+    if (!hasActiveReportApprovalGate()) return false;
     var p = preview || window._lastReportPreview || {};
     var reportTypeNorm = String(p.type || 'test').trim().toLowerCase();
     if (reportTypeNorm !== 'test' && reportTypeNorm !== 'validation' && reportTypeNorm !== 'calibration') return false;
     if (!isReportPendingApproval(p)) return false;
-    return isCurrentUserReportOperator(p);
+    var rid = currentReportId != null ? currentReportId : (p.id != null ? p.id : null);
+    var gateId = window._reportApprovalGate && window._reportApprovalGate.reportId;
+    if (rid != null && gateId != null && Number(rid) !== Number(gateId)) return false;
+    if (isReportApprovalDeferred(rid, p)) return false;
+    return true;
+}
+
+/** @deprecated Use isReportPreviewNavigationLocked for navigation; kept for compatibility. */
+function isReportPreviewLockedForCurrentUser(preview) {
+    return isReportPreviewNavigationLocked(preview);
+}
+
+function guardReportPreviewNavigation(targetPage) {
+    if (!isReportPreviewNavigationLocked(window._lastReportPreview)) return false;
+    if (targetPage === 'report-preview') return false;
+    showAppModal(
+        'This report is awaiting approval. Complete Pass/Fail and sign on this screen, or tap Approve later to leave it in Unapproved Reports for later approval.',
+        'Report'
+    );
+    var active = document.querySelector('.page.active');
+    if (!active || active.id !== 'page-report-preview') {
+        var rid = currentReportId || (window._reportApprovalGate && window._reportApprovalGate.reportId);
+        if (rid && typeof openReportPreview === 'function') openReportPreview(rid);
+    } else {
+        if (typeof scrollReportApprovePanelIntoView === 'function') scrollReportApprovePanelIntoView();
+        if (typeof scrollReportPendingBannerIntoView === 'function') scrollReportPendingBannerIntoView();
+    }
+    return true;
 }
 
 function setReportApprovalGate(reportId, operatedByUsername) {
@@ -1141,7 +1238,12 @@ function setReportApprovalGateFromPreview(preview, reportId) {
         clearReportApprovalGate();
         return;
     }
-    if (isReportPreviewLockedForCurrentUser(preview)) {
+    if (isReportApprovalDeferred(reportId, preview)) {
+        clearReportApprovalGate();
+        return;
+    }
+    var reportTypeNorm = String((preview || {}).type || 'test').trim().toLowerCase();
+    if (reportTypeNorm === 'test' || reportTypeNorm === 'validation' || reportTypeNorm === 'calibration') {
         setReportApprovalGate(reportId, getReportOperatedByUsername(preview));
     } else {
         clearReportApprovalGate();
@@ -1157,11 +1259,11 @@ function stopReportApprovalPoll() {
 
 function startReportApprovalPollIfLocked() {
     stopReportApprovalPoll();
-    if (!isReportPreviewLockedForCurrentUser(window._lastReportPreview)) return;
+    if (!isReportPreviewNavigationLocked(window._lastReportPreview)) return;
     var rid = currentReportId;
     if (rid == null) return;
     _reportApprovalPollTimerId = setInterval(function () {
-        if (!isReportPreviewLockedForCurrentUser(window._lastReportPreview)) {
+        if (!isReportPreviewNavigationLocked(window._lastReportPreview)) {
             stopReportApprovalPoll();
             return;
         }
@@ -1171,6 +1273,7 @@ function startReportApprovalPollIfLocked() {
             if (st === 'approved') {
                 populateReportPreview(data.preview);
                 clearReportApprovalGate();
+                clearReportApprovalDeferred(rid);
                 applyReportPreviewLockUi(data.preview);
                 _saveReportPdfSilent(rid);
                 showAppModal('Report has been approved. You may now print or leave this screen.', 'Report');
@@ -1279,7 +1382,7 @@ function updateReportApprovePanelForPreview(preview) {
     var bannerEl = document.getElementById('report-pending-lock-banner');
     if (bannerEl) {
         bannerEl.innerHTML = '<strong>Awaiting approval.</strong> A user with ' + permPhrase +
-            ' permission must complete Pass/Fail and sign below. You cannot leave, log out, or open Profile until the report is approved.';
+            ' permission must complete Pass/Fail and sign below, or tap <strong>Approve later</strong> to leave it under Unapproved Reports. Print and USB export stay disabled until approval.';
     }
     apprPanel.style.display = pending ? 'block' : 'none';
     if (!pending) clearReportApproveVerifyError();
@@ -1311,28 +1414,87 @@ function scrollReportPendingBannerIntoView() {
     }
 }
 
+function deferReportApprovalLater() {
+    var preview = window._lastReportPreview || {};
+    var rid = currentReportId != null ? currentReportId : preview.id;
+    if (rid == null || !isReportPendingApproval(preview)) return;
+    if (!isReportPreviewNavigationLocked(preview) && !hasActiveReportApprovalGate()) return;
+    markReportApprovalDeferred(rid);
+    clearReportApprovalGate();
+    stopReportApprovalPoll();
+    if (typeof logAuditEvent === 'function') {
+        logAuditEvent(
+            'Report approval deferred',
+            'User chose Approve later | report id ' + rid,
+            { entityType: 'report', entityId: rid }
+        );
+    }
+    preview.approvalDeferred = true;
+    window._lastReportPreview = preview;
+    applyReportPreviewLockUi(preview);
+    if (typeof clearTestRunCheckpoint === 'function') clearTestRunCheckpoint();
+    apiRequest(API_BASE + '/api/data/reports/' + rid + '/defer-approval', { method: 'POST', body: {} })
+        .then(function (data) {
+            if (data && data.preview) {
+                window._lastReportPreview = data.preview;
+            } else if (data && data.report) {
+                preview.approvalDeferred = true;
+                window._lastReportPreview = preview;
+            }
+        })
+        .catch(function () { /* local defer still applied */ });
+    currentReportFilter = 'unapproved';
+    if (typeof _auditActivePage !== 'undefined') _auditActivePage = 'reports';
+    _suppressTestRunNavGuardOnce = true;
+    goToPage('reports');
+}
+
 function applyReportPreviewLockUi(preview) {
     preview = preview || window._lastReportPreview;
-    var locked = isReportPreviewLockedForCurrentUser(preview);
+    var locked = isReportPreviewNavigationLocked(preview);
     var pending = isReportPendingApproval(preview);
     var app = document.querySelector('.app-container');
     if (app) app.classList.toggle('report-approval-locked', !!locked);
     var banner = document.getElementById('report-pending-lock-banner');
     if (banner) banner.style.display = locked ? 'block' : 'none';
+    var deferBtn = document.getElementById('btn-report-approve-later');
+    if (deferBtn) {
+        deferBtn.style.display = locked ? '' : 'none';
+        deferBtn.style.pointerEvents = locked ? 'auto' : '';
+        deferBtn.style.cursor = locked ? 'pointer' : '';
+    }
     var closeBtn = document.querySelector('#report-preview-actions .btn-close');
     if (closeBtn) closeBtn.style.display = locked ? 'none' : '';
     var backBtn = document.getElementById('header-back-btn');
     if (backBtn) backBtn.style.visibility = locked ? 'hidden' : '';
+    var logoEl = document.getElementById('header-logo');
+    if (logoEl) {
+        logoEl.style.pointerEvents = locked ? 'none' : '';
+        logoEl.style.opacity = '';
+    }
     document.querySelectorAll('.nav-item[data-page]').forEach(function (btn) {
         btn.style.pointerEvents = locked ? 'none' : '';
-        btn.style.opacity = locked ? '0.45' : '';
+        btn.style.opacity = '';
+        if (locked) btn.setAttribute('aria-disabled', 'true');
+        else btn.removeAttribute('aria-disabled');
     });
     var profileEl = document.querySelector('.sidebar .user-profile');
     var logoutBtn = document.querySelector('.sidebar .logout-btn');
     [profileEl, logoutBtn].forEach(function (el) {
         if (!el) return;
         el.style.pointerEvents = locked ? 'none' : '';
-        el.style.opacity = locked ? '0.45' : '';
+        el.style.opacity = '';
+        if (locked) el.setAttribute('aria-disabled', 'true');
+        else el.removeAttribute('aria-disabled');
+    });
+    document.querySelectorAll('.test-card').forEach(function (el) {
+        el.style.pointerEvents = locked ? 'none' : '';
+        el.style.opacity = '';
+    });
+    document.querySelectorAll('#page-report-preview .btn-close, #page-report-preview .btn-secondary').forEach(function (el) {
+        if (el && el.id === 'btn-report-approve-later') return;
+        el.style.pointerEvents = locked ? 'none' : '';
+        el.style.opacity = '';
         if (locked) el.setAttribute('aria-disabled', 'true');
         else el.removeAttribute('aria-disabled');
     });
@@ -1361,17 +1523,8 @@ function stampOperatorOnTestReportPayload(payload) {
 }
 
 function abortPendingReportOnLogout() {
-    var gate = window._reportApprovalGate;
-    if (!gate || gate.reportId == null) return Promise.resolve();
-    if (typeof isFactorySessionUser === 'function' && isFactorySessionUser()) {
-        clearReportApprovalGate();
-        return Promise.resolve();
-    }
-    return apiRequest(API_BASE + '/api/data/reports/' + gate.reportId + '/abort', { method: 'POST' }).then(function () {
-        clearReportApprovalGate();
-    }).catch(function () {
-        clearReportApprovalGate();
-    });
+    // Match RSS: pending / Approve-later reports stay in Unapproved; logout is blocked while gate is active.
+    return Promise.resolve();
 }
 
 function reportActionsBlockedForPreview(preview) {
@@ -2121,15 +2274,9 @@ function goToPage(pageName) {
         return;
     }
     _suppressValidationNavGuardOnce = false;
-    if (pageName !== 'report-preview' && pageName !== 'recipe-print-preview' &&
-        typeof isReportPreviewLockedForCurrentUser === 'function' &&
-        isReportPreviewLockedForCurrentUser(window._lastReportPreview)) {
-        showAppModal('This report is awaiting approval. You must stay on the report screen until a reviewer approves it.', 'Report');
-        var active = document.querySelector('.page.active');
-        if (!active || active.id !== 'page-report-preview') {
-            var rid = currentReportId || (window._reportApprovalGate && window._reportApprovalGate.reportId);
-            if (rid) openReportPreview(rid);
-        }
+    if (pageName !== 'report-preview' &&
+        typeof guardReportPreviewNavigation === 'function' &&
+        guardReportPreviewNavigation(pageName)) {
         return;
     }
     if (window._mandatoryPasswordResetPending && pageName !== 'password-expired-reset') {
@@ -2347,9 +2494,8 @@ function goBack() {
     } else if (pageId === 'page-create-recipe-step1') {
         goToPage('manage-recipes');
     } else if (pageId === 'page-report-preview') {
-        if (typeof isReportPreviewLockedForCurrentUser === 'function' &&
-            isReportPreviewLockedForCurrentUser(window._lastReportPreview)) {
-            showAppModal('This report must be approved before you can leave. Ask a reviewer to verify approval on this screen.', 'Report');
+        if (typeof guardReportPreviewNavigation === 'function' &&
+            guardReportPreviewNavigation('reports')) {
             return;
         }
         goToPage('reports');
@@ -2755,8 +2901,9 @@ function logout() {
         (testRunButtonState === 'abort') ||
         (validationRunState === 'running') ||
         (validationRunBackendPending === true);
-    var pendingGate = window._reportApprovalGate && window._reportApprovalGate.reportId != null &&
-        !(typeof isFactorySessionUser === 'function' && isFactorySessionUser());
+    var pendingGate = typeof hasActiveReportApprovalGate === 'function'
+        ? hasActiveReportApprovalGate()
+        : !!(window._reportApprovalGate && window._reportApprovalGate.reportId != null);
 
     var doLogout = function () {
         abortPendingReportOnLogout().then(function () {
@@ -2770,6 +2917,7 @@ function logout() {
             if (typeof currentUser !== 'undefined') currentUser = null;
             currentReportFilter = null;
             clearReportApprovalGate();
+            if (typeof clearAllDeferredReportApprovals === 'function') clearAllDeferredReportApprovals();
             showLoginScreen();
         });
     };
@@ -2786,7 +2934,7 @@ function logout() {
     }
 
     if (pendingGate) {
-        showAppModal('You cannot log out until this report has been approved by a reviewer.', 'Report');
+        showAppModal('You cannot log out until this report has been approved on the preview screen, or tap Approve later.', 'Report');
         var rid = currentReportId || (window._reportApprovalGate && window._reportApprovalGate.reportId);
         if (rid && typeof openReportPreview === 'function') openReportPreview(rid);
         return;
@@ -2989,14 +3137,16 @@ function performAutoLogoutDueToInactivity() {
         markAutoLogoutActivity();
         return;
     }
-    var pendingGate = window._reportApprovalGate && window._reportApprovalGate.reportId != null &&
-        !(typeof isFactorySessionUser === 'function' && isFactorySessionUser());
+    var pendingGate = typeof hasActiveReportApprovalGate === 'function'
+        ? hasActiveReportApprovalGate()
+        : !!(window._reportApprovalGate && window._reportApprovalGate.reportId != null);
     var finish = function () {
         apiRequest(API_BASE + '/api/data/auth/logout', { method: 'POST', body: { reason: 'inactivity' } }).catch(function () {});
         window.currentUser = null;
         try { localStorage.removeItem('currentUser'); } catch (e) {}
         if (typeof currentUser !== 'undefined') currentUser = null;
         clearReportApprovalGate();
+        if (typeof clearAllDeferredReportApprovals === 'function') clearAllDeferredReportApprovals();
         showLoginScreen();
         setTimeout(function () {
             showAppModal('You were logged out due to inactivity.', 'Session');
@@ -4104,16 +4254,73 @@ function showReportExportRetentionModal(reportsScheduled) {
     });
 }
 
-function _confirmReportExportAfterUsb(evt, titleText) {
+function _clientAuditExportOutcome(action, detail, outcome) {
+    try {
+        if (typeof logAuditEvent === 'function') {
+            logAuditEvent(action, detail, {
+                eventType: 'compliance',
+                entityType: 'export',
+                outcome: outcome || 'failed'
+            });
+        }
+    } catch (e) { /* keep USB flow alive */ }
+}
+
+function _confirmReportExportAfterUsb(evt, titleText, retryReportIds) {
     var exportId = evt && evt.export_id ? evt.export_id : '';
+    var retryIds = Array.isArray(retryReportIds) ? retryReportIds.slice() : (window._pendingExportRetryIds || null);
+    var allowAutoRetry = window._reportExportAutoRetryAllowed !== false;
     showReportExportVerifyModal().then(function (verified) {
         if (!verified) {
-            showAppModal(
-                'Export not verified. Check the USB pendrive and use Export Reports again when ready.\n\nNo data will be erased until you confirm a successful export.',
-                titleText
-            );
+            var failBody = { export_id: exportId, verified: false };
+            showLoadingOverlay(titleText || 'Export Reports', 'Recording failed export...', { cancellable: false });
+            apiRequest(API_BASE + '/api/reports/export/confirm', {
+                method: 'POST',
+                body: failBody
+            }).then(function (failRes) {
+                if (!failRes || failRes.success !== true) {
+                    _clientAuditExportOutcome(
+                        'Reports export failed',
+                        'Operator reported USB unsuccessful',
+                        'failed'
+                    );
+                }
+                return failRes;
+            }).catch(function () {
+                _clientAuditExportOutcome(
+                    'Reports export failed',
+                    'Operator reported USB unsuccessful',
+                    'failed'
+                );
+                return null;
+            }).then(function () {
+                hideLoadingOverlay();
+                if (allowAutoRetry && retryIds && retryIds.length) {
+                    window._reportExportAutoRetryAllowed = false;
+                    window._pendingExportRetryIds = null;
+                    showAppModal(
+                        'Export failed. Exporting again...',
+                        titleText || 'Export Reports',
+                        function () {
+                            if (typeof _exportReportsWithFlow === 'function') {
+                                _exportReportsWithFlow(retryIds, {
+                                    title: titleText || 'Export Reports',
+                                    _isVerifyRetry: true
+                                });
+                            }
+                        }
+                    );
+                } else {
+                    window._reportExportAutoRetryAllowed = true;
+                    showAppModal(
+                        'Export failed. Check the USB pendrive and use Export Reports again when ready.\n\nNo data will be erased until you confirm a successful export.',
+                        titleText || 'Export Reports'
+                    );
+                }
+            });
             return;
         }
+        window._reportExportAutoRetryAllowed = true;
         if (!exportId) {
             showAppModal('Could not confirm export (missing session). Please export again.', titleText);
             return;
@@ -4125,11 +4332,17 @@ function _confirmReportExportAfterUsb(evt, titleText) {
         }).then(function (confirmRes) {
             hideLoadingOverlay();
             if (confirmRes && confirmRes.success && confirmRes.scheduled) {
-                showReportExportRetentionModal(confirmRes.reports_scheduled).then(function () {
-                    if (typeof loadReports === 'function') {
-                        loadReports(typeof currentReportFilter !== 'undefined' ? currentReportFilter : null);
+                showAppModal(
+                    'Report export successful.',
+                    titleText,
+                    function () {
+                        showReportExportRetentionModal(confirmRes.reports_scheduled).then(function () {
+                            if (typeof loadReports === 'function') {
+                                loadReports(typeof currentReportFilter !== 'undefined' ? currentReportFilter : null);
+                            }
+                        });
                     }
-                });
+                );
             } else {
                 showAppModal(
                     _friendlyExportError((confirmRes && confirmRes.error) || 'Could not schedule retention'),
@@ -4160,6 +4373,10 @@ function _ensureExportApprovalToken() {
 
 function _exportReportsWithFlow(reportIds, opts) {
     var ids = (reportIds || []).map(function (x) { return parseInt(x, 10); }).filter(function (x) { return !isNaN(x) && x > 0; });
+    if (!(opts && opts._isVerifyRetry)) {
+        window._reportExportAutoRetryAllowed = true;
+    }
+    window._pendingExportRetryIds = ids.slice();
     if (!ids.length) {
         showAppModal('No reports selected to export.', 'Export');
         return Promise.resolve(null);
@@ -4313,7 +4530,7 @@ function _handleExportEvent(evt, titleText) {
         setTimeout(function () {
             hideLoadingOverlay();
             if (evt.ok && evt.export_id) {
-                _confirmReportExportAfterUsb(evt, titleText);
+                _confirmReportExportAfterUsb(evt, titleText, window._pendingExportRetryIds || null);
             } else if (evt.ok) {
                 showAppModal(_summariseExportResult(evt), titleText);
             } else {
@@ -5289,7 +5506,9 @@ function loadReports(filterType) {
 
     if (bar) bar.style.display = 'none';
     if (theadRow) theadRow.innerHTML = '<th>SL No</th><th>Report Name</th><th>Creation Time</th><th>Action</th>';
-    var filter = (filterType === 'test' || filterType === 'validation' || filterType === 'calibration') ? filterType : 'all';
+    var filter = (filterType === 'test' || filterType === 'validation' || filterType === 'calibration' || filterType === 'unapproved')
+        ? filterType
+        : 'all';
     apiRequest(API_BASE + '/api/data/reports?filter=' + encodeURIComponent(filter)).then(function (data) {
         var list = (data && data.reports) ? data.reports : [];
         if (!list.length) {
@@ -5320,6 +5539,9 @@ function loadReports(filterType) {
                     if (r.setVacuumMmHg != null) name += ' - ' + r.setVacuumMmHg + ' mmHg';
                 }
                 if (!name) name = (r.recipe && r.recipe.productName) || 'Report ' + (r.id || (i + 1));
+                if (filterType === 'unapproved') {
+                    name = name + ' (awaiting approval)';
+                }
                 var created = r.createdAt || r.created || '';
                 if (created && typeof formatReportDate === 'function') {
                     created = formatReportDate(created);
@@ -5399,9 +5621,11 @@ function refreshReportsActionButtons() {
     var testBtn = document.querySelector('.reports-filter-test');
     var valBtn = document.querySelector('.reports-filter-validation');
     var calBtn = document.querySelector('.reports-filter-calibration');
+    var unapprBtn = document.querySelector('.reports-filter-unapproved');
     if (testBtn) testBtn.style.display = canReports ? '' : 'none';
     if (valBtn) valBtn.style.display = canReports ? '' : 'none';
     if (calBtn) calBtn.style.display = canReports ? '' : 'none';
+    if (unapprBtn) unapprBtn.style.display = canReports ? '' : 'none';
     var recipeBtn = document.querySelector('.reports-filter-recipes');
     if (recipeBtn) recipeBtn.style.display = canRecipes ? '' : 'none';
     var exportAuditCard = document.getElementById('export-audit-trails-card');
@@ -5453,7 +5677,10 @@ function applyAuditFiltersAndRefresh() {
     loadReports('audit');
 }
 
-function exportAuditTrails() {
+function exportAuditTrails(opts) {
+    if (!(opts && opts._isVerifyRetry)) {
+        window._auditExportAutoRetryAllowed = true;
+    }
     if (typeof canViewAuditLog === 'function' && !canViewAuditLog()) {
         showAppModal("You Don't Have Access to Audit Trail", 'Audit');
         return;
@@ -5536,14 +5763,53 @@ function exportAuditTrails() {
                             setTimeout(function () {
                                 hideLoadingOverlay();
                                 var exportId = res.export_id || '';
+                                var allowAuditRetry = window._auditExportAutoRetryAllowed !== false;
                                 showAuditExportVerifyModal().then(function (verified) {
                                     if (!verified) {
-                                        showAppModal(
-                                            'Export not verified. Check the USB pendrive and use Export Audit Trails again when ready.\n\nNo data will be erased until you confirm a successful export.',
-                                            titleText
-                                        );
+                                        showLoadingOverlay(titleText, 'Recording failed export...', { cancellable: false });
+                                        apiRequest(API_BASE + '/api/audit/export/confirm', {
+                                            method: 'POST',
+                                            body: { export_id: exportId, verified: false }
+                                        }).then(function (failRes) {
+                                            if (!failRes || failRes.success !== true) {
+                                                _clientAuditExportOutcome(
+                                                    'Audit trail export failed',
+                                                    'Operator reported USB unsuccessful',
+                                                    'failed'
+                                                );
+                                            }
+                                            return failRes;
+                                        }).catch(function () {
+                                            _clientAuditExportOutcome(
+                                                'Audit trail export failed',
+                                                'Operator reported USB unsuccessful',
+                                                'failed'
+                                            );
+                                            return null;
+                                        }).then(function () {
+                                            hideLoadingOverlay();
+                                            if (allowAuditRetry) {
+                                                window._auditExportAutoRetryAllowed = false;
+                                                showAppModal(
+                                                    'Export failed. Exporting audit trails again...',
+                                                    titleText,
+                                                    function () {
+                                                        if (typeof exportAuditTrails === 'function') {
+                                                            exportAuditTrails({ _isVerifyRetry: true });
+                                                        }
+                                                    }
+                                                );
+                                            } else {
+                                                window._auditExportAutoRetryAllowed = true;
+                                                showAppModal(
+                                                    'Export failed. Check the USB pendrive and use Export Audit again when ready.\n\nNo data will be erased until you confirm a successful export.',
+                                                    titleText
+                                                );
+                                            }
+                                        });
                                         return;
                                     }
+                                    window._auditExportAutoRetryAllowed = true;
                                     if (!exportId) {
                                         showAppModal('Could not confirm export (missing session). Please export again.', titleText);
                                         return;
@@ -5851,6 +6117,14 @@ function recipeFromReportPreview(preview) {
 }
 
 function handlePreviewRecipe() {
+    if (typeof isReportPreviewNavigationLocked === 'function' &&
+        isReportPreviewNavigationLocked(window._lastReportPreview)) {
+        showAppModal(
+            'This report is awaiting approval. Complete Pass/Fail and sign, or tap Approve later before opening the recipe.',
+            'Report'
+        );
+        return;
+    }
     if (!currentReportRecipe) {
         showAppModal('No recipe data available for this report.', 'Report');
         return;
@@ -5872,7 +6146,6 @@ function populateRecipePrintPreview(recipe, factorySettings) {
     setRecipePrintEl('recipe-print-previous-val', fs.lastValidationDate || 'N/A');
     setRecipePrintEl('recipe-print-next-validation', fs.nextValidationDate || 'N/A');
     var productName = recipe.productName || recipe.name || '--';
-    setRecipePrintEl('recipe-print-product', productName);
     setRecipePrintEl('recipe-print-product-value', productName);
     setRecipePrintEl('recipe-print-product-type', recipe.productType || '--');
     var batchSize = recipe.batchSize;
@@ -5999,14 +6272,21 @@ function openReportPreview(reportId, options) {
             currentReportId = reportId;
             currentReportData = null;
             populateReportPreview(data.preview);
-            setReportApprovalGateFromPreview(data.preview, reportId);
+            // Hard lock only after a just-finished test/validation (setGate: true).
+            // Opening from Unapproved/All reports must not trap the next logged-in user.
+            if (options.setGate) {
+                setReportApprovalGateFromPreview(data.preview, reportId);
+            } else if (!hasActiveReportApprovalGate() ||
+                (window._reportApprovalGate && Number(window._reportApprovalGate.reportId) === Number(reportId))) {
+                clearReportApprovalGate();
+            }
             applyReportPreviewLockUi(data.preview);
             goToPage('report-preview');
-            startReportApprovalPollIfLocked();
+            if (options.setGate) startReportApprovalPollIfLocked();
             markAutoLogoutActivity();
             syncKioskScreenWakeLock();
             setTimeout(function () {
-                if (isReportPreviewLockedForCurrentUser(data.preview)) {
+                if (isReportPreviewNavigationLocked(data.preview)) {
                     scrollReportPendingBannerIntoView();
                 }
                 if (isReportPendingApproval(data.preview)) {
@@ -6748,12 +7028,14 @@ function updateReportPreviewPrintExportButtons(preview) {
     var approvalSt = String(p.reportApprovalStatus || '').trim().toLowerCase();
     var blockActions = approvalSt === 'pending' &&
         (reportTypeNorm === 'test' || reportTypeNorm === 'validation' || reportTypeNorm === 'calibration');
+    var locked = typeof isReportPreviewNavigationLocked === 'function' && isReportPreviewNavigationLocked(p);
     var canPrint = typeof userCanPrintReports === 'function' && userCanPrintReports() && !blockActions;
     var canExport = typeof userCanExportToUsb === 'function' && userCanExportToUsb() && !blockActions;
     var isTestReport = reportTypeNorm === 'test';
     var previewRecipeBtn = document.getElementById('btn-preview-recipe');
-    if (previewRecipeBtn) previewRecipeBtn.style.display = isTestReport ? '' : 'none';
-    peGroup.style.display = (canPrint || canExport || isTestReport) ? 'flex' : 'none';
+    // Hide Preview Recipe while post-test approval gate is active (Approve later is the escape).
+    if (previewRecipeBtn) previewRecipeBtn.style.display = (isTestReport && !locked && !blockActions) ? '' : 'none';
+    peGroup.style.display = (canPrint || canExport || (isTestReport && !locked && !blockActions)) ? 'flex' : 'none';
     peGroup.querySelectorAll('.btn-print, .btn-print-thermal').forEach(function (btn) {
         btn.style.display = canPrint ? '' : 'none';
     });
@@ -6893,8 +7175,9 @@ function submitReportApprove() {
             resetReportApproveForm();
             window._reportApproveFormReportId = null;
             clearReportApprovalGate();
+            clearReportApprovalDeferred(id);
             showAppModal('Report approved.', 'Report');
-            openReportPreview(id, { setGate: true });
+            openReportPreview(id);
             setTimeout(function () {
                 _saveReportPdfSilent(id);
                 var row = document.getElementById('report-approved-by');
@@ -6932,8 +7215,9 @@ function submitReportApproveBiometric() {
             resetReportApproveForm();
             window._reportApproveFormReportId = null;
             clearReportApprovalGate();
+            clearReportApprovalDeferred(id);
             showAppModal('Report approved.', 'Report');
-            openReportPreview(id, { setGate: true });
+            openReportPreview(id);
             setTimeout(function () {
                 _saveReportPdfSilent(id);
                 var row = document.getElementById('report-approved-by');
@@ -11333,26 +11617,101 @@ function disableUserGroup(id) {
 }
 
 
+
+function _selectedUserGroupMeta() {
+    var sel = document.getElementById('add-member-user-group');
+    if (!sel || !String(sel.value || '').trim()) return null;
+    var g = (_userGroupsCache || []).find(function (x) { return String(x.id) === String(sel.value); });
+    if (!g) return null;
+    return {
+        id: g.id,
+        name: g.name || ('Group ' + g.id),
+        allow: (g.allow || []).slice(),
+        deny: (g.deny || []).slice()
+    };
+}
+
+function selectMemberUserGroup(groupId) {
+    var sel = document.getElementById('add-member-user-group');
+    if (sel) sel.value = String(groupId == null ? '' : groupId);
+    if (typeof _syncUserGroupPowerButtonSelection === 'function') _syncUserGroupPowerButtonSelection();
+    if (typeof applySelectedUserGroupToMemberForm === 'function') applySelectedUserGroupToMemberForm();
+}
+
+function _syncUserGroupPowerButtonSelection() {
+    var sel = document.getElementById('add-member-user-group');
+    var grid = document.getElementById('add-member-user-group-buttons');
+    if (!grid) return;
+    var cur = sel ? String(sel.value || '') : '';
+    var buttons = grid.querySelectorAll('.profile-power-btn');
+    for (var i = 0; i < buttons.length; i++) {
+        var btn = buttons[i];
+        btn.classList.toggle('is-selected', String(btn.getAttribute('data-group-id') || '') === cur);
+    }
+}
+
+function _renderUserGroupPowerButtons(preferredId) {
+    var sel = document.getElementById('add-member-user-group');
+    var grid = document.getElementById('add-member-user-group-buttons');
+    if (!grid) return;
+    grid.innerHTML = '';
+    var groups = _userGroupsCache || [];
+    if (!groups.length) {
+        grid.innerHTML = '<div class="profile-power-empty">No active profile powers yet. Create one in Settings → Profile Powers.</div>';
+        if (sel) sel.value = '';
+        return;
+    }
+    groups.forEach(function (g) {
+        if (!g) return;
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'profile-power-btn';
+        btn.setAttribute('data-group-id', String(g.id));
+        btn.textContent = g.name || ('Group ' + g.id);
+        btn.addEventListener('click', function () {
+            if (typeof selectMemberUserGroup === 'function') selectMemberUserGroup(g.id);
+        });
+        grid.appendChild(btn);
+    });
+    var pick = (preferredId != null && preferredId !== '') ? String(preferredId) : (sel ? String(sel.value || '') : '');
+    if (sel) sel.value = pick;
+    _syncUserGroupPowerButtonSelection();
+}
+
 function _loadUserGroupsIntoMemberForm(preferredId) {
     var sel = document.getElementById('add-member-user-group');
     if (!sel) return Promise.resolve();
     return apiRequest(API_BASE + '/api/data/user-groups?status=active', { method: 'GET' })
         .then(function (data) {
             _userGroupsCache = (data && data.groups && Array.isArray(data.groups)) ? data.groups : [];
-            sel.innerHTML = '<option value="">— Select profile power —</option>';
-            _userGroupsCache.forEach(function (g) {
-                var opt = document.createElement('option');
-                opt.value = String(g.id);
-                opt.textContent = g.name || ('Group ' + g.id);
-                sel.appendChild(opt);
-            });
+            var pick = '';
             if (preferredId != null && preferredId !== '') {
-                sel.value = String(preferredId);
+                pick = String(preferredId);
             } else if (typeof editingMemberId !== 'undefined' && editingMemberId != null) {
-                // leave blank until caller sets; do not restore stale create selection
-                sel.value = '';
+                pick = '';
             } else {
-                sel.value = '';
+                pick = '';
+            }
+            var grid = document.getElementById('add-member-user-group-buttons');
+            if (grid) {
+                if (sel.tagName === 'SELECT') {
+                    // replaced by hidden input in HTML; keep defensive path
+                }
+                sel.value = pick;
+                if (typeof _renderUserGroupPowerButtons === 'function') {
+                    _renderUserGroupPowerButtons(pick);
+                }
+            } else if (sel.tagName === 'SELECT') {
+                sel.innerHTML = '<option value="">— Select profile power —</option>';
+                _userGroupsCache.forEach(function (g) {
+                    var opt = document.createElement('option');
+                    opt.value = String(g.id);
+                    opt.textContent = g.name || ('Group ' + g.id);
+                    sel.appendChild(opt);
+                });
+                sel.value = pick;
+            } else {
+                sel.value = pick;
             }
             if (typeof applySelectedUserGroupToMemberForm === 'function') {
                 applySelectedUserGroupToMemberForm();
@@ -11360,7 +11719,6 @@ function _loadUserGroupsIntoMemberForm(preferredId) {
         })
         .catch(function () { /* non-fatal */ });
 }
-
 
 function openAddMember() {
     var show = (typeof showAppModal === 'function') ? showAppModal : (typeof showModalCompat === 'function' ? showModalCompat : function () {});
@@ -11445,6 +11803,8 @@ function backToMemberAfterBiometric() {
 
 
 function applySelectedUserGroupToMemberForm() {
+    if (typeof _syncUserGroupPowerButtonSelection === 'function') _syncUserGroupPowerButtonSelection();
+
     var sel = document.getElementById('add-member-user-group');
     var panel = document.getElementById('add-member-permissions-panel');
     if (!sel || !sel.value) {
@@ -11878,6 +12238,8 @@ function _clearAddMemberForm() {
     _setAddMemberPageMode(false, false);
     var gsel = document.getElementById('add-member-user-group');
     if (gsel) gsel.value = '';
+    if (typeof _syncUserGroupPowerButtonSelection === 'function') _syncUserGroupPowerButtonSelection();
+    if (typeof applySelectedUserGroupToMemberForm === 'function') applySelectedUserGroupToMemberForm();
     _addMemberFeatureOverrides = { allow: [], deny: [] };
 }
 
@@ -12003,26 +12365,8 @@ function applyDateTime() {
             }
         }
         updateDateTime();
-        // Compare to WiFi/network clock (diagnostic only — does not change RTC).
-        fetchDateTimeFromBackendCompare().then(function (cmp) {
-            var msg = 'Date and time updated. Top bar and RTC now match what you set.';
-            if (cmp && cmp.networkOffsetSec != null && !isNaN(cmp.networkOffsetSec)) {
-                var off = parseInt(cmp.networkOffsetSec, 10);
-                if (Math.abs(off) > 5) {
-                    msg += ' WiFi/network clock differs by about ' + Math.abs(off) + 's'
-                        + (off > 0 ? ' (network ahead).' : ' (device ahead).')
-                        + ' Device keeps your set time (NTP stays off).';
-                } else {
-                    msg += ' Matches WiFi/network clock.';
-                }
-            }
-            showAppModal(msg, 'Success', function () {
+        showAppModal('Date and time updated.', 'Success', function () {
             goBack();
-            });
-        }).catch(function () {
-            showAppModal('Date and time updated. Top bar and RTC now match what you set.', 'Success', function () {
-                goBack();
-            });
         });
     }).catch(function (err) {
         var msg = (err && err.message) ? err.message : 'Network error';
@@ -12036,6 +12380,471 @@ function openDatePicker(inputId) {
         el.focus();
         try { el.showPicker && el.showPicker(); } catch (e) {}
     }
+}
+
+/** Convert ISO yyyy-mm-dd → dd/mm/yyyy for factory installation date UI. */
+function isoDateToDdMmYyyy(iso) {
+    var s = String(iso || '').trim();
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (!m) return '';
+    return m[3] + '/' + m[2] + '/' + m[1];
+}
+
+/** Parse dd/mm/yyyy (also accepts d/m/yyyy) → ISO yyyy-mm-dd, or '' if invalid. */
+function ddMmYyyyToIsoDate(display) {
+    var s = String(display || '').trim();
+    var m = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/.exec(s);
+    if (!m) return '';
+    var dd = parseInt(m[1], 10);
+    var mm = parseInt(m[2], 10);
+    var yyyy = parseInt(m[3], 10);
+    if (isNaN(dd) || isNaN(mm) || isNaN(yyyy) || mm < 1 || mm > 12 || dd < 1 || dd > 31) return '';
+    var dt = new Date(yyyy, mm - 1, dd);
+    if (dt.getFullYear() !== yyyy || dt.getMonth() !== mm - 1 || dt.getDate() !== dd) return '';
+    return String(yyyy).padStart(4, '0') + '-' + String(mm).padStart(2, '0') + '-' + String(dd).padStart(2, '0');
+}
+
+function syncFactoryInstallationDateFromIso() {
+    var isoEl = document.getElementById('factory-installation-date');
+    var dispEl = document.getElementById('factory-installation-date-display');
+    if (!isoEl || !dispEl) return;
+    dispEl.value = isoDateToDdMmYyyy(isoEl.value || '');
+}
+
+function syncFactoryInstallationDateFromDisplay() {
+    var isoEl = document.getElementById('factory-installation-date');
+    var dispEl = document.getElementById('factory-installation-date-display');
+    if (!isoEl || !dispEl) return;
+    var raw = String(dispEl.value || '').trim();
+    if (!raw) {
+        isoEl.value = '';
+        return;
+    }
+    var iso = ddMmYyyyToIsoDate(raw);
+    if (iso) {
+        isoEl.value = iso;
+        dispEl.value = isoDateToDdMmYyyy(iso);
+    }
+}
+
+function onFactoryInstallationDateDisplayInput() {
+    var dispEl = document.getElementById('factory-installation-date-display');
+    if (!dispEl) return;
+    var raw = String(dispEl.value || '');
+    // Light auto-format: insert slashes as digits are typed (dd/mm/yyyy).
+    var digits = raw.replace(/\D/g, '').slice(0, 8);
+    var out = digits;
+    if (digits.length > 4) out = digits.slice(0, 2) + '/' + digits.slice(2, 4) + '/' + digits.slice(4);
+    else if (digits.length > 2) out = digits.slice(0, 2) + '/' + digits.slice(2);
+    if (out !== raw) dispEl.value = out;
+}
+
+function getFactoryInstallationDateIso() {
+    var isoEl = document.getElementById('factory-installation-date');
+    if (isoEl && isoEl.value) return String(isoEl.value).trim();
+    var dispEl = document.getElementById('factory-installation-date-display');
+    return ddMmYyyyToIsoDate(dispEl && dispEl.value ? dispEl.value : '');
+}
+
+function setFactoryInstallationDateFields(isoOrDisplay) {
+    var isoEl = document.getElementById('factory-installation-date');
+    var dispEl = document.getElementById('factory-installation-date-display');
+    var raw = String(isoOrDisplay || '').trim();
+    var iso = '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) iso = raw;
+    else iso = ddMmYyyyToIsoDate(raw);
+    if (isoEl) isoEl.value = iso || '';
+    if (dispEl) dispEl.value = iso ? isoDateToDdMmYyyy(iso) : (raw && !iso ? raw : '');
+}
+
+// --- restored factory / IP configure handlers ---
+function _escapeIpConfigureText(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function _renderIpConfigureList(payload) {
+    var listEl = document.getElementById('ip-configure-list');
+    if (!listEl) return;
+    if (!payload || payload.ok === false) {
+        var errMsg = (payload && (payload.error || payload.message)) ? (payload.error || payload.message) : 'Could not load network information.';
+        listEl.innerHTML = '<div class="ip-configure-error">' + _escapeIpConfigureText(errMsg) + '</div>';
+        return;
+    }
+    var wlan = payload.wlan != null && payload.wlan !== '' ? String(payload.wlan) : null;
+    var lan = payload.lan != null && payload.lan !== '' ? String(payload.lan) : null;
+    if (!wlan && !lan) {
+        listEl.innerHTML = '<div class="ip-configure-empty">No IP address found. Check that this device is connected to the LAN or WLAN.</div>';
+        return;
+    }
+    var rows = [
+        { label: 'WLAN', address: wlan || '—' },
+        { label: 'LAN', address: lan || '—' }
+    ];
+    var html = '';
+    rows.forEach(function (row) {
+        html += '<div class="ip-configure-row">' +
+            '<span class="ip-configure-iface">' + _escapeIpConfigureText(row.label) + '</span>' +
+            '<span class="ip-configure-address">' + _escapeIpConfigureText(row.address) + '</span>' +
+            '</div>';
+    });
+    listEl.innerHTML = html;
+}
+
+function refreshIpConfigureAddresses() {
+    var listEl = document.getElementById('ip-configure-list');
+    var refreshBtn = document.querySelector('.btn-refresh-ip-configure');
+    if (listEl) {
+        listEl.innerHTML = '<div class="ip-configure-loading">Loading addresses…</div>';
+    }
+    if (refreshBtn) refreshBtn.disabled = true;
+    var base = (typeof API_BASE !== 'undefined' ? API_BASE : '');
+    var headers = { 'Accept': 'application/json' };
+    if (typeof window !== 'undefined' && window.currentUser) {
+        if (window.currentUser.role) headers['X-User-Role'] = window.currentUser.role;
+        if (window.currentUser.name) headers['X-User-Name'] = window.currentUser.name;
+        if (window.currentUser.username) headers['X-User-Username'] = window.currentUser.username;
+    }
+    fetch(base + '/api/system/network-addresses', { method: 'GET', headers: headers })
+        .then(function (res) {
+            return res.text().then(function (text) {
+                var data = null;
+                if (text) {
+                    try {
+                        data = JSON.parse(text);
+                    } catch (parseErr) {
+                        data = {
+                            ok: false,
+                            error: res.ok
+                                ? 'Invalid response from server.'
+                                : ('Request failed (' + res.status + ').')
+                        };
+                    }
+                } else {
+                    data = { ok: false, error: 'Empty response from server.' };
+                }
+                if (!res.ok && data && !data.error) {
+                    data.ok = false;
+                    data.error = data.error || ('Request failed (' + res.status + ').');
+                }
+                return data;
+            });
+        })
+        .then(function (data) {
+            if (typeof data !== 'object' || data === null) {
+                _renderIpConfigureList({ ok: false, error: 'Invalid response from server.' });
+                return;
+            }
+            _renderIpConfigureList(data);
+        })
+        .catch(function () {
+            _renderIpConfigureList({ ok: false, error: 'Could not reach the device network service.' });
+        })
+        .finally(function () {
+            if (refreshBtn) refreshBtn.disabled = false;
+        });
+}
+
+function updateLoginFactorySettingsDisplay(settings) {
+    var s = settings || {};
+    var model = s.modelNo && String(s.modelNo).trim() ? String(s.modelNo).trim() : '';
+    var serial = s.serialNo && String(s.serialNo).trim() ? String(s.serialNo).trim() : '';
+    var company = s.companyName && String(s.companyName).trim() ? String(s.companyName).trim() : '';
+
+    var modelEl = document.getElementById('login-footer-model-no');
+    var serialEl = document.getElementById('login-footer-serial-no');
+    var footerInfo = document.getElementById('login-footer-info');
+    if (modelEl) modelEl.textContent = model || '—';
+    if (serialEl) serialEl.textContent = serial || '—';
+
+    var show = !!(model || serial || company);
+    if (footerInfo) footerInfo.style.display = show ? 'block' : 'none';
+}
+
+function loadLoginFactorySettingsDisplay() {
+    apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
+        var settings = (result && result.settings) ? result.settings : (result || {});
+        updateLoginFactorySettingsDisplay(settings);
+        try { localStorage.setItem('factorySettings', JSON.stringify(settings)); } catch (e) {}
+    }).catch(function () {
+        try {
+            var stored = localStorage.getItem('factorySettings');
+            var settings = stored ? JSON.parse(stored) : {};
+            updateLoginFactorySettingsDisplay(settings);
+        } catch (e) {
+            updateLoginFactorySettingsDisplay({});
+        }
+    });
+}
+
+function initFactorySettings() {
+    var screen = document.getElementById('page-factory-settings');
+    if (!screen) return;
+    apiRequest(API_BASE + '/api/data/factory-settings').then(function (result) {
+        var settings = (result && result.settings) ? result.settings : (result || {});
+        setFactorySettingsForm(settings);
+        applyFactoryAutoLogoutSetting(settings);
+        updateLoginFactorySettingsDisplay(settings);
+        try { localStorage.setItem('factorySettings', JSON.stringify(settings)); } catch (e) {}
+    }).catch(function () {
+        var stored = null;
+        try { stored = localStorage.getItem('factorySettings'); } catch (e) {}
+        var settings = stored ? JSON.parse(stored) : {};
+        setFactorySettingsForm(settings);
+        applyFactoryAutoLogoutSetting(settings);
+        updateLoginFactorySettingsDisplay(settings);
+    });
+}
+
+function setFactorySettingsForm(settings) {
+    var idMap = [
+        ['factory-company-name', 'companyName'],
+        ['factory-company-location', 'companyLocation'],
+        ['factory-serial-no', 'serialNo'],
+        ['factory-model-no', 'modelNo'],
+        ['factory-instrument-id', 'instrumentId'],
+        ['factory-installation-date', 'installationDate'],
+        ['factory-firmware', null],
+        ['factory-installed-by', 'installedBy'],
+        ['factory-max-recipes', 'maxRecipes'],
+        ['factory-max-users', 'maxUsers'],
+        ['factory-max-admins', 'maxAdmins'],
+        ['factory-max-qa', 'maxQa'],
+        ['factory-max-supervisors', 'maxSupervisors'],
+        ['factory-password-reset-days', 'passwordResetPeriodDays'],
+        ['factory-auto-logout-minutes', 'autoLogoutMinutes'],
+        ['factory-max-vacuum-mmhg', 'maxVacuumMmHg'],
+        ['factory-cal-target-vacuum', 'calibrationTargetVacuumMmHg'],
+        ['factory-cal-release-time', 'calibrationReleaseTimeSec']
+    ];
+    idMap.forEach(function (pair) {
+        var el = document.getElementById(pair[0]);
+        if (!el) return;
+        if (pair[1] === null) {
+            if (pair[0] === 'factory-firmware') el.value = 'RDA -LT v1.0.0';
+            return;
+        }
+        if (pair[1] === 'installationDate') {
+            setFactoryInstallationDateFields(settings.installationDate || '');
+            return;
+        }
+        var val = settings[pair[1]];
+        if (pair[1] === 'maxRecipes') el.value = String(val || 150);
+        else if (pair[1] === 'maxUsers') el.value = String(val || 10);
+        else if (pair[1] === 'maxAdmins') el.value = String(val || 2);
+        else if (pair[1] === 'maxQa') el.value = String(val || 3);
+        else if (pair[1] === 'maxSupervisors') el.value = String(val || 3);
+        else if (pair[1] === 'passwordResetPeriodDays') el.value = String(val != null ? val : 30);
+        else if (pair[1] === 'autoLogoutMinutes') el.value = String(val != null ? val : 0);
+        else if (pair[1] === 'maxVacuumMmHg') el.value = String(val != null ? val : 650);
+        else if (pair[1] === 'calibrationTargetVacuumMmHg') el.value = String(val != null ? val : 400);
+        else if (pair[1] === 'calibrationReleaseTimeSec') el.value = String(val != null ? val : 80);
+        else el.value = val || '';
+    });
+    var biometricEl = document.getElementById('factory-biometric-enabled');
+    var biometricEnabled = normalizeBiometricEnabled(settings.biometricEnabled);
+    if (biometricEl) biometricEl.value = biometricEnabled ? 'enabled' : 'disabled';
+    var vacuumPresets = Array.isArray(settings.recipeVacuumPresets) && settings.recipeVacuumPresets.length === 3
+        ? settings.recipeVacuumPresets
+        : [200, 400, 600];
+    var timePresetsSec = Array.isArray(settings.recipeTimePresetsSec) && settings.recipeTimePresetsSec.length === 3
+        ? settings.recipeTimePresetsSec
+        : [30, 60, 90];
+    for (var presetIndex = 0; presetIndex < 3; presetIndex++) {
+        var vacuumPresetEl = document.getElementById('factory-recipe-vacuum-preset-' + (presetIndex + 1));
+        if (vacuumPresetEl) vacuumPresetEl.value = String(parseInt(vacuumPresets[presetIndex], 10) || [200, 400, 600][presetIndex]);
+        var timePresetEl = document.getElementById('factory-recipe-time-preset-' + (presetIndex + 1));
+        if (timePresetEl) {
+            var presetSeconds = parseInt(timePresetsSec[presetIndex], 10) || [30, 60, 90][presetIndex];
+            timePresetEl.value = (typeof formatMmSs === 'function')
+                ? formatMmSs(presetSeconds)
+                : String(Math.floor(presetSeconds / 60)).padStart(2, '0') + ':' + String(presetSeconds % 60).padStart(2, '0');
+        }
+    }
+    applyBiometricSetting(biometricEnabled);
+    updateLoginFactorySettingsDisplay(settings);
+}
+
+function saveFactorySettings() {
+    if (typeof canPerformAction === 'function' && typeof getCurrentRole === 'function') {
+        var role = getCurrentRole();
+        if (!canPerformAction(role, 'factory-settings', 'save')) {
+            showAppModal('You do not have permission to save factory settings.', 'Permission');
+            return;
+        }
+    }
+    var companyNameEl = document.getElementById('factory-company-name');
+    var companyLocationEl = document.getElementById('factory-company-location');
+    var serialNoEl = document.getElementById('factory-serial-no');
+    var modelNoEl = document.getElementById('factory-model-no');
+    var instrumentIdEl = document.getElementById('factory-instrument-id');
+    var installedByEl = document.getElementById('factory-installed-by');
+    var maxRecipesEl = document.getElementById('factory-max-recipes');
+    var maxUsersEl = document.getElementById('factory-max-users');
+    var maxAdminsEl = document.getElementById('factory-max-admins');
+    var maxQaEl = document.getElementById('factory-max-qa');
+    var maxSupervisorsEl = document.getElementById('factory-max-supervisors');
+    var passwordResetDaysEl = document.getElementById('factory-password-reset-days');
+    var autoLogoutEl = document.getElementById('factory-auto-logout-minutes');
+    var biometricEnabledEl = document.getElementById('factory-biometric-enabled');
+    var maxVacuumEl = document.getElementById('factory-max-vacuum-mmhg');
+    var calTargetEl = document.getElementById('factory-cal-target-vacuum');
+    var calReleaseEl = document.getElementById('factory-cal-release-time');
+
+    var companyName = companyNameEl && companyNameEl.value ? companyNameEl.value.trim() : '';
+    var companyLocation = companyLocationEl && companyLocationEl.value ? companyLocationEl.value.trim() : '';
+    if (!companyName || !companyLocation) {
+        showAppModal('Company Name and Company Location are required.', 'Factory Settings');
+        return;
+    }
+    var installationDateDisplayEl = document.getElementById('factory-installation-date-display');
+    var installationDateRaw = installationDateDisplayEl && installationDateDisplayEl.value
+        ? String(installationDateDisplayEl.value).trim()
+        : '';
+    var installationDateIso = getFactoryInstallationDateIso();
+    if (installationDateRaw && !installationDateIso) {
+        showAppModal('Installation Date must be dd/mm/yyyy.', 'Factory Settings');
+        return;
+    }
+    var maxRecipes = Math.max(1, Math.min(999, parseInt(maxRecipesEl && maxRecipesEl.value ? maxRecipesEl.value : 150, 10)));
+    var maxUsers = Math.max(1, Math.min(999, parseInt(maxUsersEl && maxUsersEl.value ? maxUsersEl.value : 10, 10)));
+    var maxAdmins = Math.max(1, Math.min(99, parseInt(maxAdminsEl && maxAdminsEl.value ? maxAdminsEl.value : 2, 10)));
+    var maxQa = Math.max(1, Math.min(99, parseInt(maxQaEl && maxQaEl.value ? maxQaEl.value : 3, 10)));
+    var maxSupervisors = Math.max(1, Math.min(99, parseInt(maxSupervisorsEl && maxSupervisorsEl.value ? maxSupervisorsEl.value : 3, 10)));
+    var passwordResetPeriodDays = Math.max(1, Math.min(3650, parseInt(passwordResetDaysEl && passwordResetDaysEl.value ? passwordResetDaysEl.value : 30, 10)));
+    var autoLogoutMinutes = Math.max(0, Math.min(10080, parseInt(autoLogoutEl && autoLogoutEl.value !== '' ? autoLogoutEl.value : '0', 10)));
+    if (isNaN(autoLogoutMinutes)) autoLogoutMinutes = 0;
+    var maxVacuumRaw = parseInt(maxVacuumEl && maxVacuumEl.value ? maxVacuumEl.value : 650, 10);
+    if (!isNaN(maxVacuumRaw) && maxVacuumRaw > 650) {
+        showAppModal('Maximum vacuum cannot exceed 650 mmHg.', 'Factory Settings');
+        return;
+    }
+    var maxVacuumMmHg = Math.max(1, Math.min(650, isNaN(maxVacuumRaw) ? 650 : maxVacuumRaw));
+    var calTargetRaw = parseInt(calTargetEl && calTargetEl.value ? calTargetEl.value : 400, 10);
+    if (!Number.isInteger(calTargetRaw) || calTargetRaw < 1 || calTargetRaw > maxVacuumMmHg) {
+        showAppModal(
+            'Calibration target vacuum must be a whole number from 1 to ' + maxVacuumMmHg + ' mmHg.',
+            'Factory Settings'
+        );
+        return;
+    }
+    var calReleaseRaw = parseInt(calReleaseEl && calReleaseEl.value ? calReleaseEl.value : 80, 10);
+    if (!Number.isInteger(calReleaseRaw) || calReleaseRaw < 1 || calReleaseRaw > 5999) {
+        showAppModal('Calibration release time (RL_TM) must be a whole number from 1 to 5999 seconds.', 'Factory Settings');
+        return;
+    }
+    var recipeVacuumPresets = [];
+    var recipeTimePresetsSec = [];
+    for (var presetIndex = 1; presetIndex <= 3; presetIndex++) {
+        var vacuumPresetEl = document.getElementById('factory-recipe-vacuum-preset-' + presetIndex);
+        var vacuumPreset = Number(vacuumPresetEl && vacuumPresetEl.value ? vacuumPresetEl.value : '');
+        if (!Number.isInteger(vacuumPreset) || vacuumPreset < 1 || vacuumPreset > maxVacuumMmHg) {
+            showAppModal(
+                'Vacuum preset ' + presetIndex + ' must be a whole number from 1 to ' + maxVacuumMmHg + ' mmHg.',
+                'Factory Settings'
+            );
+            return;
+        }
+        recipeVacuumPresets.push(vacuumPreset);
+
+        var timePresetEl = document.getElementById('factory-recipe-time-preset-' + presetIndex);
+        var timePresetValue = timePresetEl && timePresetEl.value ? timePresetEl.value.trim() : '';
+        var timePresetSeconds = (typeof parseMmSs === 'function') ? parseMmSs(timePresetValue) : null;
+        if (!timePresetSeconds || timePresetSeconds > 5999) {
+            showAppModal(
+                'Time preset ' + presetIndex + ' must use mm:ss format and be between 00:01 and 99:59.',
+                'Factory Settings'
+            );
+            return;
+        }
+        recipeTimePresetsSec.push(timePresetSeconds);
+    }
+
+    var data = {
+        companyName: companyName,
+        companyLocation: companyLocation,
+        serialNo: serialNoEl && serialNoEl.value ? serialNoEl.value.trim() : '',
+        modelNo: modelNoEl && modelNoEl.value ? modelNoEl.value.trim() : '',
+        instrumentId: instrumentIdEl && instrumentIdEl.value ? instrumentIdEl.value.trim() : '',
+        installationDate: installationDateIso || '',
+        firmware: 'RDA -LT v1.0.0',
+        installedBy: installedByEl && installedByEl.value ? installedByEl.value.trim() : '',
+        maxRecipes: maxRecipes,
+        maxUsers: maxUsers,
+        maxAdmins: maxAdmins,
+        maxQa: maxQa,
+        maxSupervisors: maxSupervisors,
+        passwordResetPeriodDays: passwordResetPeriodDays,
+        autoLogoutMinutes: autoLogoutMinutes,
+        maxVacuumMmHg: maxVacuumMmHg,
+        calibrationTargetVacuumMmHg: calTargetRaw,
+        calibrationReleaseTimeSec: calReleaseRaw,
+        recipeVacuumPresets: recipeVacuumPresets,
+        recipeTimePresetsSec: recipeTimePresetsSec,
+        biometricEnabled: normalizeBiometricEnabled(biometricEnabledEl ? biometricEnabledEl.value : true)
+    };
+    showConfirmModal('Save factory settings?', 'Factory Settings').then(function (ok) {
+        if (!ok) return;
+        apiRequest(API_BASE + '/api/data/factory-settings', { method: 'POST', body: data }).then(function () {
+            try { localStorage.setItem('factorySettings', JSON.stringify(data)); } catch (e) {}
+            applyBiometricSetting(data.biometricEnabled);
+            applyFactoryAutoLogoutSetting(data);
+            if (typeof applyCreateRecipeFactoryPresets === 'function') applyCreateRecipeFactoryPresets(data);
+            updateLoginFactorySettingsDisplay(data);
+            showAppModal('Factory settings saved successfully.', 'Factory Settings');
+        }).catch(function (err) {
+            try { localStorage.setItem('factorySettings', JSON.stringify(data)); } catch (e) {}
+            applyBiometricSetting(data.biometricEnabled);
+            applyFactoryAutoLogoutSetting(data);
+            if (typeof applyCreateRecipeFactoryPresets === 'function') applyCreateRecipeFactoryPresets(data);
+            updateLoginFactorySettingsDisplay(data);
+            showAppModal('Factory settings saved locally.', 'Factory Settings');
+        });
+    });
+}
+
+function clearClientStateAfterFactoryReset() {
+    window.currentUser = null;
+    if (typeof currentUser !== 'undefined') currentUser = null;
+    try {
+        localStorage.removeItem('currentUser');
+        localStorage.removeItem('disabledRecipes');
+    } catch (e) {}
+    validationCompletion = { distance: false, load: false };
+    validationSessionResults = { distance: null, load: null };
+    if (typeof clearReportApprovalGate === 'function') clearReportApprovalGate();
+}
+
+function showFactoryResetConfirm() {
+    showConfirmModal(
+        'Are you sure you want to factory reset? This will permanently delete all reports, recipes, users, audit trails, and fingerprint enrollments. Factory settings (company/model/serial) are kept. This cannot be undone.',
+        'Factory Reset'
+    ).then(function (ok) {
+        if (!ok) return;
+        apiRequest((API_BASE || '') + '/api/data/factory-reset', { method: 'POST', body: {} })
+            .then(function (result) {
+                clearClientStateAfterFactoryReset();
+                var kept = (result && result.settings) ? result.settings : null;
+                if (kept && typeof kept === 'object') {
+                    try { localStorage.setItem('factorySettings', JSON.stringify(kept)); } catch (e) {}
+                    if (typeof updateLoginFactorySettingsDisplay === 'function') {
+                        updateLoginFactorySettingsDisplay(kept);
+                    }
+                }
+                showAppModal(
+                    'Factory reset completed. All reports, recipes, users, and audit trails have been erased. Company name, serial, and other factory details were kept.',
+                    'Factory Reset'
+                );
+                if (typeof showLoginScreen === 'function') showLoginScreen();
+            })
+            .catch(function (err) {
+                var msg = (err && err.message) ? err.message : 'Factory reset failed.';
+                showAppModal(msg, 'Factory Reset');
+            });
+    });
 }
 
 function loadBiometricSetting() {

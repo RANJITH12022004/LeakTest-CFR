@@ -871,11 +871,7 @@ def _append_calibration_report_details(
             width,
         )
         if remarks not in (None, ""):
-            _append_two_column_pairs(
-                lines,
-                [("Remarks", _truncate_with_ellipsis(remarks, max(16, width - 20)))],
-                width,
-            )
+            lines.append("Remarks: " + str(remarks))
 
 
 def _append_validation_report_details(
@@ -946,7 +942,7 @@ def _append_validation_report_details(
             lines.extend(["", "REMARKS:", str(remarks), ""])
         else:
             lines.extend(["", "REMARKS", dash if dash else ""])
-            _append_two_column_pairs(lines, [("Remarks", _truncate_with_ellipsis(remarks, max(16, width - 20)))], width)
+            lines.append("Remarks: " + str(remarks))
             lines.append("")
 
 
@@ -963,7 +959,7 @@ def _append_test_report_details(lines: list, td: Dict[str, Any], report_data: Di
             lines.extend(["", remarks_label + ":", str(remarks), ""])
         else:
             lines.extend(["", remarks_label, dash if dash else ""])
-            _append_two_column_pairs(lines, [("Comments", _truncate_with_ellipsis(remarks, max(16, width - 20)))], width)
+            lines.append("Comments: " + str(remarks))
             lines.append("")
 
     if not isinstance(td, dict):
@@ -1372,11 +1368,7 @@ def _format_report_text(report_data: Dict[str, Any], width: int = A4_TEXT_WIDTH)
             )
             _append_hold_vacuum_samples(lines, False)
             if comments not in (None, ""):
-                _append_two_column_pairs(
-                    lines,
-                    [("Comments", _truncate_with_ellipsis(comments, max(16, width - 20)))],
-                    width,
-                )
+                lines.append("Comments: " + str(comments))
     approver_name, approver_id = _approver_name_and_id(report_data, td)
     if thermal:
         lines.extend(

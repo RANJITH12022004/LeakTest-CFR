@@ -858,12 +858,45 @@ def _normalize_report_type(report: Dict[str, Any]) -> str:
     return t or "test"
 
 
-def list_reports(filter_type="all"):
-    """List reports, optionally filtered by type."""
+def _load_reports_raw():
+    """Load all reports including pending (not list-filtered)."""
     reports = _load_critical_json("reports.json", default=[])
     if not isinstance(reports, list):
-        reports = []
-    if filter_type and filter_type != "all":
+        return []
+    return reports
+
+
+def report_visible_in_list(report: Dict[str, Any]) -> bool:
+    """Approved/aborted reports appear in Test/Validation/Calibration lists.
+
+    Pending drafts stay hidden until Approve later → Unapproved, or full approval.
+    """
+    if not isinstance(report, dict):
+        return False
+    st = report.get("reportApprovalStatus")
+    if st is None:
+        return True
+    norm = str(st).strip().lower()
+    return norm in ("approved", "aborted")
+
+
+def list_reports(filter_type="all", include_pending=False):
+    """List reports, optionally filtered by type. Pending hidden unless unapproved/include_pending."""
+    reports = _load_reports_raw()
+    if filter_type == "unapproved":
+        include_pending = True
+    if not include_pending:
+        reports = [r for r in reports if report_visible_in_list(r)]
+    if filter_type == "unapproved":
+        def _pending_approval_report(r):
+            if not isinstance(r, dict):
+                return False
+            st = str(r.get("reportApprovalStatus") or "").strip().lower()
+            rt = _normalize_report_type(r)
+            return st == "pending" and rt in ("test", "validation", "calibration")
+
+        reports = [r for r in reports if _pending_approval_report(r)]
+    elif filter_type and filter_type != "all":
         want = str(filter_type).strip().lower()
         reports = [r for r in reports if _normalize_report_type(r) == want]
 
@@ -882,18 +915,24 @@ def list_reports(filter_type="all"):
 
 
 def get_report(report_id: int):
-    """Get report by ID."""
-    reports = list_reports()
-    for report in reports:
-        if report.get("id") == report_id:
-            return report
+    """Get report by ID (includes pending)."""
+    try:
+        want = int(report_id)
+    except (TypeError, ValueError):
+        return None
+    for report in _load_reports_raw():
+        try:
+            if int(report.get("id")) == want:
+                return report
+        except (TypeError, ValueError):
+            continue
     return None
 
 
 def save_report(report_data: Dict[str, Any]) -> int:
     """Save report (create or update)."""
     reports_path = _get_storage_path("reports.json")
-    reports = list_reports("all")
+    reports = _load_reports_raw()
     report_id = report_data.get("id")
     if not report_id:
         max_id = max([r.get("id", 0) for r in reports], default=0)
@@ -920,7 +959,7 @@ def delete_report(report_id: int) -> bool:
     except (TypeError, ValueError):
         return False
     reports_path = _get_storage_path("reports.json")
-    reports = list_reports("all")
+    reports = _load_reports_raw()
     original_len = len(reports)
 
     def _rid(row: Any) -> Optional[int]:
@@ -2340,6 +2379,22 @@ def stage_report_export_pending(
     }
     _save_report_export_schedule(state)
 
+
+
+
+def reject_report_export_pending(export_id: str):
+    '''Operator reported USB copy unsuccessful: drop staged pending (no purge).'''
+    want = str(export_id or "").strip()
+    if not want:
+        return None
+    state = _load_report_export_schedule()
+    staged = state.get("staged") if isinstance(state.get("staged"), dict) else {}
+    if str(staged.get("export_id") or "").strip() != want:
+        return None
+    out = dict(staged)
+    state.pop("staged", None)
+    _save_report_export_schedule(state)
+    return out
 
 def confirm_report_export_verified(export_id: str) -> Optional[Dict[str, Any]]:
     """Operator confirmed USB PDFs OK: schedule purge in 24h."""

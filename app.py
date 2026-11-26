@@ -812,18 +812,35 @@ def _power_loss_report_already_saved(checkpoint: dict) -> bool:
     return False
 
 
+def _report_is_approval_deferred(report: dict) -> bool:
+    """True when operator chose Approve later — leave pending in Unapproved Reports."""
+    if not isinstance(report, dict):
+        return False
+    val = report.get("approvalDeferred")
+    if val is True or val == 1:
+        return True
+    if isinstance(val, str) and val.strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return False
+
+
 def _abort_pending_reports_after_power_loss(session_username):
-    """Finalize pending reports as aborted/FAIL after unclean shutdown (power loss)."""
+    """Finalize pending reports as aborted/FAIL after unclean shutdown (power loss).
+
+    Approve-later (approvalDeferred) reports stay pending in Unapproved Reports.
+    """
     un = _norm_username(session_username)
     if not un:
         return 0
     cp = data_service.get_test_run_data()
     aborted = 0
-    for report in data_service.list_reports("all") or []:
+    for report in data_service.list_reports("all", include_pending=True) or []:
         rtype = (report.get("type") or "").strip().lower()
         if rtype not in ("test", "validation", "calibration"):
             continue
         if (report.get("reportApprovalStatus") or "").strip().lower() != "pending":
+            continue
+        if _report_is_approval_deferred(report):
             continue
         if _report_operated_by_username(report) != un:
             continue
@@ -1260,13 +1277,93 @@ def _check_report_approved_for_print_export(report=None, report_id=None, report_
 
 
 def _display_role_label(role_str):
-    """User-facing role in approval lines (stored role Supervisor → Reviewer)."""
+    """User-facing role label (canonical casing; Supervisor → Reviewer)."""
     r = str(role_str or "").strip()
     if not r:
         return r
-    if r.lower() == "supervisor":
+    key = r.lower()
+    if key in ("supervisor", "reviewer"):
         return "Reviewer"
+    if key == "admin":
+        return "Admin"
+    if key == "qa":
+        return "QA"
+    if key == "factory":
+        return "Factory"
+    if key == "user":
+        return "User"
+    if key == "operator":
+        return "Operator"
+    # Normalize ALL-CAPS custom profile-power names (ADMIN → Admin, REV → Rev)
+    if r.isupper() and any(ch.isalpha() for ch in r) and len(r) > 1:
+        return r.capitalize()
     return r
+
+
+def _audit_self_approval_rejected(purpose, verified=None, entity_type="", entity_id=None, entity_name="", extra=None):
+    """Log segregation-of-duties rejection when a user tries to approve their own work."""
+    verified = verified or {}
+    purpose = str(purpose or "approval").strip() or "approval"
+    cur = {}
+    try:
+        cur = data_service.get_current_user() or {}
+    except Exception:
+        cur = {}
+    uname = (
+        verified.get("username")
+        or verified.get("name")
+        or cur.get("username")
+        or "--"
+    )
+    role = verified.get("role") or cur.get("role") or "--"
+    detail = "Approval rejected: self-approval not permitted ({})".format(purpose)
+    if entity_name:
+        detail = "{} | {}".format(detail, entity_name)
+    elif entity_id is not None:
+        detail = "{} | id {}".format(detail, entity_id)
+    payload_extra = {"purpose": purpose, "reason": "self_approval_not_permitted"}
+    if isinstance(extra, dict):
+        payload_extra.update(extra)
+    try:
+        _audit_event(
+            action="Approval rejected",
+            outcome="denied",
+            entity_type=entity_type or purpose,
+            entity_id=entity_id,
+            entity_name=entity_name or purpose,
+            details=detail,
+            target_user=uname,
+            reason="Self-approval not permitted",
+            signature={
+                "mode": "verifier",
+                "username": str(uname or "--"),
+                "role": _display_role_label(role),
+            },
+            extra=payload_extra,
+        )
+    except Exception:
+        try:
+            app.logger.exception("Failed to write self-approval rejection audit")
+        except Exception:
+            pass
+
+
+def _format_user_group_powers_for_audit(group):
+    """Human-readable permission cards granted by a profile-power group."""
+    group = group or {}
+    allow = group.get("allow") if isinstance(group.get("allow"), list) else []
+    labels = []
+    try:
+        if hasattr(rbac_service, "_permission_card_labels"):
+            labels = rbac_service._permission_card_labels([str(x) for x in allow if x])
+        elif hasattr(rbac_service, "PERMISSION_CARD_LABELS"):
+            mapping = getattr(rbac_service, "PERMISSION_CARD_LABELS") or {}
+            labels = [mapping.get(str(x), str(x)) for x in allow if x]
+    except Exception:
+        labels = [str(x) for x in allow if x]
+    if not labels and allow:
+        labels = [str(x) for x in allow if x]
+    return ", ".join(labels) if labels else "none"
 
 
 def _rbac_member_from_session():
@@ -1540,6 +1637,12 @@ def _apply_recipe_approval_verify_token(processed, remarks=""):
     verified_role = (verified.get("role") or "").strip()
     verified_username = _norm_username(verified.get("username"))
     if _recipe_verifier_is_current_operator(verified):
+        _audit_self_approval_rejected(
+            "recipe",
+            verified,
+            entity_type="recipe",
+            entity_name=(processed.get("productName") or processed.get("name") or ""),
+        )
         return "A second person must approve this recipe action.", False, None
     by_line = verified_name
     if verified_role:
@@ -1558,6 +1661,7 @@ def _require_recipe_second_person_approval():
     if verify_err:
         return None, (jsonify({"error": verify_err}), 401)
     if _recipe_verifier_is_current_operator(verified):
+        _audit_self_approval_rejected("recipe", verified, entity_type="recipe")
         return None, (jsonify({"error": "A second person must approve this recipe action."}), 403)
     return verified, None
 
@@ -1947,6 +2051,13 @@ def approve_recipe(recipe_id):
             return jsonify({"ok": False, "error": "Recipe not found"}), 404
         verified_username = _norm_username(verified.get("username"))
         if _recipe_verifier_is_current_operator(verified):
+            _audit_self_approval_rejected(
+                "recipe",
+                verified,
+                entity_type="recipe",
+                entity_id=recipe_id,
+                entity_name=(recipe.get("productName") or recipe.get("name") or ""),
+            )
             return jsonify({"ok": False, "error": "A second person must approve this recipe action."}), 403
         st = recipe.get("recipeApprovalStatus")
         if st == "approved":
@@ -2215,6 +2326,13 @@ def approve_report(report_id):
             return jsonify({"ok": False, "error": "Invalid approval state"}), 400
         op_keys = _report_operator_identity_keys(report)
         if verified_username and verified_username in op_keys:
+            _audit_self_approval_rejected(
+                "report",
+                verified,
+                entity_type="report",
+                entity_id=report_id,
+                entity_name="report id {}".format(report_id),
+            )
             return jsonify({"ok": False, "error": "Operator cannot approve their own report."}), 403
         report_type = _normalize_report_approval_type(report.get("type"))
         token_report_type = verified.get("reportType")
@@ -2247,6 +2365,9 @@ def approve_report(report_id):
         report["approvedByName"] = verified_name
         report["approvedByUsername"] = verified_username
         report["approvedAt"] = _utc_now_iso()
+        report.pop("approvalDeferred", None)
+        report.pop("approvalDeferredAt", None)
+        report.pop("approvalDeferredBy", None)
         report = _apply_validation_name_after_approval(report, pf)
         data_service.save_report(report)
         pdf_ok = False
@@ -2269,6 +2390,37 @@ def approve_report(report_id):
         return jsonify({"ok": True, "report": report}), 200
     except Exception as e:
         app.logger.exception("Error approving report")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/data/reports/<int:report_id>/defer-approval", methods=["POST"])
+def defer_report_approval(report_id):
+    """Mark a pending report as Approve later — stay in Unapproved until opened and approved."""
+    try:
+        gate = _require_auth()
+        if gate:
+            return gate
+        report = data_service.get_report(report_id)
+        if not report:
+            return jsonify({"ok": False, "error": "Report not found"}), 404
+        rtype = (report.get("type") or "").strip().lower()
+        if rtype not in ("test", "validation", "calibration"):
+            return jsonify({"ok": False, "error": "Only test/validation/calibration reports can defer approval"}), 400
+        st = (report.get("reportApprovalStatus") or "").strip().lower()
+        if st != "pending":
+            return jsonify({"ok": False, "error": "Only pending reports can defer approval"}), 400
+        cur = data_service.get_current_user() or {}
+        report["approvalDeferred"] = True
+        report["approvalDeferredAt"] = _utc_now_iso()
+        report["approvalDeferredBy"] = str(cur.get("username") or cur.get("name") or "").strip() or "--"
+        data_service.save_report(report)
+        try:
+            data_service.clear_test_run_data()
+        except Exception:
+            app.logger.exception("Failed to clear checkpoint after deferring report %s", report_id)
+        return jsonify({"ok": True, "report": report, "preview": report_service.get_report_preview_data(report)}), 200
+    except Exception as e:
+        app.logger.exception("Error deferring report approval")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
@@ -2694,7 +2846,10 @@ def create_user_group():
             entity_type="user_group",
             entity_id=group_id,
             entity_name=(created or {}).get("name") or "",
-            details="User group created: {}".format((created or {}).get("name") or group_id),
+            details="User group created: {} | powers: {}".format(
+                (created or {}).get("name") or group_id,
+                _format_user_group_powers_for_audit(created),
+            ),
             signature={
                 "mode": "session",
                 "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
@@ -2727,7 +2882,10 @@ def update_user_group(group_id):
             entity_type="user_group",
             entity_id=group_id,
             entity_name=(updated or {}).get("name") or "",
-            details="User group updated: {}".format((updated or {}).get("name") or group_id),
+            details="User group updated: {} | powers: {}".format(
+                (updated or {}).get("name") or group_id,
+                _format_user_group_powers_for_audit(updated),
+            ),
             signature={
                 "mode": "session",
                 "username": (cur.get("username") or cur.get("name") or "").strip() or "--",
@@ -3775,6 +3933,12 @@ def _require_export_usb_and_verification_json():
         exporter_un = _norm_username(cur.get("username") or cur.get("name"))
         verifier_un = _norm_username((_verified or {}).get("username") or (_verified or {}).get("name"))
         if exporter_un and verifier_un and exporter_un == verifier_un:
+            _audit_self_approval_rejected(
+                "export",
+                _verified,
+                entity_type="export",
+                entity_name="USB export",
+            )
             return (
                 jsonify({
                     "success": False,
@@ -3870,6 +4034,53 @@ def _format_export_actors_detail(exported_by, approved_by):
     return "exported by {} ({}) | approved by {} ({})".format(ex_u, ex_e, ap_u, ap_e)
 
 
+def _stage_report_usb_export(cur, verifier, exported_report_ids):
+    ids = []
+    for rid in exported_report_ids or []:
+        try:
+            n = int(rid)
+            if n > 0:
+                ids.append(n)
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return None, None, None
+    export_id = secrets.token_urlsafe(16)
+    exported_by = _export_actor_snapshot(cur or {})
+    approved_by = _export_actor_from_verifier(verifier) if verifier else dict(exported_by)
+    data_service.stage_report_export_pending(
+        export_id=export_id,
+        report_ids=ids,
+        exported_by=exported_by,
+        approved_by=approved_by,
+    )
+    return export_id, exported_by, approved_by
+
+
+def _maybe_purge_scheduled_report_export() -> None:
+    try:
+        purged = data_service.run_due_report_export_purge()
+    except Exception:
+        app.logger.exception("Report export purge check failed")
+        return
+    if not purged:
+        return
+    exported = purged.get("exported_by") if isinstance(purged.get("exported_by"), dict) else {}
+    approved = purged.get("approved_by") if isinstance(purged.get("approved_by"), dict) else {}
+    details = (
+        "Report cycle started | Exported by: {} ({}) | Approved by: {} ({})"
+    ).format(
+        exported.get("username") or "--",
+        exported.get("employee_id") or "--",
+        approved.get("username") or "--",
+        approved.get("employee_id") or "--",
+    )
+    _audit(None, None, "Report cycle started", details)
+
+
+def _maybe_purge_scheduled_exports() -> None:
+    _maybe_purge_scheduled_audit_export()
+    _maybe_purge_scheduled_report_export()
 
 
 def _stage_audit_usb_export(cur, verifier, entry_ids, pdf_path=""):
@@ -3946,6 +4157,59 @@ def _audit_report_ids_label(report_ids) -> str:
     return ", ".join(str(i) for i in out)
 
 
+def _friendly_export_error(exc_or_msg):
+    """Translate any internal export failure into a single short user-facing message.
+
+    The audit/reports export pipeline touches Chromium, udisks2, polkit, vfat/exFAT,
+    and the kernel block layer. Their raw messages are useless to operators; almost
+    every recoverable failure on this hardware is resolved by re-formatting the
+    pendrive cleanly, so we surface a single instruction when no better match exists.
+    """
+    text = (str(exc_or_msg) if exc_or_msg is not None else "").lower()
+    if "no external pendrive" in text or "not detected" in text:
+        return "No external pendrive detected. Please connect a USB pendrive and try again."
+    if "multiple pendrives" in text:
+        return "Multiple pendrives detected. Please disconnect extras and try again."
+    if "could not mount" in text or "mount failed" in text or "not authorized" in text:
+        return "Could not access the pendrive. Reconnect it and try again."
+    if "no space left" in text or "disk full" in text:
+        return "Pendrive is full. Free space or use a different pendrive."
+    if "cannot approve your own export" in text or "own export" in text:
+        return "You cannot approve your own export. Another user with export approval permission must verify."
+    if "must be approved" in text or "before print or export" in text or "before export" in text:
+        return "This report must be approved before export."
+    if "no report ids" in text:
+        return "No reports selected to export."
+    if "unauthorized" in text:
+        return "Unauthorized"
+    if "forbidden" in text or "not permitted" in text:
+        return "Forbidden. Export to USB is not permitted for this account."
+    return "Failed to export. Please format the pendrive (FAT32 or exFAT) and try again."
+
+
+def _export_failure_audit_detail(reason) -> str:
+    """Prefer a clear operator-facing failure line for audit trails."""
+    raw = str(reason or "").strip()
+    if not raw:
+        return _friendly_export_error("export failed")
+    low = raw.lower()
+    # Keep explicit business-rule / permission wording as-is when already clear.
+    if (
+        "cannot approve" in low
+        or "must be approved" in low
+        or "forbidden" in low
+        or "unauthorized" in low
+        or "no report" in low
+        or "format the pendrive" in low
+        or "no external pendrive" in low
+        or "multiple pendrives" in low
+        or "pendrive is full" in low
+        or "could not access the pendrive" in low
+    ):
+        return raw
+    return _friendly_export_error(raw)
+
+
 def _log_usb_export_audit(
     cur,
     verifier,
@@ -4001,17 +4265,37 @@ def _log_usb_export_audit(
 
 
 def _log_reports_export_failure(cur, verifier, reason: str, report_ids=None, extra=None) -> None:
-    detail = str(reason or "Report export failed").strip() or "Report export failed"
+    detail = _export_failure_audit_detail(reason)
     label = _audit_report_ids_label(report_ids)
     if label:
         detail = "{} | report ids: {}".format(detail, label)
     fail_extra = dict(extra or {})
     if label:
         fail_extra["reportIds"] = label
+    raw = str(reason or "").strip()
+    if raw and raw not in detail:
+        fail_extra["rawError"] = raw[:500]
     _log_usb_export_audit(
         cur,
         verifier,
         "Reports export failed",
+        detail,
+        outcome="failed",
+        attribute_approver=False,
+        extra=fail_extra,
+    )
+
+
+def _log_audit_export_failure(cur, verifier, reason: str, extra=None) -> None:
+    detail = _export_failure_audit_detail(reason)
+    fail_extra = dict(extra or {})
+    raw = str(reason or "").strip()
+    if raw and raw not in detail:
+        fail_extra["rawError"] = raw[:500]
+    _log_usb_export_audit(
+        cur,
+        verifier,
+        "Audit trail export failed",
         detail,
         outcome="failed",
         attribute_approver=False,
@@ -4451,17 +4735,29 @@ def export_audit_trails():
     replaces the previous JSON dump (which was editable).
     """
     mounted_now = None
+    cur = None
+    verifier = None
     try:
         gate, verifier = _require_export_usb_and_verification_json()
+        cur = data_service.get_current_user()
         if gate is not None:
+            err_msg = _audit_error_from_response(gate[0]) or "Export approval or permission denied"
+            # Self-approval already wrote a dedicated audit row inside the gate helper.
+            if "cannot approve your own export" not in err_msg.lower():
+                _log_audit_export_failure(cur, verifier, err_msg)
             return gate
         audit_gate = _require_session_internal(
             "audit-view",
             "Forbidden. You do not have permission to export audit trails.",
         )
         if audit_gate:
+            _log_audit_export_failure(
+                cur,
+                verifier,
+                _audit_error_from_response(audit_gate[0])
+                or "Forbidden. You do not have permission to export audit trails.",
+            )
             return audit_gate
-        cur = data_service.get_current_user()
 
         data = request.get_json(force=True, silent=True) or {}
         filters_in = data.get("filters") or {}
@@ -4493,10 +4789,16 @@ def export_audit_trails():
 
         export_dir, err, devices, mounted_now = _resolve_export_destination(device_path, export_path)
         if err == "MULTIPLE_PENDRIVES":
+            _log_audit_export_failure(cur, verifier, "Multiple pendrives detected. Choose one.")
             return jsonify({"success": False, "error": "Multiple pendrives detected. Choose one.", "devices": devices, "code": "MULTIPLE_PENDRIVES"}), 409
         if err:
-            return jsonify({"success": False, "error": err, "devices": devices}), 400
-        export_dir.mkdir(parents=True, exist_ok=True)
+            _log_audit_export_failure(cur, verifier, err)
+            return jsonify({"success": False, "error": _friendly_export_error(err), "devices": devices}), 400
+        try:
+            export_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as oe:
+            _log_audit_export_failure(cur, verifier, oe)
+            return jsonify({"success": False, "error": _friendly_export_error(oe)}), 500
 
         entries = _prepare_audit_entries_for_display(audit_service.list_entries(filters))
         try:
@@ -4506,7 +4808,11 @@ def export_audit_trails():
         html = _build_audit_trail_html(entries, filters, factory)
         timestamp = time.strftime("%Y-%m-%d_%H%M%S", time.localtime())
         out_path = export_dir / "audit_trail_{}.pdf".format(timestamp)
-        pdf_generator.render_html_to_pdf(html, out_path)
+        try:
+            pdf_generator.render_html_to_pdf(html, out_path)
+        except Exception as render_err:
+            _log_audit_export_failure(cur, verifier, render_err)
+            return jsonify({"success": False, "error": _friendly_export_error(render_err)}), 500
         # Make the file read-only on the filesystem if the target FS supports it.
         # vfat ignores chmod, but ext4 / exfat-utils etc. will keep it.
         try:
@@ -4526,12 +4832,7 @@ def export_audit_trails():
         export_id, exported_by, approved_by = _stage_audit_usb_export(
             cur, verifier, entry_ids, pdf_path=str(out_path)
         )
-        _log_export_completed_audit(
-            cur,
-            verifier,
-            "Audit trail",
-            "pdf {} | entries {}".format(out_path, len(entries)),
-        )
+        # Success audit is written only after operator verifies USB copy.
         return jsonify({
             "success": True,
             "path": str(out_path),
@@ -4550,6 +4851,14 @@ def export_audit_trails():
             except Exception:
                 pass
         app.logger.exception("Error exporting audit trails")
+        try:
+            _log_audit_export_failure(
+                cur or data_service.get_current_user(),
+                verifier,
+                e,
+            )
+        except Exception:
+            app.logger.exception("Failed to write audit-trail export failure audit row")
         return jsonify({"success": False, "error": _friendly_export_error(e)}), 500
 
 
@@ -4559,7 +4868,7 @@ def export_audit_trails():
 def confirm_audit_export():
     """Operator confirmed USB audit export; starts 24h retention timer."""
     try:
-        _maybe_purge_scheduled_audit_export()
+        _maybe_purge_scheduled_exports()
         cur = data_service.get_current_user()
         if not cur:
             return jsonify({"success": False, "error": "Unauthorized"}), 401
@@ -4569,20 +4878,56 @@ def confirm_audit_export():
         export_id = (data.get("export_id") or "").strip()
         verified = bool(data.get("verified"))
         if not verified:
-            return jsonify({"success": True, "verified": False, "scheduled": False}), 200
+            rejected = None
+            if export_id:
+                try:
+                    reject_fn = getattr(audit_service, "reject_audit_export_pending", None)
+                    if callable(reject_fn):
+                        rejected = reject_fn(export_id)
+                except Exception:
+                    app.logger.exception("Failed rejecting audit export staging")
+            try:
+                _log_audit_export_failure(
+                    cur,
+                    None,
+                    "Operator reported USB export unsuccessful",
+                    extra={"export_id": export_id or "", "rejected": bool(rejected)},
+                )
+            except Exception:
+                try:
+                    _audit(
+                        cur.get("username") or cur.get("name"),
+                        cur.get("role"),
+                        "Audit trail export failed",
+                        "Operator reported USB export unsuccessful",
+                    )
+                except Exception:
+                    app.logger.exception("Failed writing audit export failure row")
+            return jsonify({"success": True, "verified": False, "scheduled": False, "retry": True}), 200
         if not export_id:
             return jsonify({"success": False, "error": "Missing export_id"}), 400
         scheduled = audit_service.confirm_audit_export_verified(export_id)
         if not scheduled:
             return jsonify({"success": False, "error": "Export session expired or invalid. Export again."}), 400
-        _audit(
-            cur.get("username") or cur.get("name"),
-            cur.get("role"),
-            "Audit export verified",
-            "USB export verified; {} entries scheduled for removal after 24 hours".format(
-                len(scheduled.get("entry_ids") or [])
-            ),
-        )
+        n_entries = len(scheduled.get("entry_ids") or [])
+        approved = scheduled.get("approved_by") if isinstance(scheduled.get("approved_by"), dict) else {}
+        verifier = None
+        if approved.get("username") or approved.get("name"):
+            verifier = {
+                "username": approved.get("username"),
+                "role": approved.get("role"),
+                "name": approved.get("name"),
+            }
+        detail = "Audit trail export successful | {} entries scheduled for removal after 24 hours".format(n_entries)
+        try:
+            _log_export_completed_audit(cur, verifier, "Audit trail", detail)
+        except Exception:
+            _audit(
+                cur.get("username") or cur.get("name"),
+                cur.get("role"),
+                "Export completed",
+                detail,
+            )
         return jsonify({
             "success": True,
             "verified": True,
@@ -4592,6 +4937,82 @@ def confirm_audit_export():
         }), 200
     except Exception as e:
         app.logger.exception("Error confirming audit export")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/reports/export/confirm", methods=["POST"])
+def confirm_report_export():
+    """Operator confirmed USB report export; starts 24h retention timer."""
+    try:
+        _maybe_purge_scheduled_exports()
+        cur = data_service.get_current_user()
+        if not cur:
+            return jsonify({"success": False, "error": "Unauthorized"}), 401
+        if not _session_has_internal("export-usb"):
+            return jsonify({"success": False, "error": "Forbidden."}), 403
+        data = request.get_json(force=True, silent=True) or {}
+        export_id = (data.get("export_id") or "").strip()
+        verified = bool(data.get("verified"))
+        if not verified:
+            rejected = None
+            if export_id:
+                try:
+                    reject_fn = getattr(data_service, "reject_report_export_pending", None)
+                    if callable(reject_fn):
+                        rejected = reject_fn(export_id)
+                except Exception:
+                    app.logger.exception("Failed rejecting report export staging")
+            try:
+                _log_reports_export_failure(
+                    cur,
+                    None,
+                    "Operator reported USB export unsuccessful",
+                    extra={"export_id": export_id or "", "rejected": bool(rejected)},
+                )
+            except Exception:
+                try:
+                    _audit(
+                        cur.get("username") or cur.get("name"),
+                        cur.get("role"),
+                        "Reports export failed",
+                        "Operator reported USB export unsuccessful",
+                    )
+                except Exception:
+                    app.logger.exception("Failed writing report export failure row")
+            return jsonify({"success": True, "verified": False, "scheduled": False, "retry": True}), 200
+        if not export_id:
+            return jsonify({"success": False, "error": "Missing export_id"}), 400
+        scheduled = data_service.confirm_report_export_verified(export_id)
+        if not scheduled:
+            return jsonify({"success": False, "error": "Export session expired or invalid. Export again."}), 400
+        n_reports = len(scheduled.get("report_ids") or [])
+        approved = scheduled.get("approved_by") if isinstance(scheduled.get("approved_by"), dict) else {}
+        verifier = None
+        if approved.get("username") or approved.get("name"):
+            verifier = {
+                "username": approved.get("username"),
+                "role": approved.get("role"),
+                "name": approved.get("name"),
+            }
+        detail = "Report export successful | {} report(s) scheduled for removal after 24 hours".format(n_reports)
+        try:
+            _log_export_completed_audit(cur, verifier, "Report", detail)
+        except Exception:
+            _audit(
+                cur.get("username") or cur.get("name"),
+                cur.get("role"),
+                "Export completed",
+                detail,
+            )
+        return jsonify({
+            "success": True,
+            "verified": True,
+            "scheduled": True,
+            "purge_at_ms": int(scheduled.get("purge_at_ms") or 0),
+            "reports_scheduled": len(scheduled.get("report_ids") or []),
+        }), 200
+    except Exception as e:
+        app.logger.exception("Error confirming report export")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -4697,27 +5118,6 @@ def _generate_report_pdf_file(report_id: int, html: str = None, write_audit: boo
     except Exception:
         app.logger.exception("Report PDF generation failed for id %s", report_id)
         return False
-
-
-def _friendly_export_error(exc_or_msg):
-    """Translate any internal export failure into a single short user-facing message.
-
-    The audit/reports export pipeline touches Chromium, udisks2, polkit, vfat/exFAT,
-    and the kernel block layer. Their raw messages (dbus warnings, polkit codes,
-    SCSI I/O errors, FAT short-name issues, ...) are useless to operators. Almost
-    every recoverable failure on this hardware is resolved by re-formatting the
-    pendrive cleanly, so we surface a single instruction.
-    """
-    text = (str(exc_or_msg) if exc_or_msg is not None else "").lower()
-    if "no external pendrive" in text or "not detected" in text:
-        return "No external pendrive detected. Please connect a USB pendrive and try again."
-    if "multiple pendrives" in text:
-        return "Multiple pendrives detected. Please disconnect extras and try again."
-    if "could not mount" in text or "mount failed" in text or "not authorized" in text:
-        return "Could not access the pendrive. Reconnect it and try again."
-    if "no space left" in text or "disk full" in text:
-        return "Pendrive is full. Free space or use a different pendrive."
-    return "Failed to export. Please format the pendrive (FAT32 or exFAT) and try again."
 
 
 @app.route("/api/reports/<int:report_id>/pdf", methods=["POST"])
@@ -4879,8 +5279,8 @@ def export_reports():
             )
             return jsonify({"success": False, "error": "Multiple pendrives detected. Choose one.", "devices": devices, "code": "MULTIPLE_PENDRIVES"}), 409
         if err:
-            _log_reports_export_failure(cur, verifier, str(err), report_ids=report_ids)
-            return jsonify({"success": False, "error": err, "devices": devices}), 400
+            _log_reports_export_failure(cur, verifier, err, report_ids=report_ids)
+            return jsonify({"success": False, "error": _friendly_export_error(err), "devices": devices}), 400
 
         for rid in report_ids:
             blocked = _check_report_approved_for_print_export(report_id=rid)
@@ -4893,9 +5293,14 @@ def export_reports():
                 )
                 return blocked
 
-        export_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            export_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as oe:
+            _log_reports_export_failure(cur, verifier, oe, report_ids=report_ids)
+            return jsonify({"success": False, "error": _friendly_export_error(oe)}), 500
 
         exported_files = []
+        exported_report_ids = []
         failed = []
         for rid in report_ids:
             src = _report_pdf_path(rid)
@@ -4917,6 +5322,7 @@ def export_reports():
                             break
                         fout.write(chunk)
                 exported_files.append(str(dest))
+                exported_report_ids.append(int(rid))
             except Exception as e:
                 failed.append({"id": rid, "error": str(e)})
 
@@ -4928,17 +5334,22 @@ def export_reports():
             unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
 
         ok_count = len(exported_files)
+        export_id = None
         if failed or ok_count == 0:
             fail_detail = "Exported {} of {} report(s); failures: {}".format(
                 ok_count, len(report_ids), failed or "none copied"
             )
             _log_reports_export_failure(cur, verifier, fail_detail, report_ids=report_ids, extra={"failed": failed})
         else:
-            ids_label = ", ".join(str(i) for i in report_ids[:ok_count])
+            export_id, exported_by, approved_by = _stage_report_usb_export(cur, verifier, exported_report_ids)
+            actors = _format_export_actors_detail(exported_by, approved_by) if export_id else ""
+            ids_label = ", ".join(str(i) for i in exported_report_ids)
             detail = "Exported {} report{} to USB".format(ok_count, "" if ok_count == 1 else "s")
             if ids_label:
                 detail = "{} (ids: {})".format(detail, ids_label)
-            _log_export_completed_audit(cur, verifier, "Report", detail)
+            if actors:
+                detail = "{} | {}".format(detail, actors)
+            # Success audit deferred until operator verifies USB copy.
         return jsonify({
             "success": (len(failed) == 0 and ok_count > 0),
             "count": len(exported_files),
@@ -4948,6 +5359,8 @@ def export_reports():
             "generated_pdfs_now": generated,
             "unmount_detail": unmount_detail,
             "device_path": device_path or (devices[0]["path"] if len(devices) == 1 else None),
+            "export_id": export_id,
+            "reports_staged": len(exported_report_ids),
         }), 200
     except Exception as e:
         if mounted_now:
@@ -5044,15 +5457,26 @@ def export_reports_stream():
             failed = result.get("failed") or []
             ok_count = int(result.get("count") or 0)
             if ok_count > 0 and not failed:
-                detail = "Exported {} report{} to USB (stream)".format(
-                    ok_count, "" if ok_count == 1 else "s"
-                )
-                _log_export_completed_audit(cur, verifier, "Report", detail)
+                # Success audit deferred until operator verifies USB copy via /confirm.
                 return
-            fail_detail = "Exported {} of {} report(s) (stream)".format(ok_count, total)
-            if failed:
-                fail_detail = "{} | failures: {}".format(fail_detail, failed)
-            _log_reports_export_failure(cur, verifier, fail_detail, report_ids=report_ids, extra={"failed": failed})
+            # Copy/render/mount I/O failures surface to the operator as the pendrive
+            # format message — keep the audit trail aligned with that wording.
+            io_fail = bool(failed) and all(
+                str((item or {}).get("reason") or "").strip().lower() in ("copy", "render", "pending")
+                for item in failed
+            )
+            if ok_count == 0 and io_fail and any(
+                str((item or {}).get("reason") or "").strip().lower() in ("copy", "render")
+                for item in failed
+            ):
+                fail_detail = _friendly_export_error("export copy/render failed")
+            else:
+                fail_detail = "Exported {} of {} report(s) (stream)".format(ok_count, total)
+                if failed:
+                    fail_detail = "{} | failures: {}".format(fail_detail, failed)
+            _log_reports_export_failure(
+                cur, verifier, fail_detail, report_ids=report_ids, extra={"failed": failed}
+            )
 
         total = len(report_ids)
         # Budget allocation (sums to 100):
@@ -5065,6 +5489,7 @@ def export_reports_stream():
             "ok": False,
             "count": 0,
             "exported_files": [],
+            "exported_report_ids": [],
             "failed": [],
             "export_directory": None,
             "device_path": None,
@@ -5149,6 +5574,7 @@ def export_reports_stream():
                 try:
                     pdf_generator._copy_to_destination(pdf_src, dest)  # robust chunked copy
                     result["exported_files"].append(str(dest))
+                    result["exported_report_ids"].append(int(rid))
                     result["count"] += 1
                     yield _emit({"event": "report", "current": i, "total": total,
                                  "percent": int(next_progress_at), "id": rid,
@@ -5167,6 +5593,11 @@ def export_reports_stream():
                 unmount_detail = usb_export.sync_and_unmount_pendrive(mounted_now, power_off=power_off)
                 mounted_now = None
 
+            export_id = None
+            if result["exported_report_ids"] and not result["failed"]:
+                export_id, _exported_by, _approved_by = _stage_report_usb_export(
+                    cur, verifier, result["exported_report_ids"]
+                )
             _audit_stream_finish()
 
             result["ok"] = (len(result["failed"]) == 0 and result["count"] > 0)
@@ -5180,6 +5611,8 @@ def export_reports_stream():
                 "export_directory": result["export_directory"],
                 "device_path": result["device_path"],
                 "unmount_detail": unmount_detail,
+                "export_id": export_id,
+                "reports_staged": len(result["exported_report_ids"]),
             })
         except Exception as e:
             app.logger.exception("[EXPORT-STREAM] Unexpected failure")
@@ -5842,24 +6275,38 @@ def biometric_enroll_capture():
         if step not in (1, 2):
             return jsonify({"ok": False, "error": "step must be 1 or 2"}), 400
         member = data_service.get_member_by_username(username)
-        if not member:
+        draft_enroll = bool(payload.get("draftEnroll")) and not member
+        if not member and not draft_enroll:
             return jsonify({"ok": False, "error": "Member not found for the provided username"}), 404
-        status = str(member.get("status") or "active").strip().lower()
-        if status != "active":
-            return jsonify({"ok": False, "error": "Member account is not active"}), 403
-        before_member = dict(member)
+        if member:
+            status = str(member.get("status") or "active").strip().lower()
+            if status != "active":
+                return jsonify({"ok": False, "error": "Member account is not active"}), 403
+            before_member = dict(member)
+        else:
+            before_member = {}
         timeout_sec = float(payload.get("captureTimeoutSec") or BIOMETRIC_ENROLL_TIMEOUT_SEC)
 
         if step == 1:
             try:
-                template_id = data_service.resolve_enroll_template_id(member, payload.get("templateId"))
+                if member and hasattr(data_service, "resolve_enroll_template_id"):
+                    template_id = data_service.resolve_enroll_template_id(member, payload.get("templateId"))
+                elif payload.get("templateId") is not None:
+                    template_id = int(payload.get("templateId"))
+                else:
+                    template_id = data_service.get_next_fingerprint_template_id()
             except ValueError as ve:
                 return jsonify({"ok": False, "error": str(ve)}), 400
             captured = biometric_service.capture_enroll_finger(0x01, timeout_sec=timeout_sec)
             if not captured.get("ok"):
                 _clear_enroll_session(username)
                 return jsonify(captured), 400
-            _set_enroll_session(username, {"templateId": template_id, "step1Done": True, "startedAt": int(time.time())})
+            _set_enroll_session(username, {
+                "templateId": template_id,
+                "step1Done": True,
+                "startedAt": int(time.time()),
+                "draftEnroll": bool(draft_enroll),
+            })
             return jsonify({
                 "ok": True,
                 "step": 1,
@@ -5882,32 +6329,53 @@ def biometric_enroll_capture():
             _clear_enroll_session(username)
             return jsonify(captured), 400
 
-        old_template_id = before_member.get("fingerprintTemplateId")
+        # When replacing an existing linked template on a real member, delete the old slot after success.
+        old_template_id = before_member.get("fingerprintTemplateId") if member else None
         try:
             old_tid = int(old_template_id) if old_template_id is not None else None
         except (TypeError, ValueError):
             old_tid = None
+
+        finalized = biometric_service.finalize_enroll(template_id)
+        _clear_enroll_session(username)
+        if not finalized.get("ok"):
+            if member:
+                _audit_event(
+                    action="Biometric enroll",
+                    outcome="failed",
+                    entity_type="member",
+                    entity_id=member.get("id"),
+                    entity_name=username,
+                    details=finalized.get("error") or "Unknown error",
+                    target_user=username,
+                    before=before_member,
+                    extra={"templateId": template_id},
+                )
+            return jsonify(finalized), 400
+
+        # Create-member flow: fingerprint is captured before the profile exists.
+        # Keep template pending and let commitPendingNewMemberDraft link it on save.
+        if draft_enroll or not member:
+            _set_enroll_session(username, {
+                "templateId": template_id,
+                "pendingLink": True,
+                "draftEnroll": True,
+                "finishedAt": int(time.time()),
+            })
+            return jsonify({
+                "ok": True,
+                "step": 2,
+                "templateId": template_id,
+                "linked": False,
+                "pendingLink": True,
+                "message": "Fingerprint captured. Complete profile save to link it.",
+            }), 200
+
         if old_tid is not None and old_tid != int(template_id):
             try:
                 biometric_service.delete_template(old_tid)
             except Exception:
                 pass
-
-        finalized = biometric_service.finalize_enroll(template_id)
-        _clear_enroll_session(username)
-        if not finalized.get("ok"):
-            _audit_event(
-                action="Biometric enroll",
-                outcome="failed",
-                entity_type="member",
-                entity_id=member.get("id"),
-                entity_name=username,
-                details=finalized.get("error") or "Unknown error",
-                target_user=username,
-                before=before_member,
-                extra={"templateId": template_id},
-            )
-            return jsonify(finalized), 400
 
         previous_owner = data_service.get_member_by_fingerprint_template(template_id)
         if previous_owner and previous_owner.get("id") != member.get("id"):
@@ -5943,22 +6411,30 @@ def biometric_enroll_capture():
     except Exception as e:
         app.logger.exception("Error during biometric enroll capture")
         return jsonify({"ok": False, "error": str(e)}), 500
-
-
 @app.route("/api/biometric/enroll/cancel", methods=["POST"])
 def biometric_enroll_cancel():
     try:
         # Stop sensor GenImg polling immediately (same as UI Cancel during login/verify).
-        biometric_service.request_cancel()
+        try:
+            if hasattr(biometric_service, "request_cancel"):
+                biometric_service.request_cancel()
+        except Exception:
+            pass
         payload = request.get_json(force=True, silent=True) or {}
         username = str(payload.get("username") or "").strip()
         if username:
+            session = _get_enroll_session(username)
+            tid = session.get("templateId")
+            if session.get("pendingLink") or session.get("draftEnroll"):
+                try:
+                    if tid is not None:
+                        biometric_service.delete_template(int(tid))
+                except Exception:
+                    pass
             _clear_enroll_session(username)
         return jsonify({"ok": True, "cancelled": True}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-
-
 @app.route("/api/biometric/cancel", methods=["POST"])
 def biometric_cancel_scan():
     """Stop any in-flight fingerprint wait so the sensor LED stops blinking."""
@@ -6236,7 +6712,25 @@ def _start_usb_health_monitor():
         app.logger.exception("Failed to start USB health monitor")
 
 
+def _export_purge_loop():
+    while True:
+        try:
+            _maybe_purge_scheduled_exports()
+        except Exception:
+            app.logger.exception("Export purge loop error")
+        time.sleep(60)
+
+
+def _start_export_purge_thread():
+    try:
+        t = threading.Thread(target=_export_purge_loop, daemon=True, name="export-purge")
+        t.start()
+    except Exception:
+        app.logger.exception("Failed to start export purge thread")
+
+
 _start_usb_health_monitor()
+_start_export_purge_thread()
 
 
 @app.route("/<path:path>", methods=["GET"])

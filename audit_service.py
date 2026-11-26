@@ -647,6 +647,22 @@ def stage_audit_export_pending(
     _save_audit_export_schedule(state)
 
 
+
+
+def reject_audit_export_pending(export_id: str) -> Optional[Dict[str, Any]]:
+    '''Operator reported USB copy unsuccessful: drop staged pending (no purge).'''
+    want = str(export_id or "").strip()
+    if not want:
+        return None
+    state = _load_audit_export_schedule()
+    staged = state.get("staged") if isinstance(state.get("staged"), dict) else {}
+    if str(staged.get("export_id") or "").strip() != want:
+        return None
+    out = dict(staged)
+    state.pop("staged", None)
+    _save_audit_export_schedule(state)
+    return out
+
 def confirm_audit_export_verified(export_id: str) -> Optional[Dict[str, Any]]:
     """Operator confirmed USB PDF OK: schedule purge in 24h."""
     want = str(export_id or "").strip()
