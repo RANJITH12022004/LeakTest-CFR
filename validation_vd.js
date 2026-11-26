@@ -1286,7 +1286,7 @@
         _setCalRunEl('cal-set-vacuum', String(settings.targetVacuumMmHg));
         _setCalRunEl('cal-live-vacuum', '--');
         _setCalRunEl('cal-release-time', String(settings.releaseTimeSec));
-        _setCalRunEl('cal-hold-elapsed', '00:00');
+        _setCalRunEl('cal-hold-elapsed', (typeof formatMmSs === 'function') ? formatMmSs(60) : '01:00');
         _setCalRunEl('cal-run-status', 'Starting calibration…');
         _setCalGaugeEntryEnabled(false);
         _setCalPrimaryControlRunning(true);
