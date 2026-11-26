@@ -485,7 +485,7 @@
                         var reportId = result && result.id;
                         currentReportFilter = 'validation';
                         if (reportId && typeof openReportPreview === 'function') {
-                            openReportPreview(reportId);
+                            openReportPreview(reportId, { setGate: true });
                             return { openedPreview: true };
                         }
                         _postRunSessionHold = false;
@@ -1049,7 +1049,7 @@
                 currentReportFilter = 'calibration';
                 if (reportId && typeof openReportPreview === 'function') {
                     // Leak abort is pending QA; other aborts stay as aborted preview.
-                    openReportPreview(reportId, (isAborted && !isLeakAbort) ? {} : { setGate: true });
+                    openReportPreview(reportId, { setGate: true });
                 } else {
                     window._postRunSessionHold = false;
                     goToPage('reports');

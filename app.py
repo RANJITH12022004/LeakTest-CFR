@@ -2223,28 +2223,22 @@ def create_report():
             td = enriched.get("testData") if isinstance(enriched.get("testData"), dict) else {}
             run_status = str(td.get("status") or enriched.get("status") or "").strip().lower()
             leak_abort = _is_leak_abort_report(enriched) or _is_leak_abort_report(report_data)
-            if run_status == "aborted" and not leak_abort:
-                enriched["reportApprovalStatus"] = "aborted"
-                if (enriched.get("type") or "").strip().lower() == "validation":
-                    enriched["name"] = _validation_report_name_for_outcome(enriched, "Aborted")
-            else:
-                enriched["reportApprovalStatus"] = "pending"
-                for k in ("approvalPassFail", "approvalRemarks", "approvedBy", "approvedAt", "approvedByUsername"):
-                    enriched.pop(k, None)
-                if leak_abort:
-                    enriched.pop("result", None)
-                    if isinstance(td, dict):
-                        td = dict(td)
-                        td.pop("result", None)
-                        td.pop("approvalPassFail", None)
-                        enriched["testData"] = td
-                    if (enriched.get("type") or "").strip().lower() == "validation":
-                        enriched["name"] = _validation_report_name_for_outcome(enriched, None)
-                # Never persist "Pending Approval" inside the report title — approval is a separate field.
-                elif (enriched.get("type") or "").strip().lower() == "validation":
-                    nm = str(enriched.get("name") or "")
-                    if re.search(r"pending\s*approval", nm, flags=re.I) or not nm.strip():
-                        enriched["name"] = _validation_report_name_for_outcome(enriched, None)
+            # Completed and aborted runs (incl. leak abort) all require Pass/Fail approval.
+            enriched["reportApprovalStatus"] = "pending"
+            for k in ("approvalPassFail", "approvalRemarks", "approvedBy", "approvedAt", "approvedByUsername"):
+                enriched.pop(k, None)
+            if leak_abort or run_status == "aborted":
+                enriched.pop("result", None)
+                if isinstance(td, dict):
+                    td = dict(td)
+                    td.pop("result", None)
+                    td.pop("approvalPassFail", None)
+                    enriched["testData"] = td
+            # Never persist "Pending Approval" inside the report title — approval is a separate field.
+            if (enriched.get("type") or "").strip().lower() == "validation":
+                nm = str(enriched.get("name") or "")
+                if re.search(r"pending\s*approval", nm, flags=re.I) or not nm.strip():
+                    enriched["name"] = _validation_report_name_for_outcome(enriched, None)
         report_id = data_service.save_report(enriched)
         enriched = report_service.enrich_report_context({**enriched, "id": report_id})
         data_service.save_report(enriched)
@@ -2464,22 +2458,16 @@ def abort_report(report_id):
         td["status"] = "aborted"
         report["testData"] = td
         report["status"] = "aborted"
-        report["reportApprovalStatus"] = "aborted"
+        # Keep pending so aborted reports still require approval (Approve later / Pass-Fail).
+        report["reportApprovalStatus"] = "pending"
+        for k in ("approvalPassFail", "approvalRemarks", "approvedBy", "approvedAt", "approvedByUsername"):
+            report.pop(k, None)
         if not report.get("completedAt"):
             report["completedAt"] = _utc_now_iso()
         data_service.save_report(report)
-        pdf_ok = False
-        try:
-            pdf_ok = _generate_report_pdf_file(report_id, write_audit=False)
-        except Exception:
-            app.logger.exception("Aborted-report PDF generation failed for id %s", report_id)
-        if pdf_ok:
-            _audit_report_pdf_generated(report_id, report)
+        _remove_report_pdf_file(report_id)
         ctx = _format_report_audit_details(report_id, report)
-        abort_detail = ctx
-        if pdf_ok:
-            abort_detail = "{} | aborted PDF saved".format(ctx)
-        _audit(session_un or None, role or None, "Report aborted", abort_detail)
+        _audit(session_un or None, role or None, "Report aborted", ctx + " | awaiting approval")
         return jsonify({"ok": True, "report": report}), 200
     except Exception as e:
         app.logger.exception("Error aborting report")

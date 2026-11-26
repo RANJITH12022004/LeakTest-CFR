@@ -10846,7 +10846,7 @@ function saveCombinedValidationReport() {
             currentReportFilter = 'validation';
             if (reportId) {
                 if (typeof openReportPreview === 'function') {
-                    openReportPreview(reportId, isAborted ? {} : { setGate: true });
+                    openReportPreview(reportId, { setGate: true });
             } else {
                     _postRunSessionHold = false;
                     goToPage('reports');
