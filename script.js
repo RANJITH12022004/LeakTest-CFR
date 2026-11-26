@@ -468,11 +468,14 @@ function showAdminUnlockPasswordResetScreen(memberId, username) {
     var subEl = document.getElementById('password-reset-page-subtitle');
     var oldWrap = document.getElementById('expired-reset-old-password-wrap');
     var cancelBtn = document.getElementById('password-reset-cancel-btn');
-    if (titleEl) titleEl.textContent = 'Set New Password';
-    if (subEl) subEl.textContent = 'Account unlocked. Set a new password for this profile (current password not required).';
+    if (titleEl) titleEl.textContent = 'Set Temporary Password';
+    if (subEl) subEl.textContent = 'Account unlocked. Set a temporary password for this profile. The user must change it on next login.';
     if (oldWrap) oldWrap.style.display = 'none';
-    if (cancelBtn) cancelBtn.style.display = '';
-    goToPage('password-expired-reset');
+    if (cancelBtn) {
+        cancelBtn.style.display = '';
+        cancelBtn.setAttribute('onclick', 'cancelAdminUnlockPasswordReset()');
+    }
+    if (typeof goToPage === 'function') goToPage('password-expired-reset');
     setTimeout(function () {
         var userEl = document.getElementById('expired-reset-username');
         var oldEl = document.getElementById('expired-reset-old-password');
@@ -486,16 +489,30 @@ function showAdminUnlockPasswordResetScreen(memberId, username) {
     }, 60);
 }
 
+
 function cancelAdminUnlockPasswordReset() {
+    var mid = window._adminUnlockMemberId;
     var oldWrap = document.getElementById('expired-reset-old-password-wrap');
     if (oldWrap) oldWrap.style.display = '';
     var cancelBtn = document.getElementById('password-reset-cancel-btn');
     if (cancelBtn) cancelBtn.style.display = 'none';
     window._passwordResetScreenMode = '';
     window._adminUnlockMemberId = null;
-    goToPage('manage-members');
-    if (typeof loadMembersAndRender === 'function') loadMembersAndRender();
+    // Re-lock if admin cancels without setting a temporary password.
+    if (mid && typeof apiRequest === 'function' && typeof API_BASE !== 'undefined') {
+        apiRequest(API_BASE + '/api/data/members/' + mid, {
+            method: 'PUT',
+            body: { id: mid, status: 'locked' }
+        }).catch(function () { /* best effort */ }).then(function () {
+            if (typeof loadMembersAndRender === 'function') loadMembersAndRender();
+        });
+    } else if (typeof loadMembersAndRender === 'function') {
+        loadMembersAndRender();
+    }
+    if (typeof goToPage === 'function') goToPage('manage-members');
 }
+
+
 
 function submitAdminUnlockPasswordReset() {
     var newEl = document.getElementById('expired-reset-new-password');
@@ -503,31 +520,31 @@ function submitAdminUnlockPasswordReset() {
     var newPassword = newEl ? String(newEl.value || '') : '';
     var confirmPassword = confEl ? String(confEl.value || '') : '';
     var memberId = window._adminUnlockMemberId;
-
+    var show = (typeof showAppModal === 'function') ? showAppModal : alert;
     if (!memberId) {
-        showAppModal('No unlocked member selected.', 'Set New Password');
+        show('No unlocked member selected.', 'Set Temporary Password');
         return;
     }
     if (!newPassword || !confirmPassword) {
-        showAppModal('Please fill all fields.', 'Set New Password');
+        show('Please fill all fields.', 'Set Temporary Password');
         return;
     }
     if (newPassword !== confirmPassword) {
-        showAppModal('New Password and Confirm Password do not match.', 'Set New Password');
+        show('New Password and Confirm Password do not match.', 'Set Temporary Password');
         return;
     }
-    var passwordError = getStrongPasswordError(newPassword);
-    if (passwordError) {
-        showAppModal(passwordError, 'Set New Password');
-        return;
+    if (typeof getStrongPasswordError === 'function') {
+        var passwordError = getStrongPasswordError(newPassword);
+        if (passwordError) {
+            show(passwordError, 'Set Temporary Password');
+            return;
+        }
     }
-
     var headers = { 'Content-Type': 'application/json' };
     if (window.currentUser && window.currentUser.role) headers['X-User-Role'] = window.currentUser.role;
     if (window.currentUser && window.currentUser.name) headers['X-User-Name'] = window.currentUser.name;
     if (window.currentUser && window.currentUser.username) headers['X-User-Username'] = window.currentUser.username;
-
-    fetch((API_BASE || '') + '/api/data/members/' + memberId + '/reset-password', {
+    fetch((typeof API_BASE !== 'undefined' ? API_BASE : '') + '/api/data/members/' + memberId + '/reset-password', {
         method: 'POST',
         headers: headers,
         body: JSON.stringify({ password: newPassword, confirmPassword: confirmPassword })
@@ -540,16 +557,17 @@ function submitAdminUnlockPasswordReset() {
             if (cancelBtn) cancelBtn.style.display = 'none';
             window._passwordResetScreenMode = '';
             window._adminUnlockMemberId = null;
-            showAppModal('Password set. The user can log in with the new password.', 'Set New Password');
+            show('Temporary password set. The user must change it on next login.', 'Set Temporary Password');
             if (typeof loadMembersAndRender === 'function') loadMembersAndRender();
-            goToPage('manage-members');
+            if (typeof goToPage === 'function') goToPage('manage-members');
         } else {
-            showAppModal((res.body && (res.body.error || res.body.message)) || 'Password reset failed.', 'Set New Password');
+            show((res.body && (res.body.error || res.body.message)) || 'Password reset failed.', 'Set Temporary Password');
         }
     }).catch(function (err) {
-        showAppModal('Password reset failed: ' + (err && err.message ? err.message : 'Network error'), 'Set New Password');
+        show('Password reset failed: ' + (err && err.message ? err.message : 'Network error'), 'Set Temporary Password');
     });
 }
+
 
 function _setPasswordResetCancelVisible(visible) {
     var cancelBtn = document.getElementById('password-reset-cancel-btn');
@@ -5346,7 +5364,7 @@ function unlockMember(id) {
                 if (typeof showAdminUnlockPasswordResetScreen === 'function') {
                     showAdminUnlockPasswordResetScreen(id, username);
                 } else {
-                    showAppModal('Account unlocked.', 'Unlock');
+                    
                 }
             })
             .catch(function (err) {

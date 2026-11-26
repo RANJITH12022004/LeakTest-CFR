@@ -1638,7 +1638,7 @@ def record_successful_login(username: str) -> Optional[Dict[str, Any]]:
 
 
 def unlock_member(member_id: int) -> Dict[str, Any]:
-    """Set member status to active and clear failed login attempts."""
+    """Reactivate a locked account; admin must then set a temporary password."""
     m = get_member(member_id)
     if not m:
         raise ValueError("Member not found")
@@ -1646,8 +1646,30 @@ def unlock_member(member_id: int) -> Dict[str, Any]:
         raise ValueError("The factory user cannot be modified.")
     m["status"] = "active"
     m["failedAttempts"] = 0
+    # Temp password + mustChangePassword are applied by reset-password after unlock.
     _save_member_record(m)
     return m
+
+
+def apply_admin_temporary_password(member_id: int, new_password: str) -> Dict[str, Any]:
+    """Set an admin temporary password and require the user to change it on next login."""
+    m = get_member(member_id)
+    if not m:
+        raise ValueError("Member not found")
+    if str(m.get("username", "")).strip().upper() == FACTORY_USERNAME.upper():
+        raise ValueError("The factory user cannot be modified.")
+    pwd = str(new_password or "")
+    if not pwd:
+        raise ValueError("New password is required.")
+    m["password"] = pwd
+    m["passwordLastChangedAt"] = datetime.utcnow().isoformat() + "Z"
+    m["status"] = "active"
+    m["failedAttempts"] = 0
+    m["mustChangePassword"] = True
+    _set_creation_password_commitment(m, pwd)
+    _save_member_record(m)
+    return m
+
 
 
 def disable_member(member_id: int) -> Dict[str, Any]:

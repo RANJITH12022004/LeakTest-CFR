@@ -2439,7 +2439,7 @@ def abort_report(report_id):
             gate = _require_session_internal("reports-view", "Forbidden.")
         if gate:
             return gate
-        if rtype not in ("test", "validation"):
+        if rtype not in ("test", "validation", "calibration"):
             return jsonify({"ok": False, "error": "Report type cannot be aborted"}), 400
         st = (report.get("reportApprovalStatus") or "").strip().lower()
         if st != "pending":
@@ -2762,6 +2762,82 @@ def unlock_member_route(member_id):
         app.logger.exception("Error unlocking member")
         return jsonify({"error": str(e)}), 500
 
+
+
+
+@app.route("/api/data/members/<int:member_id>/reset-password", methods=["POST"])
+def reset_member_password_route(member_id):
+    """Admin unlock follow-up: set a temporary password; user must change it on next login."""
+    try:
+        if "_require_any_session_internal" in globals():
+            gate = _require_any_session_internal(
+                ["user-unlock", "user-manage"],
+                "Forbidden. Password reset requires unlock or profile management permission.",
+            )
+            if gate:
+                return gate
+        elif not (_session_has_internal("user-unlock") or _session_has_internal("user-manage")):
+            return jsonify({"error": "Forbidden. Password reset requires unlock or profile management permission."}), 403
+        before_member = data_service.get_member(member_id)
+        if not before_member:
+            return jsonify({"error": "Member not found"}), 404
+        payload = request.get_json(force=True, silent=True) or {}
+        new_pwd = str(payload.get("password") or payload.get("newPassword") or "").strip()
+        confirm = str(payload.get("confirmPassword") or "").strip()
+        if not new_pwd:
+            return jsonify({"error": "New password is required."}), 400
+        if confirm and confirm != new_pwd:
+            return jsonify({"error": "Password and Confirm Password do not match."}), 400
+        pwd_err = _password_strength_error(new_pwd)
+        if pwd_err:
+            return jsonify({"error": pwd_err}), 400
+        if hasattr(data_service, "apply_admin_temporary_password"):
+            updated = data_service.apply_admin_temporary_password(member_id, new_pwd)
+        else:
+            update = dict(before_member)
+            update["id"] = member_id
+            update["password"] = new_pwd
+            update["mustChangePassword"] = True
+            update["failedAttempts"] = 0
+            update["status"] = "active"
+            cur = data_service.get_current_user() or {}
+            data_service.save_member(update, acting_user_id=cur.get("id"))
+            updated = data_service.get_member(member_id) or update
+            if hasattr(data_service, "_set_creation_password_commitment"):
+                m2 = data_service.get_member(member_id)
+                if m2:
+                    m2["mustChangePassword"] = True
+                    data_service._set_creation_password_commitment(m2, new_pwd)
+                    data_service._save_member_record(m2)
+                    updated = m2
+        uname = updated.get("username") or updated.get("name") or ""
+        cur = data_service.get_current_user() or {}
+        actor_name = (cur.get("username") or cur.get("name") or "").strip() or "--"
+        detail = "Temporary password set for {} by {} (user must change on next login)".format(uname, actor_name)
+        try:
+            if "_audit_event" in globals():
+                _audit_event(
+                    action="Password reset",
+                    outcome="success",
+                    entity_type="member",
+                    entity_id=member_id,
+                    entity_name=uname,
+                    details=detail,
+                    target_user=uname,
+                )
+            elif "_audit" in globals():
+                _audit(actor_name, cur.get("role"), "Password reset", detail)
+        except Exception:
+            app.logger.exception("audit temp password reset failed")
+        safe = data_service.sanitize_member_for_client(updated) if hasattr(data_service, "sanitize_member_for_client") else dict(updated)
+        if isinstance(safe, dict):
+            safe.pop("password", None)
+        return jsonify({"success": True, "member": safe, "mustChangePassword": True}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        app.logger.exception("Error resetting member password")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/data/members/<int:member_id>/enable", methods=["POST"])
 def enable_member_route(member_id):
@@ -3371,7 +3447,7 @@ def mandatory_password_reset():
             return jsonify({"ok": False, "error": "New password must be different from your current password."}), 400
         if data_service.new_password_matches_creation_commitment(member, new_password):
             return jsonify(
-                {"ok": False, "error": "New password must be different from the password set when your account was created."}
+                {"ok": False, "error": "New password must be different from the temporary password set by an administrator."}
             ), 400
         data_service.complete_mandatory_password_reset(username, new_password)
         data_service.record_successful_login(username)
