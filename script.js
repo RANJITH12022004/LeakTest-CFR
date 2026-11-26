@@ -1181,7 +1181,7 @@ function hasActiveReportApprovalGate() {
 function isReportPreviewNavigationLocked(preview) {
     // Hard lock only while a post-test approval gate is active (setGate after save).
     // Opening a pending report from Unapproved Reports must not trap the next user.
-    if (typeof isFactorySessionUser === 'function' && isFactorySessionUser()) return false;
+    // Factory also gets Approve later after calib/validation/test so the escape is always visible.
     if (!hasActiveReportApprovalGate()) return false;
     var p = preview || window._lastReportPreview || {};
     var reportTypeNorm = String(p.type || 'test').trim().toLowerCase();
