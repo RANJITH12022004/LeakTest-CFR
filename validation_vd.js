@@ -898,25 +898,29 @@
     function _startCalibrationHoldAfterTarget(run) {
         if (!run || run.phase !== 'evacuating') return;
         if (typeof clearPressureBuildWatchdog === 'function') clearPressureBuildWatchdog();
-        // Holding starts at TARGET_REACHED; after fixed 60 s open external-gauge popup.
+        // Holding starts at TARGET_REACHED; countdown 60→0, then external-gauge popup.
         run.phase = 'holding';
         _clearVacuumCalTimers();
         run.holdSec = 0;
+        run.holdRemainingSec = 60;
         run.holdStartedAtMs = Date.now();
         _setCalGaugeEntryEnabled(false);
         _setCalPrimaryControlRunning(true);
-        _setCalRunEl('cal-run-status', 'Target reached — holding 60 s…');
-        _setCalRunEl('cal-hold-elapsed', '00:00');
+        _setCalRunEl('cal-run-status', 'Target reached — hold countdown…');
+        _setCalRunEl('cal-hold-elapsed', (typeof formatMmSs === 'function') ? formatMmSs(60) : '01:00');
         var holdMs = parseInt(run.holdAfterTargetMs, 10);
         if (isNaN(holdMs) || holdMs < 1) holdMs = CALIB_HOLD_AFTER_TARGET_MS;
         window._vacuumCalHoldTick = setInterval(function () {
             if (!window._vacuumCalRun || window._vacuumCalRun !== run) return;
             if (run.phase !== 'holding') return;
             var elapsedMs = Date.now() - (run.holdStartedAtMs || Date.now());
-            run.holdSec = Math.min(60, Math.floor(elapsedMs / 1000));
+            var elapsedSec = Math.min(60, Math.floor(elapsedMs / 1000));
+            var remainingSec = Math.max(0, 60 - elapsedSec);
+            run.holdSec = elapsedSec;
+            run.holdRemainingSec = remainingSec;
             _setCalRunEl(
                 'cal-hold-elapsed',
-                (typeof formatMmSs === 'function') ? formatMmSs(run.holdSec) : String(run.holdSec)
+                (typeof formatMmSs === 'function') ? formatMmSs(remainingSec) : String(remainingSec)
             );
         }, 200);
         window._vacuumCalHoldTimer = setTimeout(function () {
@@ -928,7 +932,8 @@
             if (!window._vacuumCalRun || window._vacuumCalRun !== run) return;
             if (run.phase !== 'holding') return;
             run.holdSec = 60;
-            _setCalRunEl('cal-hold-elapsed', (typeof formatMmSs === 'function') ? formatMmSs(60) : '60');
+            run.holdRemainingSec = 0;
+            _setCalRunEl('cal-hold-elapsed', (typeof formatMmSs === 'function') ? formatMmSs(0) : '00:00');
             run.phase = 'prompt';
             _setCalPrimaryControlRunning(true);
             _openCalibrationGaugeModal(run);
@@ -1433,7 +1438,7 @@
         _setCalRunEl('cal-set-vacuum', String(settings.targetVacuumMmHg));
         _setCalRunEl('cal-live-vacuum', '--');
         _setCalRunEl('cal-release-time', String(settings.releaseTimeSec));
-        _setCalRunEl('cal-hold-elapsed', '00:00');
+        _setCalRunEl('cal-hold-elapsed', (typeof formatMmSs === 'function') ? formatMmSs(60) : '01:00');
         _setCalRunEl('cal-run-status', 'Ready to start');
         _setCalPrimaryControlRunning(false);
     }
